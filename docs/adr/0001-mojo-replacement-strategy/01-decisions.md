@@ -31,7 +31,13 @@ fastapi_mojo 的目标是用 Mojo 实现一套 FastAPI。当前 baseline 是"Moj
 - **C4（已决策-8）**：Mojo 构造 Request 注解 handler（builtins.exec + 命名空间注入）
 - **C5（已决策-9，阻塞）**：Mojo 1.0.0 无 `std.http`/`std.socket`/`std.net`，无法原生实现 HTTP 服务器
 
-### 2.3 关键技术约束
+### 2.3 项目本标（ADR-0002）
+
+> 🎯 部署形态约束：最终用 Mojo 编译成**单一 Binary，零外部依赖**。
+> 本 ADR 的所有替换步骤最终服务于此目标；C5/C6 因此从「可延后」升级为**关键路径**。
+> 详见 `docs/adr/0002-single-binary-deployment/` 与 `AGENTS.md` §1。
+
+### 2.4 关键技术约束
 
 1. Mojo 函数不能直接作为 Python callable（`PythonObject(mojo_handler)` 编译失败）
 2. FastAPI 对返回 str 的 handler 二次序列化（带转义引号），对 dict/Response 原样返回

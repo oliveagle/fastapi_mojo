@@ -3,6 +3,8 @@
     {"name": "get_root_10k_100c", "url": "http://127.0.0.1:8000/", "n": 10000, "c": 100},
     {"name": "get_root_50k_500c", "url": "http://127.0.0.1:8000/", "n": 50000, "c": 500},
     {"name": "get_root_100k_200c", "url": "http://127.0.0.1:8000/", "n": 100000, "c": 200},
-    {"name": "get_hello_10k_100c", "url": "http://127.0.0.1:8000/hello?name=Mojo", "n": 10000, "c": 100}
+    {"name": "get_hello_10k_100c", "url": "http://127.0.0.1:8000/hello?name=Mojo", "n": 10000, "c": 100},
+    {"name": "post_items_10k_100c", "url": "http://127.0.0.1:8000/items", "n": 10000, "c": 100, "method": "POST", "data": "{\"item\": \"benchmark\"}"},
+    {"name": "get_items_42_10k_100c", "url": "http://127.0.0.1:8000/items/42", "n": 10000, "c": 100}
   ]
 }

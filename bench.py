@@ -218,9 +218,12 @@ class Server:
 # ---------------------------------------------------------------------------
 # hey 执行与 csv 解析
 # ---------------------------------------------------------------------------
-def run_hey(hey_bin, url, n, c, timeout_ms=600000):
+def run_hey(hey_bin, url, n, c, timeout_ms=600000, method="GET", data=None):
     """运行 hey，返回逐请求 csv 行（dict 列表）。"""
-    cmd = [hey_bin, "-n", str(n), "-c", str(c), "-o", "csv", url]
+    cmd = [hey_bin, "-n", str(n), "-c", str(c), "-o", "csv"]
+    if method == "POST" and data:
+        cmd.extend(["-m", "POST", "-d", data])
+    cmd.append(url)
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_ms)
     if proc.returncode != 0:
         raise RuntimeError(f"hey 失败: {proc.stderr[:500]}")
@@ -388,7 +391,9 @@ def main():
         for sc in scenarios:
             print(f"[bench] 场景 {sc['name']}: {sc['n']} 请求 / 并发 {sc['c']} ...",
                   file=sys.stderr)
-            rows = run_hey(args.hey, sc["url"], sc["n"], sc["c"])
+            method = sc.get("method", "GET")
+            data = sc.get("data", None)
+            rows = run_hey(args.hey, sc["url"], sc["n"], sc["c"], method=method, data=data)
             summary = summarize(rows, sc["n"], sc["c"], sc["url"])
             summary["name"] = sc["name"]
             results.append(summary)

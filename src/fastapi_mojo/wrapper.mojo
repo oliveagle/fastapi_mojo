@@ -241,6 +241,43 @@ struct FastAPIWrapper:
         var handler = ns["_h"]
         self.add_route(path, method, handler)
 
+    def register_path_multi(
+        mut self,
+        path: String,
+        method: String,
+        param_names: String,
+        message_template: String,
+    ) raises:
+        """注册一个从多个 Path 参数取值的 handler。
+
+        例：app.register_path_multi("/users/{user_id}/items/{item_id}", "get",
+                "user_id,item_id", "User {user_id} Item {item_id}")
+        """
+        # 解析参数名列表
+        var params = param_names.split(",")
+        # 构造替换表达式
+        var replace_expr = "message_template"
+        for i in range(len(params)):
+            var param = params[i].strip()
+            replace_expr = (
+                replace_expr + ".replace('{" + param + "}', "
+                + "str(request.path_params.get('" + param + "', '')))"
+            )
+        # 构造 handler 源码
+        var code = (
+            "def _h(request: Request):\n"
+            "    message_template = '" + message_template + "'\n"
+            "    return {'message': " + replace_expr + "}\n"
+        )
+        var builtins = Python.import_module("builtins")
+        var ns = Python.evaluate("dict()")
+        # 用 fastapi.Request 类注入命名空间，handler 参数注解才能被 FastAPI 识别
+        var fastapi = Python.import_module("fastapi")
+        ns["Request"] = fastapi.Request
+        builtins.exec(code, ns)
+        var handler = ns["_h"]
+        self.add_route(path, method, handler)
+
     def register_body(
         mut self,
         path: String,
@@ -268,3 +305,106 @@ struct FastAPIWrapper:
         builtins.exec(code, ns)
         var handler = ns["_h"]
         self.add_route(path, method, handler)
+
+    def register_body_validated(
+        mut self,
+        path: String,
+        method: String,
+        required_fields: String,
+        message_template: String,
+    ) raises:
+        """注册一个带 Body 参数验证的 handler。
+
+        例：app.register_body_validated("/items", "post", "name,price",
+                "Created item with name={name} and price={price}")
+        """
+        # 解析必填字段列表
+        var fields = required_fields.split(",")
+        # 构造验证逻辑
+        var validation_code = "    body = await request.json()\n"
+        validation_code += "    missing = []\n"
+        for i in range(len(fields)):
+            var field = fields[i].strip()
+            validation_code += (
+                "    if '" + field + "' not in body:\n"
+                "        missing.append('" + field + "')\n"
+            )
+        validation_code += "    if missing:\n"
+        validation_code += (
+            "        from fastapi import HTTPException\n"
+            "        raise HTTPException(status_code=422, "
+            "detail=f'Missing required fields: {missing}')\n"
+        )
+        # 构造返回表达式
+        var return_expr = "message_template"
+        for i in range(len(fields)):
+            var field = fields[i].strip()
+            return_expr = (
+                return_expr + ".replace('{" + field + "}', "
+                + "str(body.get('" + field + "', '')))"
+            )
+        # 构造 handler 源码
+        var code = (
+            "async def _h(request: Request):\n"
+            + validation_code
+            + "    message_template = '" + message_template + "'\n"
+            + "    return {'message': " + return_expr + "}\n"
+        )
+        var builtins = Python.import_module("builtins")
+        var ns = Python.evaluate("dict()")
+        # 用 fastapi.Request 类注入命名空间，handler 参数注解才能被 FastAPI 识别
+        var fastapi = Python.import_module("fastapi")
+        ns["Request"] = fastapi.Request
+        builtins.exec(code, ns)
+        var handler = ns["_h"]
+        self.add_route(path, method, handler)
+
+    # -- Mojo 错误处理（已决策-12：异常→JSON 响应）-------------------------
+    # Mojo 构造异常处理器，所有异常返回 JSON 响应（orjson 序列化）。
+    def register_exception_handlers(mut self) raises:
+        """注册全局异常处理器：404 + 500 → JSON 响应。"""
+        var orjson = Python.import_module("orjson")
+        var fastapi = Python.import_module("fastapi")
+        var responses = Python.import_module("fastapi.responses")
+        var JSONResponse = responses.JSONResponse
+
+        # 404 处理器
+        var code_404 = (
+            "def _handler_404(request, exc):\n"
+            "    import orjson\n"
+            "    body = orjson.dumps({'detail': 'Not Found'})\n"
+            "    return orjson.loads(body)\n"
+        )
+        var ns_404 = Python.evaluate("dict()")
+        ns_404["JSONResponse"] = JSONResponse
+        var builtins = Python.import_module("builtins")
+        builtins.exec(code_404, ns_404)
+
+        # 500 处理器
+        var code_500 = (
+            "def _handler_500(request, exc):\n"
+            "    import orjson\n"
+            "    body = orjson.dumps({'detail': 'Internal Server Error'})\n"
+            "    return orjson.loads(body)\n"
+        )
+        var ns_500 = Python.evaluate("dict()")
+        ns_500["JSONResponse"] = JSONResponse
+        builtins.exec(code_500, ns_500)
+
+        # 通用异常处理器
+        var code_generic = (
+            "def _handler_generic(request, exc):\n"
+            "    import orjson\n"
+            "    body = orjson.dumps({'detail': str(exc)})\n"
+            "    return orjson.loads(body)\n"
+        )
+        var ns_generic = Python.evaluate("dict()")
+        ns_generic["JSONResponse"] = JSONResponse
+        builtins.exec(code_generic, ns_generic)
+
+        # 注册到 FastAPI 应用
+        self._app.add_exception_handler(404, ns_404["_handler_404"])
+        self._app.add_exception_handler(500, ns_500["_handler_500"])
+        var py_builtins = Python.import_module("builtins")
+        var py_Exception = py_builtins.Exception
+        self._app.add_exception_handler(py_Exception, ns_generic["_handler_generic"])

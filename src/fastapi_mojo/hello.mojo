@@ -49,15 +49,48 @@ def main() raises:
         "Created {item} from Mojo-parsed body",
     )
 
-    # 6. 批量注册 Mojo 路由表到 FastAPI（C3）
+    # 6. 注册 GET /users/{user_id}/items/{item_id}：带多 Path 参数的 handler（C4 深化）
+    #    Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成
+    app.register_path_multi(
+        "/users/{user_id}/items/{item_id}", "get",
+        "user_id,item_id",
+        "User {user_id} Item {item_id}",
+    )
+
+    # 7. 注册 PUT /items/{item_id}：带 Path + Body 参数的 handler（POST/PUT/DELETE 支持）
+    #    Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成
+    app.register_path(
+        "/items/{item_id}", "put", "item_id",
+        "Updated item {item_id}",
+    )
+
+    # 8. 注册 DELETE /items/{item_id}：带 Path 参数的 handler（POST/PUT/DELETE 支持）
+    #    Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成
+    app.register_path(
+        "/items/{item_id}", "delete", "item_id",
+        "Deleted item {item_id}",
+    )
+
+    # 9. 注册 POST /items/validated：带 Body 参数验证的 handler（Body 参数验证）
+    #    Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成
+    app.register_body_validated(
+        "/items/validated", "post", "name,price",
+        "Created item with name={name} and price={price}",
+    )
+
+    # 10. 批量注册 Mojo 路由表到 FastAPI（C3）
     print(t"Mojo 路由表: {app.route_count()} 条路由")
     app.register_all()
 
-    # 7. 用 uvicorn 把 app 跑起来（uvicorn 也是 Python 侧的东西）
+    # 7. 注册全局异常处理器（已决策-12：异常→JSON 响应）
+    app.register_exception_handlers()
+
+    # 8. 用 uvicorn 把 app 跑起来（uvicorn 也是 Python 侧的东西）
     var uvicorn = Python.import_module("uvicorn")
     print("FastAPI (via Mojo wrapper) listening on http://127.0.0.1:8000")
     print("Try:  curl http://127.0.0.1:8000/")
     print("Try:  curl 'http://127.0.0.1:8000/hello?name=Mojo'")
     print("Try:  curl http://127.0.0.1:8000/items/42")
     print("Try:  curl -X POST http://127.0.0.1:8000/items -H 'Content-Type: application/json' -d '{\"item\": \"test\"}'")
+    print("Try:  curl http://127.0.0.1:8000/nonexistent  # 测试 404")
     uvicorn.run(app.app(), host="127.0.0.1", port=8000)
