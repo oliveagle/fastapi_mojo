@@ -371,6 +371,9 @@ def main():
     if args.scenarios:
         with open(args.scenarios) as f:
             scenarios = json.load(f)
+        # 兼容 {"scenarios": [...]} 与纯列表两种格式
+        if isinstance(scenarios, dict):
+            scenarios = scenarios["scenarios"]
     else:
         scenarios = DEFAULT_SCENARIOS
 
