@@ -213,3 +213,58 @@ struct FastAPIWrapper:
         builtins.exec(code, ns)
         var handler = ns["_h"]
         self.add_route(path, method, handler)
+
+    def register_path(
+        mut self,
+        path: String,
+        method: String,
+        param_name: String,
+        message_template: String,
+    ) raises:
+        """注册一个从 Path 参数取值的 handler。
+
+        例：app.register_path("/items/{item_id}", "get", "item_id",
+                "Item {item_id} from Mojo-parsed path")
+        """
+        # Mojo 构造带 Request 注解的 handler 源码（参数解析逻辑 Mojo 生成）
+        var code = (
+            "def _h(request: Request):\n"
+            "    return {'message': '" + message_template + "'.replace('{item_id}', "
+            "str(request.path_params.get('" + param_name + "', '')))}\n"
+        )
+        var builtins = Python.import_module("builtins")
+        var ns = Python.evaluate("dict()")
+        # 用 fastapi.Request 类注入命名空间，handler 参数注解才能被 FastAPI 识别
+        var fastapi = Python.import_module("fastapi")
+        ns["Request"] = fastapi.Request
+        builtins.exec(code, ns)
+        var handler = ns["_h"]
+        self.add_route(path, method, handler)
+
+    def register_body(
+        mut self,
+        path: String,
+        method: String,
+        param_name: String,
+        message_template: String,
+    ) raises:
+        """注册一个从 Body 参数取值的 handler。
+
+        例：app.register_body("/items", "post", "item",
+                "Created {item} from Mojo-parsed body")
+        """
+        # Mojo 构造带 Request 注解的 handler 源码（参数解析逻辑 Mojo 生成）
+        var code = (
+            "def _h(request: Request):\n"
+            "    body = request.json()\n"
+            "    return {'message': '" + message_template + "'.replace('{item}', "
+            "str(body.get('" + param_name + "', '')))}\n"
+        )
+        var builtins = Python.import_module("builtins")
+        var ns = Python.evaluate("dict()")
+        # 用 fastapi.Request 类注入命名空间，handler 参数注解才能被 FastAPI 识别
+        var fastapi = Python.import_module("fastapi")
+        ns["Request"] = fastapi.Request
+        builtins.exec(code, ns)
+        var handler = ns["_h"]
+        self.add_route(path, method, handler)

@@ -35,13 +35,29 @@ def main() raises:
         "Hello {name} from Mojo-parsed query",
     )
 
-    # 4. 批量注册 Mojo 路由表到 FastAPI（C3）
+    # 4. 注册 GET /items/{item_id}：带 Path 参数的 handler（C4）
+    #    Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成
+    app.register_path(
+        "/items/{item_id}", "get", "item_id",
+        "Item {item_id} from Mojo-parsed path",
+    )
+
+    # 5. 注册 POST /items：带 Body 参数的 handler（C4）
+    #    Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成
+    app.register_body(
+        "/items", "post", "item",
+        "Created {item} from Mojo-parsed body",
+    )
+
+    # 6. 批量注册 Mojo 路由表到 FastAPI（C3）
     print(t"Mojo 路由表: {app.route_count()} 条路由")
     app.register_all()
 
-    # 5. 用 uvicorn 把 app 跑起来（uvicorn 也是 Python 侧的东西）
+    # 7. 用 uvicorn 把 app 跑起来（uvicorn 也是 Python 侧的东西）
     var uvicorn = Python.import_module("uvicorn")
     print("FastAPI (via Mojo wrapper) listening on http://127.0.0.1:8000")
     print("Try:  curl http://127.0.0.1:8000/")
     print("Try:  curl 'http://127.0.0.1:8000/hello?name=Mojo'")
+    print("Try:  curl http://127.0.0.1:8000/items/42")
+    print("Try:  curl -X POST http://127.0.0.1:8000/items -H 'Content-Type: application/json' -d '{\"item\": \"test\"}'")
     uvicorn.run(app.app(), host="127.0.0.1", port=8000)
