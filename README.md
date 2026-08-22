@@ -45,15 +45,19 @@ curl "http://127.0.0.1:8000/hello?name=Mojo"
 # http://127.0.0.1:8000/docs
 ```
 
-## Benchmark（代码化）
+## Benchmark（代码化 + SQLite 长期跟踪）
 
-统一压测入口：`bench.py` 自动完成「启动服务器 → 预热 → 跑场景 → 解析 hey csv → 输出统一 JSON + Markdown 报告」。
+统一压测入口：`bench.py` 自动完成「启动服务器 → 预热 → 跑场景 → 解析 hey csv → 写入 SQLite → 输出统一 JSON + Markdown 报告」。**所有压测必须通过此脚本运行，禁止手写压测。**
 
 ```bash
 # 依赖：hey（go install github.com/rakyll/hey@latest 或下载二进制放入 PATH）
 
-# 完整跑一遍（默认 4 个场景，约 1 分钟）
+# 完整跑一遍（默认 4 个场景，约 1 分钟）——自动记录到 Documents/benchmark.db
 python3 bench.py --json Documents/benchmark-results.json --report Documents/Benchmark-Baseline.md
+
+# 查看历史记录（长期跟踪）
+python3 bench.py --history
+python3 bench.py --history --limit 5
 
 # 服务器已在运行时跳过启停
 python3 bench.py --no-server --json out.json
@@ -63,10 +67,11 @@ python3 bench.py --scenarios my-scenarios.json --json out.json
 ```
 
 输出：
-- **JSON**（`Documents/benchmark-results.json`）：统一数据格式，含环境信息、commit、每个场景的吞吐/延迟分位/错误数，供程序化对比；
+- **SQLite**（`Documents/benchmark.db`，随 Git 持续跟踪）：每次运行自动写入 `runs` + `scenarios` 两张表，含环境信息、commit、每个场景的吞吐/延迟分位/错误数，可长期对比趋势；
+- **JSON**（`Documents/benchmark-results.json`）：本次运行快照，统一数据格式；
 - **Markdown**（`Documents/Benchmark-Baseline.md`）：由同一份 JSON 自动渲染，格式统一。
 
-每次迭代跑同一命令即可得到同构数据，直接对比吞吐与延迟。
+每次迭代跑同一命令即可得到同构数据，直接对比吞吐与延迟；`--history` 可查看历次记录。
 
 ## wrapper 设计（当前阶段）
 
