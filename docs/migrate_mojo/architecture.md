@@ -76,6 +76,8 @@ var json_str = '{"message": "' + msg + '"}'
 
 > 📌 **引用决议**: ✅ 已决策-5（C1 方案 A：Mojo 生成 lambda 源码）— handler 业务逻辑由 Mojo 构造 lambda 字符串，Python 只做执行壳。详见 `docs/migrate_mojo/todo.md` #5。
 
+> 📌 **引用决议**: ✅ 已决策-6（C2 方案 A：Mojo 构造 JSON + Response 包装）— Mojo 拼接 JSON 字符串，handler 返回 Response 对象，FastAPI 原样返回不二次序列化。详见 `docs/migrate_mojo/todo.md` #6。
+
 ## 5. 约束边界
 
 ### 5.1 架构隔离约束声明
@@ -100,3 +102,4 @@ var json_str = '{"message": "' + msg + '"}'
 | 2026-08-22 | **handler 返回 dict 而非 str** — FastAPI 对 str 二次序列化，对 dict 输出纯 JSON。详见 `docs/migrate_mojo/todo.md` #3 | oliveagle | ✅ 已决策-3 |
 | 2026-08-22 | **替换顺序 C1→C2→C3→C4→C5→C6** — 从容易到难，每步保持可运行、可 benchmark 对比。详见 `docs/migrate_mojo/todo.md` #4 | oliveagle | ✅ 已决策-4 |
 | 2026-08-22 | **C1 方案 A：Mojo 生成 lambda 源码** — handler 业务逻辑由 Mojo 构造 lambda 字符串，Python 只做执行壳。详见 `docs/migrate_mojo/todo.md` #5 | oliveagle | ✅ 已决策-5 |
+| 2026-08-22 | **C2 方案 A：Mojo 构造 JSON + Response 包装** — Mojo 拼接 JSON 字符串，handler 返回 Response 对象，FastAPI 原样返回不二次序列化。详见 `docs/migrate_mojo/todo.md` #6 | oliveagle | ✅ 已决策-6 |

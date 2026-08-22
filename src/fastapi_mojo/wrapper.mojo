@@ -80,3 +80,23 @@ struct FastAPIWrapper:
         """
         var lambda_src = "lambda: {'message': '" + message + "'}"
         self.register_handler(path, method, lambda_src)
+
+    # -- Mojo 序列化（已决策-6：C2 方案 A）--------------------------------
+    # Mojo 拼接 JSON 字符串，handler 返回 Response(content=json_str)，
+    # FastAPI 对 Response 对象原样返回，不二次序列化。
+    def json_response(self, json_str: String) -> PythonObject:
+        """构造 FastAPI Response 对象（content=json_str, media_type=application/json）。"""
+        var responses = Python.import_module("fastapi.responses")
+        return responses.Response(content=json_str, media_type="application/json")
+
+    def register_json(self, path: String, method: String, json_str: String) raises:
+        """注册一个返回 Mojo 构造 JSON 字符串的 handler。
+
+        例：app.register_json("/", "get", '{"message": "Hello from Mojo"}')
+        """
+        # Mojo 构造 lambda 源码：返回 Response(content=<json_str>)
+        var lambda_src = (
+            "lambda: __import__('fastapi').responses.Response("
+            "content='" + json_str + "', media_type='application/json')"
+        )
+        self.register_handler(path, method, lambda_src)

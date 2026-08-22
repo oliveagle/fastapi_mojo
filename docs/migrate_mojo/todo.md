@@ -12,6 +12,7 @@
 | 3 | **handler 返回 dict 而非 str** | FastAPI 对 str 会二次序列化（带转义引号），对 dict 输出纯 JSON。Mojo 侧构造 dict（PythonObject）作为 handler 返回值。 | fastapi_mojo + 小 |
 | 4 | **替换顺序 C1→C2→C3→C4→C5→C6** | 从容易到难：handler → 序列化 → 路由表 → 参数解析 → HTTP 服务器 → ASGI。每步保持可运行、可 benchmark 对比。 | fastapi_mojo + 中 |
 | 5 | **C1 方案 A：Mojo 生成 lambda 源码** | handler 业务逻辑由 Mojo 构造 lambda 字符串（含业务数据），`Python.evaluate` 执行，Python 只做执行壳。已验证可行。 | fastapi_mojo + 小 |
+| 6 | **C2 方案 A：Mojo 构造 JSON + Response 包装** | Mojo 拼接 JSON 字符串，handler 返回 `Response(content=json_str, media_type='application/json')`，FastAPI 原样返回不二次序列化。已验证可行。 | fastapi_mojo + 小 |
 
 ## 🚧 改造
 

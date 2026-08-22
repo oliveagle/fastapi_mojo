@@ -20,8 +20,10 @@ def main() raises:
     var app = FastAPIWrapper()
 
     # 2. 注册 GET /：handler 由 Mojo 构造 lambda 源码（业务数据在 Mojo 侧）
+    #    C2：Mojo 拼接 JSON 字符串，返回 Response 对象（FastAPI 原样返回）
     var hello_msg = "Hello World from FastAPI (called via Mojo wrapper)"
-    app.register_message("/", "get", hello_msg)
+    var hello_json = '{"message": "' + hello_msg + '", "serialized_by": "mojo"}'
+    app.register_json("/", "get", hello_json)
 
     # 3. 注册 GET /hello?name=...：带 Query 参数的 handler
     #    Mojo 构造 lambda 源码，业务逻辑（默认值、拼接）由 Mojo 控制
