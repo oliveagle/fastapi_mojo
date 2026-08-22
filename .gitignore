@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .beads/
 .venv/
+build/
+*.so
+*_test
+*_rpath
+*_rpath_only
