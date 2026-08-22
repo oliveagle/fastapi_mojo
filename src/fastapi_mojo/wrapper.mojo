@@ -143,3 +143,33 @@ struct FastAPIWrapper:
             "content='" + json_str + "', media_type='application/json')"
         )
         self.register_handler(path, method, lambda_src)
+
+    # -- Mojo 参数解析（已决策-8：C4 方案 A）------------------------------
+    # Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成。
+    def register_query(
+        mut self,
+        path: String,
+        method: String,
+        param_name: String,
+        default: String,
+        message_template: String,
+    ) raises:
+        """注册一个从 Query 参数取值的 handler。
+
+        例：app.register_query("/hello", "get", "name", "World",
+                "Hello {name} from Mojo-parsed query")
+        """
+        # Mojo 构造带 Request 注解的 handler 源码（参数解析逻辑 Mojo 生成）
+        var code = (
+            "def _h(request: Request):\n"
+            "    return {'message': '" + message_template + "'.replace('{name}', "
+            "request.query_params.get('" + param_name + "', '" + default + "'))}\n"
+        )
+        var builtins = Python.import_module("builtins")
+        var ns = Python.evaluate("dict()")
+        # 用 fastapi.Request 类注入命名空间，handler 参数注解才能被 FastAPI 识别
+        var fastapi = Python.import_module("fastapi")
+        ns["Request"] = fastapi.Request
+        builtins.exec(code, ns)
+        var handler = ns["_h"]
+        self.add_route(path, method, handler)

@@ -26,10 +26,12 @@ def main() raises:
     var hello_json = '{"message": "' + hello_msg + '", "serialized_by": "mojo"}'
     app.register_json("/", "get", hello_json)
 
-    # 3. 注册 GET /hello?name=...：带 Query 参数的 handler
-    #    Mojo 构造 lambda 源码，业务逻辑（默认值、拼接）由 Mojo 控制
-    var greet_src = "lambda name='World': {'message': f'Hello {name} from FastAPI via Mojo'}"
-    app.register_handler("/hello", "get", greet_src)
+    # 3. 注册 GET /hello?name=...：带 Query 参数的 handler（C4）
+    #    Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成
+    app.register_query(
+        "/hello", "get", "name", "World",
+        "Hello {name} from Mojo-parsed query",
+    )
 
     # 4. 批量注册 Mojo 路由表到 FastAPI（C3）
     print(t"Mojo 路由表: {app.route_count()} 条路由")
