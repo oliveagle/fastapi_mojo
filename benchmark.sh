@@ -12,6 +12,7 @@
 #   ./benchmark.sh --history     # 查看历史记录
 #
 # 依赖：python3、hey（PATH 中）、mojo（PATH 中）
+# Python 环境：优先使用仓库 .venv（若存在），否则用系统 python3
 
 set -euo pipefail
 
@@ -24,14 +25,20 @@ JSON_OUT="docs/reports/auto/benchmark-results.json"
 REPORT_OUT="docs/reports/auto/Benchmark-Baseline.md"
 SCENARIOS="benchmark-scenarios.json"
 
+# 选择 Python 解释器：优先 .venv，否则系统 python3
+PYTHON_BIN="python3"
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+    PYTHON_BIN="$ROOT/.venv/bin/python"
+fi
+
 # 前置检查
-command -v python3 >/dev/null || { echo "缺少 python3"; exit 1; }
+command -v "$PYTHON_BIN" >/dev/null || { echo "缺少 python3"; exit 1; }
 command -v hey >/dev/null || { echo "缺少 hey（go install github.com/rakyll/hey@latest）"; exit 1; }
 command -v mojo >/dev/null || { echo "缺少 mojo"; exit 1; }
 
 # --history 直接透传
 if [[ "${1:-}" == "--history" ]]; then
-    python3 bench.py --history "${@:2}"
+    "$PYTHON_BIN" bench.py --history "${@:2}"
     exit 0
 fi
 
@@ -40,9 +47,10 @@ echo " FastAPI-Mojo Benchmark（固定姿势）"
 echo " 场景配置 : $SCENARIOS"
 echo " SQLite   : docs/reports/auto/benchmark.db"
 echo " 报告     : $REPORT_OUT"
+echo " Python   : $PYTHON_BIN"
 echo "=============================================="
 
-python3 bench.py \
+"$PYTHON_BIN" bench.py \
     --scenarios "$SCENARIOS" \
     --json "$JSON_OUT" \
     --report "$REPORT_OUT" \

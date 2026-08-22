@@ -15,6 +15,28 @@ from std.python import Python
 from std.python import PythonObject
 
 
+# -- .venv 自动发现（已决策-11）-------------------------------------------
+# Mojo 用的是系统 Python，为避免污染系统环境，自动把仓库 .venv 的
+# site-packages 插到 sys.path[0]，优先于系统包。
+def init_python_path() raises:
+    """把 .venv/lib/python3.12/site-packages 加入 sys.path[0]（若存在）。"""
+    var sys = Python.import_module("sys")
+    var os = Python.import_module("os")
+    # 候选路径（相对于当前文件：src/fastapi_mojo/wrapper.mojo → repo root/.venv）
+    var candidates = List[String]()
+    candidates.append(".venv/lib/python3.12/site-packages")
+    candidates.append("../.venv/lib/python3.12/site-packages")
+    candidates.append("../../.venv/lib/python3.12/site-packages")
+    for i in range(len(candidates)):
+        var p = candidates[i]
+        if os.path.exists(p):
+            # 绝对化并插到 sys.path 最前
+            sys.path.insert(0, os.path.abspath(p))
+            print(t"[wrapper] using venv: {p}")
+            return
+    print("[wrapper] no .venv found, using system Python")
+
+
 struct Route:
     """Mojo 侧路由表条目（已决策-7：C3 方案 A）。
 
@@ -44,6 +66,8 @@ struct FastAPIWrapper:
 
     def __init__(out self) raises:
         """创建底层 fastapi.FastAPI() 实例。"""
+        # 先初始化 .venv 路径（已决策-11），再导入 fastapi
+        init_python_path()
         var py_fastapi = Python.import_module("fastapi")
         self._app = py_fastapi.FastAPI()
         self._routes = List[Route]()
@@ -124,9 +148,14 @@ struct FastAPIWrapper:
         var lambda_src = "lambda: {'message': '" + message + "'}"
         self.register_handler(path, method, lambda_src)
 
-    # -- Mojo 序列化（已决策-6：C2 方案 A）--------------------------------
-    # Mojo 拼接 JSON 字符串，handler 返回 Response(content=json_str)，
-    # FastAPI 对 Response 对象原样返回，不二次序列化。
+    # -- Mojo 序列化（已决策-6 + 已决策-10：包 orjson 不自造）--------------
+    # JSON 序列化直接用 orjson（Rust 实现，~8M ops/s），Mojo 只负责构造 dict。
+    def orjson_dumps(self, data: PythonObject) raises -> String:
+        """调用 orjson.dumps(data).decode()，返回 JSON 字符串。"""
+        var orjson = Python.import_module("orjson")
+        var bytes_obj = orjson.dumps(data)
+        return String(bytes_obj.decode())
+
     def json_response(self, json_str: String) -> PythonObject:
         """构造 FastAPI Response 对象（content=json_str, media_type=application/json）。"""
         var responses = Python.import_module("fastapi.responses")
@@ -143,6 +172,17 @@ struct FastAPIWrapper:
             "content='" + json_str + "', media_type='application/json')"
         )
         self.register_handler(path, method, lambda_src)
+
+    def register_dict(mut self, path: String, method: String, data: PythonObject) raises:
+        """注册一个 handler：Mojo 构造 dict，用 orjson 序列化（已决策-10）。
+
+        例：
+            var data = Python.evaluate("dict")
+            data["message"] = "Hello from orjson"
+            app.register_dict("/", "get", data)
+        """
+        var json_str = self.orjson_dumps(data)
+        self.register_json(path, method, json_str)
 
     # -- Mojo 参数解析（已决策-8：C4 方案 A）------------------------------
     # Mojo 构造带 Request 注解的 handler，参数解析逻辑由 Mojo 生成。

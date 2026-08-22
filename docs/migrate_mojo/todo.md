@@ -16,6 +16,8 @@
 | 7 | **C3 方案 A：Mojo 路由表 + 批量注册** | wrapper 增加 `Route` struct + `add_route(path, method, handler)` + `register_all()`，Mojo 侧集中管理路由，启动时批量注册到 FastAPI。已验证可行。 | fastapi_mojo + 中 |
 | 8 | **C4 方案 A：Mojo 构造 Request 注入 handler** | wrapper 增加 `register_query(path, method, param_name, default)`，Mojo 构造带 `request: Request` 注解的 handler 源码，参数解析逻辑由 Mojo 生成。已验证可行。 | fastapi_mojo + 中 |
 | 9 | **C5 阻塞：Mojo 1.0.0 无网络模块** | 验证结论：`std.http` / `std.socket` / `std.net` 均不存在，Mojo 1.0.0 标准库无法原生实现 HTTP 服务器。C5（替代 uvicorn）需等待 Mojo 标准库支持网络，或改用 Python socket 桥接（非纯 Mojo 替换）。 | fastapi_mojo + 阻塞 |
+| 10 | **C2-改：直接包 orjson 替代自造 JSON 序列化** | 不自造 JSON 序列化逻辑（转义、嵌套、类型转换），直接用现成的 orjson（Rust 实现，~8M ops/s，比 stdlib json 快 10x）。Mojo 侧只调 `orjson.dumps(dict)`。 | fastapi_mojo + 小 |
+| 11 | **环境隔离：使用仓库 .venv 不污染系统** | Python 依赖装在 `.venv`（已 gitignore），不污染系统 Python。Mojo 通过 `sys.path.insert(0, .venv site-packages)` 自动使用 .venv。 | fastapi_mojo + 小 |
 
 ## 🚧 改造
 
