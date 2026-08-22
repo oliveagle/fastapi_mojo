@@ -7,7 +7,7 @@ bench.py — 统一的 FastAPI-Mojo benchmark runner（唯一入口，禁止手�
   2. 预热
   3. 按场景配置跑 hey 压测（csv 逐请求输出）
   4. 解析 csv，计算统一统计量（吞吐、延迟分位、错误数等）
-  5. 每次运行自动写入 SQLite（Documents/benchmark.db）长期跟踪
+  5. 每次运行自动写入 SQLite（docs/reports/auto/benchmark.db）长期跟踪
   6. 输出统一格式 JSON（--json 指定路径，默认 stdout）
   7. 可选：由 JSON 生成统一格式 Markdown 报告（--report）
   8. --history：查看历史记录
@@ -50,7 +50,7 @@ STARTUP_CHECK_INTERVAL = 2
 
 # SQLite 数据库路径（相对仓库根目录，随 Git 持续跟踪）
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "Documents", "benchmark.db")
+                       "docs", "reports", "auto", "benchmark.db")
 
 
 def parse_args():

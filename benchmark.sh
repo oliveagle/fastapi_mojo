@@ -3,7 +3,7 @@
 #
 # 每次运行：
 #   1. 用固定场景 benchmark-scenarios.json 跑 bench.py
-#   2. 自动写入 SQLite（Documents/benchmark.db）长期跟踪
+#   2. 自动写入 SQLite（docs/reports/auto/benchmark.db）长期跟踪
 #   3. 更新 JSON 快照 + Markdown 报告
 #
 # 用法：
@@ -20,8 +20,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 # 固定输出路径
-JSON_OUT="Documents/benchmark-results.json"
-REPORT_OUT="Documents/Benchmark-Baseline.md"
+JSON_OUT="docs/reports/auto/benchmark-results.json"
+REPORT_OUT="docs/reports/auto/Benchmark-Baseline.md"
 SCENARIOS="benchmark-scenarios.json"
 
 # 前置检查
@@ -38,7 +38,7 @@ fi
 echo "=============================================="
 echo " FastAPI-Mojo Benchmark（固定姿势）"
 echo " 场景配置 : $SCENARIOS"
-echo " SQLite   : Documents/benchmark.db"
+echo " SQLite   : docs/reports/auto/benchmark.db"
 echo " 报告     : $REPORT_OUT"
 echo "=============================================="
 

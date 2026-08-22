@@ -68,9 +68,9 @@ curl "http://127.0.0.1:8000/hello?name=Mojo"
 - `bench.py` — 底层 runner（启动/预热/采集/统计/SQLite/报告）
 
 输出：
-- **SQLite**（`Documents/benchmark.db`，随 Git 持续跟踪）：每次运行自动写入 `runs` + `scenarios` 两张表，含环境信息、commit、每个场景的吞吐/延迟分位/错误数，可长期对比趋势；
-- **JSON**（`Documents/benchmark-results.json`）：本次运行快照，统一数据格式；
-- **Markdown**（`Documents/Benchmark-Baseline.md`）：由同一份 JSON 自动渲染，格式统一。
+- **SQLite**（`docs/reports/auto/benchmark.db`，随 Git 持续跟踪）：每次运行自动写入 `runs` + `scenarios` 两张表，含环境信息、commit、每个场景的吞吐/延迟分位/错误数，可长期对比趋势；
+- **JSON**（`docs/reports/auto/benchmark-results.json`）：本次运行快照，统一数据格式；
+- **Markdown**（`docs/reports/auto/Benchmark-Baseline.md`）：由同一份 JSON 自动渲染，格式统一。
 
 每次迭代跑 `./benchmark.sh` 即可得到同构数据，直接对比吞吐与延迟；`--history` 可查看历次记录。
 
