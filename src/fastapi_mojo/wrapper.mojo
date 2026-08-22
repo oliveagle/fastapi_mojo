@@ -48,3 +48,35 @@ struct FastAPIWrapper:
         var kwargs = Python.evaluate("dict")
         kwargs["methods"] = methods
         self._app.add_api_route(path, handler, kwargs)
+
+    # -- Mojo 驱动的 handler 注册（已决策-5：C1 方案 A）--------------------
+    # handler 业务逻辑由 Mojo 构造 lambda 源码字符串，Python 只做执行壳。
+    def register_handler(self, path: String, method: String, lambda_src: String) raises:
+        """注册一个 handler：lambda_src 是 Mojo 构造的 Python lambda 源码。
+
+        例：app.register_handler("/", "get",
+                "lambda: {'message': 'Hello from Mojo'}")
+        """
+        var handler = Python.evaluate(lambda_src)
+        if method == "get":
+            var decorator = self._app.get(path)
+            decorator(handler)
+        elif method == "post":
+            var decorator = self._app.post(path)
+            decorator(handler)
+        elif method == "put":
+            var decorator = self._app.put(path)
+            decorator(handler)
+        elif method == "delete":
+            var decorator = self._app.delete(path)
+            decorator(handler)
+        else:
+            raise Error("不支持的 HTTP method: " + method)
+
+    def register_message(self, path: String, method: String, message: String) raises:
+        """便捷注册：返回 {'message': <message>} 的 JSON handler。
+
+        业务数据（message）由 Mojo 侧传入，Mojo 构造 lambda 源码。
+        """
+        var lambda_src = "lambda: {'message': '" + message + "'}"
+        self.register_handler(path, method, lambda_src)
