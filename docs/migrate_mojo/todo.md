@@ -15,6 +15,7 @@
 | 6 | **C2 方案 A：Mojo 构造 JSON + Response 包装** | Mojo 拼接 JSON 字符串，handler 返回 `Response(content=json_str, media_type='application/json')`，FastAPI 原样返回不二次序列化。已验证可行。 | fastapi_mojo + 小 |
 | 7 | **C3 方案 A：Mojo 路由表 + 批量注册** | wrapper 增加 `Route` struct + `add_route(path, method, handler)` + `register_all()`，Mojo 侧集中管理路由，启动时批量注册到 FastAPI。已验证可行。 | fastapi_mojo + 中 |
 | 8 | **C4 方案 A：Mojo 构造 Request 注入 handler** | wrapper 增加 `register_query(path, method, param_name, default)`，Mojo 构造带 `request: Request` 注解的 handler 源码，参数解析逻辑由 Mojo 生成。已验证可行。 | fastapi_mojo + 中 |
+| 9 | **C5 阻塞：Mojo 1.0.0 无网络模块** | 验证结论：`std.http` / `std.socket` / `std.net` 均不存在，Mojo 1.0.0 标准库无法原生实现 HTTP 服务器。C5（替代 uvicorn）需等待 Mojo 标准库支持网络，或改用 Python socket 桥接（非纯 Mojo 替换）。 | fastapi_mojo + 阻塞 |
 
 ## 🚧 改造
 
