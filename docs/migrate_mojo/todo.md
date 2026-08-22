@@ -24,16 +24,20 @@
 | # | 任务 | 描述 | 工作量 |
 |---|------|------|--------|
 | 1 | **Mojo 原生 handler 注册** | wrapper.mojo 增加 `register_handler(path, handler)`，handler 由 Mojo 侧构造 dict 返回，替代 hello.mojo 中的 Python lambda 业务逻辑 | 小 |
+| 2 | **POST/PUT/DELETE 方法支持** | register_* 系列目前只验证了 GET，需验证 POST 路由 + Body 参数 | 小 |
 
 ## 📋 待开发
 
 | # | 任务 | 描述 | 工作量 |
 |---|------|------|--------|
-| 1 | **Mojo 响应序列化** | Mojo 侧实现 dict → JSON 序列化，替代 FastAPI 内部序列化 | 中 |
-| 2 | **Mojo 路由注册表** | Mojo 侧维护 path → handler 映射，FastAPI 只做最后一跳 | 中 |
-| 3 | **Mojo 参数解析** | Query/Path/Body 参数解析迁移到 Mojo | 大 |
-| 4 | **Mojo HTTP 服务器** | 替代 uvicorn | 很大 |
-| 5 | **Mojo ASGI 协议层** | 替代 Starlette | 极大 |
+| 1 | **C4-深化：Path/Body 参数解析** | register_path + register_body，从 request.path_params / request.body() 提取参数 | 中 |
+| 2 | **错误处理** | HTTPException、404 处理、异常 → JSON 响应 | 中 |
+| 3 | **Mojo 侧测试** | mojo test 单元测试（wrapper 各方法），目前只有手动 curl + benchmark | 中 |
+| 4 | **README 更新** | 反映 orjson + .venv + ADR 流程 | 小 |
+| 5 | **benchmark 场景扩展** | 增加 POST 场景（当前只有 GET） | 小 |
+| 6 | **C5 解除阻塞探索** | 检查 Mojo FFI（@export + C ABI）能否桥接 socket，或 Python socket 桥接 | 大 |
+| 7 | **Mojo HTTP 服务器** | 替代 uvicorn（依赖 #6） | 很大 |
+| 8 | **Mojo ASGI 协议层** | 替代 Starlette（依赖 #7） | 极大 |
 
 ## 💬 待讨论
 
