@@ -1,0 +1,116 @@
+{
+  "date": "2026-08-22 13:22 UTC",
+  "commit": "80f0736",
+  "server_dir": "src/fastapi_mojo",
+  "server_cmd": "mojo run hello.mojo",
+  "warmup": "2000 请求 / 并发 50",
+  "environment": {
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cores": "32",
+    "mem_gib": "125",
+    "kernel": "7.0.0-28-generic",
+    "mojo": "Mojo 1.0.0 (ed45d567)",
+    "python": "Python 3.12.3",
+    "fastapi": "0.141.1",
+    "uvicorn": "0.52.4",
+    "hey": "github.com/rakyll/hey v0.1.5"
+  },
+  "scenarios": [
+    {
+      "url": "http://127.0.0.1:8000/",
+      "requests": 10000,
+      "concurrency": 100,
+      "total_seconds": 2.0934,
+      "requests_per_sec": 4776.92,
+      "latency_ms": {
+        "avg": 20.76,
+        "min": 1.1,
+        "max": 47.0,
+        "p10": 15.6,
+        "p25": 17.2,
+        "p50": 19.3,
+        "p75": 22.3,
+        "p90": 28.4,
+        "p95": 34.3,
+        "p99": 41.3
+      },
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": 0,
+      "name": "get_root_10k_100c"
+    },
+    {
+      "url": "http://127.0.0.1:8000/",
+      "requests": 50000,
+      "concurrency": 500,
+      "total_seconds": 11.7421,
+      "requests_per_sec": 4258.18,
+      "latency_ms": {
+        "avg": 117.08,
+        "min": 38.3,
+        "max": 253.6,
+        "p10": 97.0,
+        "p25": 103.4,
+        "p50": 111.7,
+        "p75": 124.9,
+        "p90": 139.6,
+        "p95": 153.2,
+        "p99": 220.4
+      },
+      "status_codes": {
+        "200": 50000
+      },
+      "errors": 0,
+      "name": "get_root_50k_500c"
+    },
+    {
+      "url": "http://127.0.0.1:8000/",
+      "requests": 100000,
+      "concurrency": 200,
+      "total_seconds": 20.8971,
+      "requests_per_sec": 4785.35,
+      "latency_ms": {
+        "avg": 41.73,
+        "min": 8.6,
+        "max": 114.9,
+        "p10": 35.9,
+        "p25": 37.0,
+        "p50": 38.7,
+        "p75": 42.5,
+        "p90": 54.8,
+        "p95": 57.8,
+        "p99": 66.2
+      },
+      "status_codes": {
+        "200": 100000
+      },
+      "errors": 0,
+      "name": "get_root_100k_200c"
+    },
+    {
+      "url": "http://127.0.0.1:8000/hello?name=Mojo",
+      "requests": 10000,
+      "concurrency": 100,
+      "total_seconds": 2.2447,
+      "requests_per_sec": 4454.94,
+      "latency_ms": {
+        "avg": 22.28,
+        "min": 0.8,
+        "max": 73.9,
+        "p10": 17.3,
+        "p25": 18.7,
+        "p50": 20.8,
+        "p75": 23.7,
+        "p90": 28.6,
+        "p95": 35.3,
+        "p99": 45.5
+      },
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": 0,
+      "name": "get_hello_10k_100c"
+    }
+  ]
+}

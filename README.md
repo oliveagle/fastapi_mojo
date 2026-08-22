@@ -45,6 +45,29 @@ curl "http://127.0.0.1:8000/hello?name=Mojo"
 # http://127.0.0.1:8000/docs
 ```
 
+## Benchmark（代码化）
+
+统一压测入口：`bench.py` 自动完成「启动服务器 → 预热 → 跑场景 → 解析 hey csv → 输出统一 JSON + Markdown 报告」。
+
+```bash
+# 依赖：hey（go install github.com/rakyll/hey@latest 或下载二进制放入 PATH）
+
+# 完整跑一遍（默认 4 个场景，约 1 分钟）
+python3 bench.py --json Documents/benchmark-results.json --report Documents/Benchmark-Baseline.md
+
+# 服务器已在运行时跳过启停
+python3 bench.py --no-server --json out.json
+
+# 自定义场景（JSON 文件：name/url/n/c 列表）
+python3 bench.py --scenarios my-scenarios.json --json out.json
+```
+
+输出：
+- **JSON**（`Documents/benchmark-results.json`）：统一数据格式，含环境信息、commit、每个场景的吞吐/延迟分位/错误数，供程序化对比；
+- **Markdown**（`Documents/Benchmark-Baseline.md`）：由同一份 JSON 自动渲染，格式统一。
+
+每次迭代跑同一命令即可得到同构数据，直接对比吞吐与延迟。
+
 ## wrapper 设计（当前阶段）
 
 `wrapper.mojo` 是**最薄的壳**：
