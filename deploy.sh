@@ -33,11 +33,11 @@ command -v patchelf >/dev/null || { echo "ERROR: patchelf not found (apt install
 mkdir -p "$OUTPUT_DIR"
 
 # Step 1: Build the binary
-echo "[1/3] Building http_server_v2.mojo..."
-mojo build "$ROOT/src/fastapi_mojo/http_server_v2.mojo" \
+echo "[1/3] Building http_server_final.mojo..."
+mojo build "$ROOT/src/fastapi_mojo/http_server_final.mojo" \
     -o "$OUTPUT_DIR/fastapi_mojo" \
     -Xlinker -L"$ROOT/src/fastapi_mojo" \
-    -Xlinker -lhttp_bridge_v3
+    -Xlinker -lhttp_bridge_final
 
 # Step 2: Copy Mojo runtime .so files
 echo "[2/3] Copying Mojo runtime .so files..."
@@ -51,9 +51,9 @@ for lib in libKGENCompilerRTShared.so libMSupportGlobals.so libAsyncRTRuntimeGlo
 done
 
 # Copy C helper .so from source directory
-if [[ -f "$ROOT/src/fastapi_mojo/libhttp_bridge_v3.so" ]]; then
-    cp "$ROOT/src/fastapi_mojo/libhttp_bridge_v3.so" "$OUTPUT_DIR/"
-    echo "  Copied libhttp_bridge_v3.so"
+if [[ -f "$ROOT/src/fastapi_mojo/libhttp_bridge_final.so" ]]; then
+    cp "$ROOT/src/fastapi_mojo/libhttp_bridge_final.so" "$OUTPUT_DIR/"
+    echo "  Copied libhttp_bridge_final.so"
 fi
 
 # Step 3: Set RPATH to $ORIGIN (find .so in same directory as binary)
