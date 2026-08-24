@@ -1,12 +1,13 @@
 # src/fastapi_mojo/http_server_final.mojo
 #
-# Final HTTP server: json.mojo + router.mojo + params.mojo + static files
-# Features: CORS, graceful shutdown, request ID tracking, static file serving
+# Final HTTP server: json.mojo + router.mojo + params.mojo + middleware + static files
+# Features: CORS, graceful shutdown, request ID tracking, timing, static file serving
 
 from std.ffi import external_call
 from json import json_serialize_dict
 from router import Router, RouteMatch
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
+from middleware import Middleware
 
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
@@ -47,7 +48,7 @@ def is_static_path(path: String) -> Bool:
 
 
 def main() raises:
-    print("=== Mojo HTTP Server v1.5 ===")
+    print("=== Mojo HTTP Server v1.6 ===")
 
     # Set static directory and body size limit
     external_call["set_static_dir", NoneType]("./static".as_c_string_slice())
@@ -62,6 +63,12 @@ def main() raises:
     router.add_route("/items/{item_id}", "GET", "get_item")
     router.add_route("/items/{item_id}", "DELETE", "delete_item")
     print("Routes: " + String(router.route_count()))
+
+    # Setup middleware
+    var mw_request_id = Middleware("request_id")
+    var mw_logging = Middleware("logging")
+    var mw_timing = Middleware("timing")
+    print("Middleware: request_id, logging, timing")
 
     var sfd = external_call["create_bound_socket", Int](8000)
     if sfd < 0:
@@ -167,7 +174,7 @@ def main() raises:
             var handler = route_result.handler_name
             if handler == "index":
                 resp_data["message"] = "Welcome to Mojo HTTP Server"
-                resp_data["version"] = "1.5.0"
+                resp_data["version"] = "1.6.0"
             elif handler == "health":
                 resp_data["status"] = "healthy"
                 resp_data["uptime"] = "running"
