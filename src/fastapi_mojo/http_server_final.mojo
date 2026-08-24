@@ -16,8 +16,17 @@ def build_error_response(status: String, message: String) -> Dict[String, String
     return resp^
 
 
+def log_request(req_num: Int, method: String, path: String, query: String, status: String):
+    """Log request with status."""
+    var log = "[" + String(req_num) + "] " + method + " " + path
+    if query.byte_length() > 0:
+        log += "?" + query
+    log += " → " + status
+    print(log)
+
+
 def main() raises:
-    print("=== Mojo HTTP Server FINAL ===")
+    print("=== Mojo HTTP Server v1.1 ===")
 
     var router = Router()
     router.add_route("/", "GET", "index")
@@ -34,9 +43,12 @@ def main() raises:
         print("ERROR: bind failed")
         return
     print("Listening on http://127.0.0.1:8000")
+    print("Press Ctrl+C to stop")
 
     var req_num = 0
-    while True:
+    # Use large range to avoid while True unreachable code warning
+    # Server will handle ~2 billion requests before exiting
+    for _ in range(2000000000):
         var cfd = external_call["accept_connection", Int](sfd)
         if cfd < 0:
             continue
@@ -80,8 +92,6 @@ def main() raises:
             if b >= 0:
                 body_str += chr(b)
 
-        print("[" + String(req_num) + "] " + method + " " + path + "?" + query)
-
         # --- Route matching with params (router.mojo) ---
         var route_result = router.match_route_with_params(path, method)
 
@@ -104,7 +114,7 @@ def main() raises:
             var handler = route_result.handler_name
             if handler == "index":
                 resp_data["message"] = "Welcome to Mojo HTTP Server"
-                resp_data["version"] = "1.0.0"
+                resp_data["version"] = "1.1.0"
             elif handler == "health":
                 resp_data["status"] = "healthy"
                 resp_data["uptime"] = "running"
@@ -150,5 +160,8 @@ def main() raises:
         )
         _ = external_call["close_fd", Int](cfd)
 
+        # Log request
+        log_request(req_num, method, path, query, status_line)
+
     _ = external_call["close_fd", Int](sfd)
-    print("Done.")
+    print("Server stopped.")
