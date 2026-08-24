@@ -1,4 +1,4 @@
-// http_bridge_final.c — Final C bridge: socket I/O + Mojo builds response
+// http_bridge_final.c — C bridge: socket I/O + CORS + graceful shutdown
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <signal.h>
 
 #define BUF_SIZE 8192
 #define MAX_METHOD 16
@@ -17,7 +18,29 @@
 static char g_method[MAX_METHOD], g_path[MAX_PATH], g_query[MAX_QUERY], g_body[MAX_BODY];
 static int g_method_len, g_path_len, g_query_len, g_body_len;
 
+static volatile int g_running = 1;
+
+void signal_handler(int sig) {
+    (void)sig;
+    g_running = 0;
+}
+
+void setup_signal_handlers() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+int is_running() {
+    return g_running;
+}
+
 int create_bound_socket(int port) {
+    setup_signal_handlers();
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int opt = 1;
@@ -32,6 +55,7 @@ int create_bound_socket(int port) {
 }
 
 int accept_connection(int sfd) {
+    if (!g_running) return -1;
     struct sockaddr_in ca; socklen_t cl = sizeof(ca);
     return accept(sfd, (struct sockaddr*)&ca, &cl);
 }
@@ -101,10 +125,10 @@ int read_body_byte(int i) { return (i>=0 && i<g_body_len) ? (unsigned char)g_bod
 
 int close_fd(int fd) { return close(fd); }
 
-// Dynamic response builder - allocates buffer for large responses
+// Dynamic response builder with CORS headers
 int send_simple_response(int fd, const char *status, const char *body) {
     int body_len = strlen(body);
-    int header_len = strlen(status) + 128; // room for headers
+    int header_len = strlen(status) + 256; // room for headers + CORS
     int total_len = header_len + body_len + 4;
 
     char *resp = malloc(total_len);
@@ -115,10 +139,28 @@ int send_simple_response(int fd, const char *status, const char *body) {
         "Content-Type: application/json\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Access-Control-Max-Age: 86400\r\n"
         "\r\n"
         "%s", status, body_len, body);
 
     int sent = send(fd, resp, rlen, 0);
     free(resp);
     return sent;
+}
+
+// Handle OPTIONS preflight
+int send_preflight_response(int fd) {
+    const char *resp =
+        "HTTP/1.1 204 No Content\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Access-Control-Max-Age: 86400\r\n"
+        "\r\n";
+    return send(fd, resp, strlen(resp), 0);
 }

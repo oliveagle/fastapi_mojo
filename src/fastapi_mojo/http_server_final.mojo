@@ -1,7 +1,7 @@
 # src/fastapi_mojo/http_server_final.mojo
 #
 # Final HTTP server: json.mojo + router.mojo + params.mojo all integrated
-# Features: CORS middleware, request ID tracking, structured logging
+# Features: CORS, graceful shutdown, request ID tracking, structured logging
 
 from std.ffi import external_call
 from json import json_serialize_dict
@@ -32,7 +32,7 @@ def log_request(req_id: String, method: String, path: String, query: String, sta
 
 
 def main() raises:
-    print("=== Mojo HTTP Server v1.2 ===")
+    print("=== Mojo HTTP Server v1.3 ===")
 
     var router = Router()
     router.add_route("/", "GET", "index")
@@ -53,6 +53,11 @@ def main() raises:
 
     var req_num = 0
     for _ in range(2000000000):
+        # Check for graceful shutdown
+        if not external_call["is_running", Int]():
+            print("\nShutdown signal received...")
+            break
+
         var cfd = external_call["accept_connection", Int](sfd)
         if cfd < 0:
             continue
@@ -97,6 +102,13 @@ def main() raises:
             if b >= 0:
                 body_str += chr(b)
 
+        # Handle OPTIONS preflight (CORS)
+        if method == "OPTIONS":
+            _ = external_call["send_preflight_response", Int](cfd)
+            _ = external_call["close_fd", Int](cfd)
+            log_request(req_id, method, path, query, "204 No Content")
+            continue
+
         # --- Route matching with params (router.mojo) ---
         var route_result = router.match_route_with_params(path, method)
 
@@ -119,7 +131,7 @@ def main() raises:
             var handler = route_result.handler_name
             if handler == "index":
                 resp_data["message"] = "Welcome to Mojo HTTP Server"
-                resp_data["version"] = "1.2.0"
+                resp_data["version"] = "1.3.0"
             elif handler == "health":
                 resp_data["status"] = "healthy"
                 resp_data["uptime"] = "running"
@@ -170,4 +182,4 @@ def main() raises:
         log_request(req_id, method, path, query, status_line)
 
     _ = external_call["close_fd", Int](sfd)
-    print("Server stopped.")
+    print("Server stopped gracefully.")
