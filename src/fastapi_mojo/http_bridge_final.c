@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 #define BUF_SIZE 8192
 #define MAX_METHOD 16
@@ -48,6 +49,12 @@ int is_running() {
 void set_static_dir(const char *dir) {
     strncpy(g_static_dir, dir, MAX_STATIC_DIR - 1);
     g_static_dir[MAX_STATIC_DIR - 1] = 0;
+}
+
+long gettimeofday_ms() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
 void set_max_body_size(int size) {
@@ -300,11 +307,35 @@ int send_simple_response(int fd, const char *status, const char *body) {
         "Content-Length: %d\r\n"
         "Connection: close\r\n"
         "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"
         "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
         "Access-Control-Max-Age: 86400\r\n"
         "\r\n"
         "%s", status, body_len, body);
+
+    int sent = send(fd, resp, rlen, 0);
+    free(resp);
+    return sent;
+}
+
+// HEAD response (same headers as GET but no body)
+int send_head_response(int fd, const char *status, const char *body) {
+    int body_len = strlen(body);
+    int header_len = strlen(status) + 256;
+    int total_len = header_len + 4;
+
+    char *resp = malloc(total_len);
+    if (!resp) return -1;
+
+    int rlen = sprintf(resp,
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "\r\n", status, body_len);
 
     int sent = send(fd, resp, rlen, 0);
     free(resp);
@@ -318,7 +349,7 @@ int send_preflight_response(int fd) {
         "Content-Length: 0\r\n"
         "Connection: close\r\n"
         "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"
         "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
         "Access-Control-Max-Age: 86400\r\n"
         "\r\n";
