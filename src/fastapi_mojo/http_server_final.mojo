@@ -4,19 +4,19 @@
 
 from std.ffi import external_call
 from json import json_serialize_dict
-from router import Router
-from params import parse_path_params, parse_query_params, ParsedParams
+from router import Router, RouteMatch
+from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
 
 
 def main() raises:
     print("=== Mojo HTTP Server FINAL ===")
 
     var router = Router()
-    router.add_route("/", "GET")
-    router.add_route("/hello", "GET")
-    router.add_route("/items", "GET")
-    router.add_route("/items", "POST")
-    router.add_route("/items/{item_id}", "GET")
+    router.add_route("/", "GET", "index")
+    router.add_route("/hello", "GET", "hello")
+    router.add_route("/items", "GET", "list_items")
+    router.add_route("/items", "POST", "create_item")
+    router.add_route("/items/{item_id}", "GET", "get_item")
     print("Routes: " + String(router.route_count()))
 
     var sfd = external_call["create_bound_socket", Int](8000)
@@ -35,7 +35,7 @@ def main() raises:
             _ = external_call["close_fd", Int](cfd)
             continue
 
-        # Read method from C bridge
+        # Read method from C bridge (inline FFI)
         var m_len = external_call["get_method_len", Int]()
         var method = String("")
         for i in range(m_len):
@@ -59,35 +59,54 @@ def main() raises:
             if b >= 0:
                 query += chr(b)
 
+        # Read body from C bridge
+        var b_len = external_call["get_body_len", Int]()
+        var body_str = String("")
+        for i in range(b_len):
+            var b = external_call["read_body_byte", Int](i)
+            if b >= 0:
+                body_str += chr(b)
+
         print("[" + String(req_num + 1) + "] " + method + " " + path + "?" + query)
 
-        # --- Route matching (router.mojo) ---
-        var matched = router.match_route(path, method)
+        # --- Route matching with params (router.mojo) ---
+        var route_result = router.match_route_with_params(path, method)
 
-        # --- Param parsing (params.mojo) ---
-        var path_params = parse_path_params(path, "/items/{item_id}")
+        # --- Query params (params.mojo) ---
         var query_params = parse_query_params(query)
 
-        # --- Build response body (json.mojo) ---
+        # --- Body params for POST (params.mojo) ---
+        var body_params = ParsedParams()
+        if method == "POST" and body_str.byte_length() > 0:
+            body_params = parse_body_json(body_str)
+
+        # --- Build response (json.mojo) ---
         var resp_data = Dict[String, String]()
         resp_data["server"] = "Mojo FINAL"
         resp_data["method"] = method
         resp_data["path"] = path
         resp_data["query"] = query
-        resp_data["route_matched"] = String(matched)
-        resp_data["path_params_count"] = String(path_params.param_count)
-        resp_data["query_params_count"] = String(query_params.param_count)
-        if matched:
+        resp_data["handler"] = route_result.handler_name
+
+        if route_result.matched:
             resp_data["status"] = "200"
+            for key in route_result.params:
+                resp_data["param_" + key] = route_result.params[key]
         else:
             resp_data["status"] = "404"
 
-        # json_serialize_dict produces JSON body (json.mojo)
+        for key in query_params.values:
+            resp_data["query_" + key] = query_params.values[key]
+
+        if body_params.param_count > 0:
+            resp_data["body_fields"] = String(body_params.param_count)
+            for key in body_params.values:
+                resp_data["body_" + key] = body_params.values[key]
+
         var body = json_serialize_dict(resp_data)
 
-        # Send via C helper (Mojo builds body, C sends response)
         var status_line = "200 OK"
-        if not matched:
+        if not route_result.matched:
             status_line = "404 Not Found"
         _ = external_call["send_simple_response", Int](
             cfd,
