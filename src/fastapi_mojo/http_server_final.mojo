@@ -8,6 +8,14 @@ from router import Router, RouteMatch
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
 
 
+def build_error_response(status: String, message: String) -> Dict[String, String]:
+    """Build error response data."""
+    var resp = Dict[String, String]()
+    resp["error"] = message
+    resp["status"] = status
+    return resp^
+
+
 def main() raises:
     print("=== Mojo HTTP Server FINAL ===")
 
@@ -17,6 +25,7 @@ def main() raises:
     router.add_route("/items", "GET", "list_items")
     router.add_route("/items", "POST", "create_item")
     router.add_route("/items/{item_id}", "GET", "get_item")
+    router.add_route("/items/{item_id}", "DELETE", "delete_item")
     print("Routes: " + String(router.route_count()))
 
     var sfd = external_call["create_bound_socket", Int](8000)
@@ -25,7 +34,8 @@ def main() raises:
         return
     print("Listening on http://127.0.0.1:8000")
 
-    for req_num in range(10):
+    var req_num = 0
+    while True:
         var cfd = external_call["accept_connection", Int](sfd)
         if cfd < 0:
             continue
@@ -35,7 +45,9 @@ def main() raises:
             _ = external_call["close_fd", Int](cfd)
             continue
 
-        # Read method from C bridge (inline FFI)
+        req_num += 1
+
+        # Read method from C bridge
         var m_len = external_call["get_method_len", Int]()
         var method = String("")
         for i in range(m_len):
@@ -67,7 +79,7 @@ def main() raises:
             if b >= 0:
                 body_str += chr(b)
 
-        print("[" + String(req_num + 1) + "] " + method + " " + path + "?" + query)
+        print("[" + String(req_num) + "] " + method + " " + path + "?" + query)
 
         # --- Route matching with params (router.mojo) ---
         var route_result = router.match_route_with_params(path, method)
@@ -75,39 +87,58 @@ def main() raises:
         # --- Query params (params.mojo) ---
         var query_params = parse_query_params(query)
 
-        # --- Body params for POST (params.mojo) ---
+        # --- Body params for POST/PUT (params.mojo) ---
         var body_params = ParsedParams()
-        if method == "POST" and body_str.byte_length() > 0:
+        if (method == "POST" or method == "PUT") and body_str.byte_length() > 0:
             body_params = parse_body_json(body_str)
 
-        # --- Build response (json.mojo) ---
+        # --- Handler dispatch ---
         var resp_data = Dict[String, String]()
-        resp_data["server"] = "Mojo FINAL"
+        var status_line = "200 OK"
+
+        if not route_result.matched:
+            status_line = "404 Not Found"
+            resp_data = build_error_response("404", "Route not found")
+        else:
+            var handler = route_result.handler_name
+            if handler == "index":
+                resp_data["message"] = "Welcome to Mojo HTTP Server"
+                resp_data["version"] = "1.0.0"
+            elif handler == "hello":
+                resp_data["message"] = "Hello from Mojo!"
+                if "name" in query_params.values:
+                    resp_data["greeting"] = "Hello, " + query_params.values["name"] + "!"
+            elif handler == "list_items":
+                resp_data["items"] = "[]"
+                resp_data["message"] = "List all items"
+            elif handler == "create_item":
+                resp_data["message"] = "Item created"
+                for key in body_params.values:
+                    resp_data["item_" + key] = body_params.values[key]
+            elif handler == "get_item":
+                resp_data["message"] = "Get item by ID"
+                for key in route_result.params:
+                    resp_data[key] = route_result.params[key]
+            elif handler == "delete_item":
+                resp_data["message"] = "Item deleted"
+                for key in route_result.params:
+                    resp_data[key] = route_result.params[key]
+            else:
+                resp_data = build_error_response("500", "Unknown handler: " + handler)
+                status_line = "500 Internal Server Error"
+
+        # Add metadata
         resp_data["method"] = method
         resp_data["path"] = path
-        resp_data["query"] = query
         resp_data["handler"] = route_result.handler_name
 
-        if route_result.matched:
-            resp_data["status"] = "200"
-            for key in route_result.params:
-                resp_data["param_" + key] = route_result.params[key]
-        else:
-            resp_data["status"] = "404"
-
+        # Include query params in response
         for key in query_params.values:
             resp_data["query_" + key] = query_params.values[key]
 
-        if body_params.param_count > 0:
-            resp_data["body_fields"] = String(body_params.param_count)
-            for key in body_params.values:
-                resp_data["body_" + key] = body_params.values[key]
-
+        # Build JSON body
         var body = json_serialize_dict(resp_data)
 
-        var status_line = "200 OK"
-        if not route_result.matched:
-            status_line = "404 Not Found"
         _ = external_call["send_simple_response", Int](
             cfd,
             status_line.as_c_string_slice(),
