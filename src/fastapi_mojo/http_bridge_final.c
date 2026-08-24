@@ -1,4 +1,4 @@
-// http_bridge_final.c — C bridge: socket I/O + CORS + graceful shutdown
+// http_bridge_final.c — C bridge: socket I/O + CORS + static files + graceful shutdown
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -8,15 +8,19 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
+#include <sys/stat.h>
 
 #define BUF_SIZE 8192
 #define MAX_METHOD 16
 #define MAX_PATH 1024
 #define MAX_QUERY 1024
 #define MAX_BODY 65536
+#define MAX_STATIC_DIR 256
+#define MAX_FILE_SIZE (1024*1024)  // 1MB max
 
 static char g_method[MAX_METHOD], g_path[MAX_PATH], g_query[MAX_QUERY], g_body[MAX_BODY];
 static int g_method_len, g_path_len, g_query_len, g_body_len;
+static char g_static_dir[MAX_STATIC_DIR] = "./static";
 
 static volatile int g_running = 1;
 
@@ -37,6 +41,11 @@ void setup_signal_handlers() {
 
 int is_running() {
     return g_running;
+}
+
+void set_static_dir(const char *dir) {
+    strncpy(g_static_dir, dir, MAX_STATIC_DIR - 1);
+    g_static_dir[MAX_STATIC_DIR - 1] = 0;
 }
 
 int create_bound_socket(int port) {
@@ -124,6 +133,116 @@ int read_query_byte(int i) { return (i>=0 && i<g_query_len) ? (unsigned char)g_q
 int read_body_byte(int i) { return (i>=0 && i<g_body_len) ? (unsigned char)g_body[i] : -1; }
 
 int close_fd(int fd) { return close(fd); }
+
+// Content-Type detection
+const char* get_content_type(const char *path) {
+    const char *ext = strrchr(path, '.');
+    if (!ext) return "application/octet-stream";
+    if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0) return "text/html";
+    if (strcmp(ext, ".css") == 0) return "text/css";
+    if (strcmp(ext, ".js") == 0) return "application/javascript";
+    if (strcmp(ext, ".json") == 0) return "application/json";
+    if (strcmp(ext, ".png") == 0) return "image/png";
+    if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) return "image/jpeg";
+    if (strcmp(ext, ".gif") == 0) return "image/gif";
+    if (strcmp(ext, ".svg") == 0) return "image/svg+xml";
+    if (strcmp(ext, ".ico") == 0) return "image/x-icon";
+    if (strcmp(ext, ".txt") == 0) return "text/plain";
+    if (strcmp(ext, ".xml") == 0) return "application/xml";
+    if (strcmp(ext, ".pdf") == 0) return "application/pdf";
+    if (strcmp(ext, ".woff") == 0) return "font/woff";
+    if (strcmp(ext, ".woff2") == 0) return "font/woff2";
+    return "application/octet-stream";
+}
+
+// Static file serving
+int send_static_file(int fd, const char *path) {
+    // Build full path
+    char full_path[MAX_PATH + MAX_STATIC_DIR + 16];
+    if (strcmp(path, "/") == 0) {
+        snprintf(full_path, sizeof(full_path), "%s/index.html", g_static_dir);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s%s", g_static_dir, path);
+    }
+
+    // Security: prevent directory traversal
+    if (strstr(full_path, "..") != NULL) {
+        const char *resp =
+            "HTTP/1.1 403 Forbidden\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "\r\n";
+        return send(fd, resp, strlen(resp), 0);
+    }
+
+    FILE *f = fopen(full_path, "rb");
+    if (!f) {
+        const char *resp =
+            "HTTP/1.1 404 Not Found\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "\r\n";
+        return send(fd, resp, strlen(resp), 0);
+    }
+
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size > MAX_FILE_SIZE) {
+        fclose(f);
+        const char *resp =
+            "HTTP/1.1 413 Payload Too Large\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "\r\n";
+        return send(fd, resp, strlen(resp), 0);
+    }
+
+    // Read file content
+    char *content = malloc(file_size + 1);
+    if (!content) {
+        fclose(f);
+        return -1;
+    }
+    fread(content, 1, file_size, f);
+    content[file_size] = 0;
+    fclose(f);
+
+    // Build response
+    const char *content_type = get_content_type(full_path);
+    int header_len = 256 + strlen(content_type);
+    int total_len = header_len + file_size + 4;
+
+    char *resp = malloc(total_len);
+    if (!resp) {
+        free(content);
+        return -1;
+    }
+
+    int rlen = sprintf(resp,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Connection: close\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "\r\n",
+        content_type, file_size);
+
+    memcpy(resp + rlen, content, file_size);
+    rlen += file_size;
+
+    int sent = send(fd, resp, rlen, 0);
+    free(resp);
+    free(content);
+    return sent;
+}
 
 // Dynamic response builder with CORS headers
 int send_simple_response(int fd, const char *status, const char *body) {

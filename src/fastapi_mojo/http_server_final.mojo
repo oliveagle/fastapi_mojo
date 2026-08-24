@@ -1,7 +1,7 @@
 # src/fastapi_mojo/http_server_final.mojo
 #
-# Final HTTP server: json.mojo + router.mojo + params.mojo all integrated
-# Features: CORS, graceful shutdown, request ID tracking, structured logging
+# Final HTTP server: json.mojo + router.mojo + params.mojo + static files
+# Features: CORS, graceful shutdown, request ID tracking, static file serving
 
 from std.ffi import external_call
 from json import json_serialize_dict
@@ -31,8 +31,26 @@ def log_request(req_id: String, method: String, path: String, query: String, sta
     print(log)
 
 
+def is_static_path(path: String) -> Bool:
+    """Check if path should be served as static file."""
+    # Serve files with extensions as static
+    for c in path:
+        if c == '.':
+            return True
+    # Serve /static/ prefix (check first 7 bytes)
+    if path.byte_length() >= 7:
+        if (path[byte=0] == '/' and path[byte=1] == 's' and path[byte=2] == 't' and
+            path[byte=3] == 'a' and path[byte=4] == 't' and path[byte=5] == 'i' and
+            path[byte=6] == 'c'):
+            return True
+    return False
+
+
 def main() raises:
-    print("=== Mojo HTTP Server v1.3 ===")
+    print("=== Mojo HTTP Server v1.4 ===")
+
+    # Set static directory
+    external_call["set_static_dir", NoneType]("./static".as_c_string_slice())
 
     var router = Router()
     router.add_route("/", "GET", "index")
@@ -109,6 +127,16 @@ def main() raises:
             log_request(req_id, method, path, query, "204 No Content")
             continue
 
+        # Try static file serving first for GET requests
+        if method == "GET" and is_static_path(path):
+            _ = external_call["send_static_file", Int](
+                cfd,
+                path.as_c_string_slice(),
+            )
+            _ = external_call["close_fd", Int](cfd)
+            log_request(req_id, method, path, query, "200 OK (static)")
+            continue
+
         # --- Route matching with params (router.mojo) ---
         var route_result = router.match_route_with_params(path, method)
 
@@ -131,7 +159,7 @@ def main() raises:
             var handler = route_result.handler_name
             if handler == "index":
                 resp_data["message"] = "Welcome to Mojo HTTP Server"
-                resp_data["version"] = "1.3.0"
+                resp_data["version"] = "1.4.0"
             elif handler == "health":
                 resp_data["status"] = "healthy"
                 resp_data["uptime"] = "running"
