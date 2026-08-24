@@ -32,12 +32,12 @@ command -v patchelf >/dev/null || { echo "ERROR: patchelf not found (apt install
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-# Step 1: Build the binary
+# Step 1: Build the binary (link .o directly to avoid extra .so)
 echo "[1/3] Building http_server_final.mojo..."
+gcc -c "$ROOT/src/fastapi_mojo/http_bridge_final.c" -o /tmp/http_bridge_final.o
 mojo build "$ROOT/src/fastapi_mojo/http_server_final.mojo" \
     -o "$OUTPUT_DIR/fastapi_mojo" \
-    -Xlinker -L"$ROOT/src/fastapi_mojo" \
-    -Xlinker -lhttp_bridge_final
+    -Xlinker /tmp/http_bridge_final.o
 
 # Step 2: Copy Mojo runtime .so files
 echo "[2/3] Copying Mojo runtime .so files..."
@@ -50,7 +50,7 @@ for lib in libKGENCompilerRTShared.so libMSupportGlobals.so libAsyncRTRuntimeGlo
     fi
 done
 
-# Copy C helper .so from source directory
+# Copy C helper .so from source directory (if using .so linking)
 if [[ -f "$ROOT/src/fastapi_mojo/libhttp_bridge_final.so" ]]; then
     cp "$ROOT/src/fastapi_mojo/libhttp_bridge_final.so" "$OUTPUT_DIR/"
     echo "  Copied libhttp_bridge_final.so"
