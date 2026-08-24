@@ -3,31 +3,29 @@
 # Mojo 原生 JSON 序列化实现
 
 
-struct JSONObject:
-    """JSON 对象。"""
-    var data: String
-    
-    def __init__(out self, data: String):
-        self.data = data
-    
-    def __str__(self) -> String:
-        return self.data
-
-
-struct JSONArray:
-    """JSON 数组。"""
-    var data: String
-    
-    def __init__(out self, data: String):
-        self.data = data
-    
-    def __str__(self) -> String:
-        return self.data
+def json_escape(value: String) -> String:
+    """转义字符串中的特殊字符。"""
+    var result = String("")
+    for i in range(value.byte_length()):
+        var ch = value[grapheme=i]
+        if ch == '"':
+            result += '\\"'
+        elif ch == '\\':
+            result += '\\\\'
+        elif ch == '\n':
+            result += '\\n'
+        elif ch == '\r':
+            result += '\\r'
+        elif ch == '\t':
+            result += '\\t'
+        else:
+            result += ch
+    return result
 
 
 def json_serialize(value: String) -> String:
     """序列化字符串为 JSON。"""
-    return '"' + value + '"'
+    return '"' + json_escape(value) + '"'
 
 
 def json_serialize(value: Int) -> String:
@@ -74,36 +72,49 @@ def json_serialize_list(data: List[String]) -> String:
     return "[" + ", ".join(items) + "]"
 
 
+def json_serialize_nested_dict(key: String, data: Dict[String, String]) raises -> String:
+    """序列化嵌套字典为 JSON。"""
+    return json_serialize(key) + ": " + json_serialize_dict(data)
+
+
+def json_serialize_nested_list(key: String, data: List[String]) raises -> String:
+    """序列化嵌套列表为 JSON。"""
+    return json_serialize(key) + ": " + json_serialize_list(data)
+
+
 def main() raises:
     print("Testing Mojo JSON serialization...")
-    
-    # 测试字符串序列化
+
+    # 测试字符串转义
     var str_json = json_serialize("Hello, World!")
     print("String JSON: " + str_json)
-    
+
+    var escape_json = json_serialize('He said "hi" and left\nNew line')
+    print("Escape JSON: " + escape_json)
+
     # 测试整数序列化
     var int_json = json_serialize(42)
     print("Int JSON: " + int_json)
-    
+
     # 测试浮点数序列化
     var float_json = json_serialize(3.14)
     print("Float JSON: " + float_json)
-    
+
     # 测试布尔值序列化
     var bool_json = json_serialize(True)
     print("Bool JSON: " + bool_json)
-    
+
     # 测试 null 序列化
     var null_json = json_serialize(None)
     print("Null JSON: " + null_json)
-    
+
     # 测试字典序列化
     var dict_data = Dict[String, String]()
     dict_data["name"] = "John"
     dict_data["age"] = "30"
     var dict_json = json_serialize_dict(dict_data)
     print("Dict JSON: " + dict_json)
-    
+
     # 测试列表序列化
     var list_data = List[String]()
     list_data.append("apple")
@@ -111,5 +122,9 @@ def main() raises:
     list_data.append("cherry")
     var list_json = json_serialize_list(list_data)
     print("List JSON: " + list_json)
-    
+
+    # 测试嵌套
+    var nested_json = "{" + json_serialize_nested_dict("user", dict_data) + ", " + json_serialize_nested_list("fruits", list_data) + "}"
+    print("Nested JSON: " + nested_json)
+
     print("JSON serialization test completed!")

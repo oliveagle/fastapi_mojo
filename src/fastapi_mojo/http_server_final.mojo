@@ -21,6 +21,7 @@ def main() raises:
 
     var router = Router()
     router.add_route("/", "GET", "index")
+    router.add_route("/health", "GET", "health")
     router.add_route("/hello", "GET", "hello")
     router.add_route("/items", "GET", "list_items")
     router.add_route("/items", "POST", "create_item")
@@ -104,6 +105,9 @@ def main() raises:
             if handler == "index":
                 resp_data["message"] = "Welcome to Mojo HTTP Server"
                 resp_data["version"] = "1.0.0"
+            elif handler == "health":
+                resp_data["status"] = "healthy"
+                resp_data["uptime"] = "running"
             elif handler == "hello":
                 resp_data["message"] = "Hello from Mojo!"
                 if "name" in query_params.values:
