@@ -1,6 +1,7 @@
 # src/fastapi_mojo/http_server_final.mojo
 #
 # Final HTTP server: json.mojo + router.mojo + params.mojo all integrated
+# Features: CORS middleware, request ID tracking, structured logging
 
 from std.ffi import external_call
 from json import json_serialize_dict
@@ -16,9 +17,14 @@ def build_error_response(status: String, message: String) -> Dict[String, String
     return resp^
 
 
-def log_request(req_num: Int, method: String, path: String, query: String, status: String):
-    """Log request with status."""
-    var log = "[" + String(req_num) + "] " + method + " " + path
+def generate_request_id(req_num: Int) -> String:
+    """Generate a simple request ID."""
+    return "req-" + String(req_num)
+
+
+def log_request(req_id: String, method: String, path: String, query: String, status: String):
+    """Log request with ID and status."""
+    var log = "[" + req_id + "] " + method + " " + path
     if query.byte_length() > 0:
         log += "?" + query
     log += " → " + status
@@ -26,7 +32,7 @@ def log_request(req_num: Int, method: String, path: String, query: String, statu
 
 
 def main() raises:
-    print("=== Mojo HTTP Server v1.1 ===")
+    print("=== Mojo HTTP Server v1.2 ===")
 
     var router = Router()
     router.add_route("/", "GET", "index")
@@ -46,8 +52,6 @@ def main() raises:
     print("Press Ctrl+C to stop")
 
     var req_num = 0
-    # Use large range to avoid while True unreachable code warning
-    # Server will handle ~2 billion requests before exiting
     for _ in range(2000000000):
         var cfd = external_call["accept_connection", Int](sfd)
         if cfd < 0:
@@ -59,6 +63,7 @@ def main() raises:
             continue
 
         req_num += 1
+        var req_id = generate_request_id(req_num)
 
         # Read method from C bridge
         var m_len = external_call["get_method_len", Int]()
@@ -114,7 +119,7 @@ def main() raises:
             var handler = route_result.handler_name
             if handler == "index":
                 resp_data["message"] = "Welcome to Mojo HTTP Server"
-                resp_data["version"] = "1.1.0"
+                resp_data["version"] = "1.2.0"
             elif handler == "health":
                 resp_data["status"] = "healthy"
                 resp_data["uptime"] = "running"
@@ -145,6 +150,7 @@ def main() raises:
         resp_data["method"] = method
         resp_data["path"] = path
         resp_data["handler"] = route_result.handler_name
+        resp_data["request_id"] = req_id
 
         # Include query params in response
         for key in query_params.values:
@@ -161,7 +167,7 @@ def main() raises:
         _ = external_call["close_fd", Int](cfd)
 
         # Log request
-        log_request(req_num, method, path, query, status_line)
+        log_request(req_id, method, path, query, status_line)
 
     _ = external_call["close_fd", Int](sfd)
     print("Server stopped.")
