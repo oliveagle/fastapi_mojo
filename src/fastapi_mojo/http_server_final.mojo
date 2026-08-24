@@ -47,10 +47,11 @@ def is_static_path(path: String) -> Bool:
 
 
 def main() raises:
-    print("=== Mojo HTTP Server v1.4 ===")
+    print("=== Mojo HTTP Server v1.5 ===")
 
-    # Set static directory
+    # Set static directory and body size limit
     external_call["set_static_dir", NoneType]("./static".as_c_string_slice())
+    external_call["set_max_body_size", NoneType](1048576)  # 1MB
 
     var router = Router()
     router.add_route("/", "GET", "index")
@@ -81,7 +82,14 @@ def main() raises:
             continue
 
         var n = external_call["recv_and_parse", Int](cfd)
-        if n <= 0:
+        if n < 0:
+            # Special error codes from C bridge
+            if n == -2:
+                # Body too large - C bridge already sent 413 response
+                print("[" + String(req_num) + "] → 413 Payload Too Large")
+            _ = external_call["close_fd", Int](cfd)
+            continue
+        if n == 0:
             _ = external_call["close_fd", Int](cfd)
             continue
 
@@ -159,7 +167,7 @@ def main() raises:
             var handler = route_result.handler_name
             if handler == "index":
                 resp_data["message"] = "Welcome to Mojo HTTP Server"
-                resp_data["version"] = "1.4.0"
+                resp_data["version"] = "1.5.0"
             elif handler == "health":
                 resp_data["status"] = "healthy"
                 resp_data["uptime"] = "running"

@@ -1,4 +1,4 @@
-// http_bridge_final.c — C bridge: socket I/O + CORS + static files + graceful shutdown
+// http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -17,10 +17,12 @@
 #define MAX_BODY 65536
 #define MAX_STATIC_DIR 256
 #define MAX_FILE_SIZE (1024*1024)  // 1MB max
+#define DEFAULT_MAX_BODY_SIZE (1024*1024)  // 1MB default limit
 
 static char g_method[MAX_METHOD], g_path[MAX_PATH], g_query[MAX_QUERY], g_body[MAX_BODY];
 static int g_method_len, g_path_len, g_query_len, g_body_len;
 static char g_static_dir[MAX_STATIC_DIR] = "./static";
+static int g_max_body_size = DEFAULT_MAX_BODY_SIZE;
 
 static volatile int g_running = 1;
 
@@ -46,6 +48,12 @@ int is_running() {
 void set_static_dir(const char *dir) {
     strncpy(g_static_dir, dir, MAX_STATIC_DIR - 1);
     g_static_dir[MAX_STATIC_DIR - 1] = 0;
+}
+
+void set_max_body_size(int size) {
+    if (size > 0 && size <= MAX_BODY) {
+        g_max_body_size = size;
+    }
 }
 
 int create_bound_socket(int port) {
@@ -108,11 +116,38 @@ int recv_and_parse(int fd) {
         g_query[g_query_len] = 0;
     }
 
+    // Parse Content-Length from headers
+    int content_length = 0;
+    char *cl_header = strstr(buf, "Content-Length: ");
+    if (cl_header) {
+        cl_header += 16;  // Skip "Content-Length: "
+        while (*cl_header >= '0' && *cl_header <= '9') {
+            content_length = content_length * 10 + (*cl_header - '0');
+            cl_header++;
+        }
+    }
+
+    // Check body size limit
+    if (content_length > g_max_body_size) {
+        // Body too large - send 413 response
+        const char *resp =
+            "HTTP/1.1 413 Payload Too Large\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 49\r\n"
+            "Connection: close\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "\r\n"
+            "{\"error\":\"Request body too large\",\"status\":\"413\"}";
+        send(fd, resp, strlen(resp), 0);
+        return -2;  // Special return code for body too large
+    }
+
     // Body (after \r\n\r\n)
     char *bs = strstr(buf, "\r\n\r\n");
     if (bs) {
         bs += 4;
         int bl = total - (bs - buf);
+        if (bl > g_max_body_size) bl = g_max_body_size;
         if (bl > MAX_BODY - 1) bl = MAX_BODY - 1;
         memcpy(g_body, bs, bl);
         g_body[bl] = 0;
@@ -169,10 +204,12 @@ int send_static_file(int fd, const char *path) {
     if (strstr(full_path, "..") != NULL) {
         const char *resp =
             "HTTP/1.1 403 Forbidden\r\n"
-            "Content-Length: 0\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 42\r\n"
             "Connection: close\r\n"
             "Access-Control-Allow-Origin: *\r\n"
-            "\r\n";
+            "\r\n"
+            "{\"error\":\"Forbidden\",\"status\":\"403\"}";
         return send(fd, resp, strlen(resp), 0);
     }
 
@@ -180,10 +217,12 @@ int send_static_file(int fd, const char *path) {
     if (!f) {
         const char *resp =
             "HTTP/1.1 404 Not Found\r\n"
-            "Content-Length: 0\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 38\r\n"
             "Connection: close\r\n"
             "Access-Control-Allow-Origin: *\r\n"
-            "\r\n";
+            "\r\n"
+            "{\"error\":\"Not Found\",\"status\":\"404\"}";
         return send(fd, resp, strlen(resp), 0);
     }
 
@@ -196,10 +235,12 @@ int send_static_file(int fd, const char *path) {
         fclose(f);
         const char *resp =
             "HTTP/1.1 413 Payload Too Large\r\n"
-            "Content-Length: 0\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 49\r\n"
             "Connection: close\r\n"
             "Access-Control-Allow-Origin: *\r\n"
-            "\r\n";
+            "\r\n"
+            "{\"error\":\"File too large\",\"status\":\"413\"}";
         return send(fd, resp, strlen(resp), 0);
     }
 
