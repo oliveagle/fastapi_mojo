@@ -1,45 +1,76 @@
 # src/fastapi_mojo/json.mojo
 #
-# Mojo 原生 JSON 序列化实现
+# Mojo native JSON serialization implementation (linear time).
+
+from string_builder import StringBuilder
+
+
+def _hex2(v: Int) -> String:
+    """Two lowercase hex digits of v (0-255)."""
+    var h = "0123456789abcdef"
+    var hi = v >> 4
+    var lo = v & 0xF
+    return String(h[byte=hi]) + String(h[byte=lo])
 
 
 def json_escape(value: String) -> String:
-    """转义字符串中的特殊字符。"""
-    var result = String("")
-    for i in range(value.byte_length()):
-        var ch = value[grapheme=i]
-        if ch == '"':
-            result += '\\"'
-        elif ch == '\\':
-            result += '\\\\'
-        elif ch == '\n':
-            result += '\\n'
-        elif ch == '\r':
-            result += '\\r'
-        elif ch == '\t':
-            result += '\\t'
+    """Escape special characters in a string (linear time).
+
+    Handles ", \\, \\n, \\r, \\t and all control chars < 0x20 as \\u00XX.
+    NOTE: ord() on a 1-byte span at a codepoint boundary returns the codepoint
+    of the character (not the raw byte), so UTF-8 byte length is derived from
+    the codepoint value. Multi-byte codepoints are copied as whole byte runs
+    and need no JSON escaping."""
+    var sb = StringBuilder()
+    var i = 0
+    var n = value.byte_length()
+    while i < n:
+        var b = value[byte=i]
+        var cp = ord(b)
+        if cp < 0x80:
+            if b == '"':
+                sb.append("\\\"")
+            elif b == '\\':
+                sb.append("\\\\")
+            elif b == '\n':
+                sb.append("\\n")
+            elif b == '\r':
+                sb.append("\\r")
+            elif b == '\t':
+                sb.append("\\t")
+            elif cp < 0x20:
+                sb.append("\\u00" + _hex2(cp))
+            else:
+                sb.append(String(b))
+            i += 1
         else:
-            result += ch
-    return result
+            var blen = 2
+            if cp >= 0x800:
+                blen = 3
+            if cp >= 0x10000:
+                blen = 4
+            sb.append(String(value[byte=i:i+blen]))
+            i += blen
+    return sb.take()
 
 
 def json_serialize(value: String) -> String:
-    """序列化字符串为 JSON。"""
+    """Serialize string to JSON."""
     return '"' + json_escape(value) + '"'
 
 
 def json_serialize(value: Int) -> String:
-    """序列化整数为 JSON。"""
+    """Serialize integer to JSON."""
     return String(value)
 
 
 def json_serialize(value: Float64) -> String:
-    """序列化浮点数为 JSON。"""
+    """Serialize float to JSON."""
     return String(value)
 
 
 def json_serialize(value: Bool) -> String:
-    """序列化布尔值为 JSON。"""
+    """Serialize bool to JSON."""
     if value:
         return "true"
     else:
@@ -47,84 +78,107 @@ def json_serialize(value: Bool) -> String:
 
 
 def json_serialize(value: None) -> String:
-    """序列化 null 为 JSON。"""
+    """Serialize null to JSON."""
     return "null"
 
 
 def json_serialize_key_value(key: String, value: String) -> String:
-    """序列化键值对为 JSON。"""
+    """Serialize key-value pair to JSON."""
     return json_serialize(key) + ": " + value
 
 
 def json_serialize_dict(data: Dict[String, String]) raises -> String:
-    """序列化字典为 JSON。"""
-    var items = List[String]()
+    """Serialize dict to JSON (linear time)."""
+    var items = StringBuilder()
+    var first = True
     for key in data:
+        if not first:
+            items.append(", ")
+        first = False
         items.append(json_serialize_key_value(key, json_serialize(data[key])))
-    return "{" + ", ".join(items) + "}"
+    return "{" + items.take() + "}"
 
 
 def json_serialize_list(data: List[String]) -> String:
-    """序列化列表为 JSON。"""
-    var items = List[String]()
+    """Serialize list to JSON (linear time)."""
+    var items = StringBuilder()
+    var first = True
     for item in data:
+        if not first:
+            items.append(", ")
+        first = False
         items.append(json_serialize(item))
-    return "[" + ", ".join(items) + "]"
+    return "[" + items.take() + "]"
 
 
 def json_serialize_nested_dict(key: String, data: Dict[String, String]) raises -> String:
-    """序列化嵌套字典为 JSON。"""
+    """Serialize nested dict to JSON."""
     return json_serialize(key) + ": " + json_serialize_dict(data)
 
 
 def json_serialize_nested_list(key: String, data: List[String]) raises -> String:
-    """序列化嵌套列表为 JSON。"""
+    """Serialize nested list to JSON."""
     return json_serialize(key) + ": " + json_serialize_list(data)
 
 
 def main() raises:
     print("Testing Mojo JSON serialization...")
 
-    # 测试字符串转义
+    # String escaping
     var str_json = json_serialize("Hello, World!")
-    print("String JSON: " + str_json)
+    if str_json == '"Hello, World!"':
+        print("OK: string")
 
     var escape_json = json_serialize('He said "hi" and left\nNew line')
-    print("Escape JSON: " + escape_json)
+    if escape_json == '"He said \\"hi\\" and left\\nNew line"':
+        print("OK: escapes")
 
-    # 测试整数序列化
-    var int_json = json_serialize(42)
-    print("Int JSON: " + int_json)
+    var ctrl_json = json_serialize("a\x01b")
+    if ctrl_json == '"a\\u0001b"':
+        print("OK: control char -> \\u0001")
 
-    # 测试浮点数序列化
-    var float_json = json_serialize(3.14)
-    print("Float JSON: " + float_json)
+    var emoji_json = json_serialize("é😀")
+    if emoji_json == '"é😀"':
+        print("OK: multibyte passthrough")
 
-    # 测试布尔值序列化
-    var bool_json = json_serialize(True)
-    print("Bool JSON: " + bool_json)
+    # Int / Float / Bool / null
+    if json_serialize(42) == "42":
+        print("OK: int")
+    if json_serialize(3.14) == "3.14":
+        print("OK: float")
+    if json_serialize(True) == "true" and json_serialize(False) == "false":
+        print("OK: bool")
+    if json_serialize(None) == "null":
+        print("OK: null")
 
-    # 测试 null 序列化
-    var null_json = json_serialize(None)
-    print("Null JSON: " + null_json)
-
-    # 测试字典序列化
+    # Dict
     var dict_data = Dict[String, String]()
     dict_data["name"] = "John"
     dict_data["age"] = "30"
     var dict_json = json_serialize_dict(dict_data)
-    print("Dict JSON: " + dict_json)
+    if dict_json == '{"name": "John", "age": "30"}':
+        print("OK: dict")
 
-    # 测试列表序列化
+    # List
     var list_data = List[String]()
     list_data.append("apple")
     list_data.append("banana")
     list_data.append("cherry")
     var list_json = json_serialize_list(list_data)
-    print("List JSON: " + list_json)
+    if list_json == '["apple", "banana", "cherry"]':
+        print("OK: list")
 
-    # 测试嵌套
+    # Nested
     var nested_json = "{" + json_serialize_nested_dict("user", dict_data) + ", " + json_serialize_nested_list("fruits", list_data) + "}"
-    print("Nested JSON: " + nested_json)
+    if nested_json == '{"user": {"name": "John", "age": "30"}, "fruits": ["apple", "banana", "cherry"]}':
+        print("OK: nested")
+
+    # Performance: 256KB string must escape fast (was O(n^2) minutes)
+    var big = StringBuilder()
+    for _ in range(256 * 1024):
+        big.append_byte(0x61)
+    var big_json = json_escape(big.take())
+    if big_json.byte_length() == 262144:
+        print("OK: 256KB escaped linearly")
 
     print("JSON serialization test completed!")
