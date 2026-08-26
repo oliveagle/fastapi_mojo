@@ -4,7 +4,7 @@
 
 
 struct RouteMatch:
-    """路由匹配结果。"""
+    """路由匹配结果."""
     var matched: Bool
     var params: Dict[String, String]
     var handler_name: String
@@ -21,7 +21,7 @@ struct RouteMatch:
 
 
 struct Route:
-    """路由条目。"""
+    """路由条目."""
     var path: String
     var method: String
     var handler_name: String
@@ -32,18 +32,18 @@ struct Route:
         self.handler_name = handler_name
 
     def match(self, path: String, method: String) -> Bool:
-        """检查路由是否匹配（精确 + pattern）。"""
+        """检查路由是否匹配（精确 + pattern）."""
         if self.method != method:
             return False
         return self.match_path_only(path)
 
     def match_path_only(self, path: String) -> Bool:
-        """仅按路径匹配（忽略 method）。用于 405 检测：
-        路径存在但方法未注册时，应回 405 + Allow 而不是 404。"""
+        """仅按路径匹配（忽略 method）.
+        用于 405 检测：路径存在但方法未注册时，应回 405 + Allow 而不是 404。"""
         return self._match_path(path)
 
     def match_with_params(self, path: String, method: String) -> RouteMatch:
-        """匹配路由并返回提取的参数。"""
+        """匹配路由并返回提取的参数."""
         if self.method != method:
             return RouteMatch()
         return self._match_path_with_params(path)
@@ -88,25 +88,25 @@ struct Route:
 
 
 struct Router:
-    """Mojo 原生路由表。"""
+    """Mojo 原生路由表."""
     var routes: List[Route]
 
     def __init__(out self):
         self.routes = List[Route]()
 
     def add_route(mut self, path: String, method: String, handler_name: String):
-        """添加路由。"""
+        """添加路由."""
         self.routes.append(Route(path, method, handler_name))
 
     def match_route(self, path: String, method: String) -> Bool:
-        """匹配路由（精确 + pattern）。"""
+        """匹配路由（精确 + pattern）."""
         for i in range(len(self.routes)):
             if self.routes[i].match(path, method):
                 return True
         return False
 
     def match_route_with_params(self, path: String, method: String) -> RouteMatch:
-        """匹配路由并返回参数 + handler 名称。"""
+        """匹配路由并返回参数 + handler 名称."""
         for i in range(len(self.routes)):
             var result = self.routes[i].match_with_params(path, method)
             if result.matched:
@@ -114,7 +114,7 @@ struct Router:
         return RouteMatch()
 
     def methods_for_path(self, path: String) -> List[String]:
-        """返回某路径已注册的所有方法（pattern 感知）。
+        """返回某路径已注册的所有方法（pattern 感知）.
         空列表 = 该路径不存在（404）；非空但请求方法不在其中 = 405。"""
         var result = List[String]()
         for i in range(len(self.routes)):
@@ -123,7 +123,7 @@ struct Router:
         return result.copy()
 
     def route_count(self) -> Int:
-        """获取路由数量。"""
+        """获取路由数量."""
         return len(self.routes)
 
 

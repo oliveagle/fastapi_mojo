@@ -50,6 +50,7 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │       ├── index.html
 │       └── test.json
 ├── docs/adr/                      # 架构决策记录（含 6 条架构隔离约束声明）
+├── fastapi/                       # git submodule：bootstrap 时代参考（FastAPI 0.141.1 源码），非运行期依赖
 └── .beads/                        # beads-rust 任务管理
 ```
 

@@ -36,6 +36,10 @@
 **本标已达成**：单一文件部署（scp 即运行）。实现机制见 `docs/adr/0003-single-binary-mechanism/`
 （Mojo 1.0.0 无静态运行时库 → 嵌入 + 启动暂存 + dlopen 符号转发）。
 
+> 注：`fastapi/` 目录是 bootstrap 时代（Phase 0，Mojo wrapper 调 Python FastAPI）
+> 保留的 git submodule（FastAPI 0.141.1 源码参考），**非运行期依赖** ——
+> 单一 binary 不读取它；Phase 2 完成后若不再需要参考可移除。
+
 ---
 
 ## 3. 架构约束（不可违背）

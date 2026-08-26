@@ -9,7 +9,7 @@ from string_builder import decode_utf8_bytes, StringBuilder, span_to_str
 
 
 def test_json() raises:
-    """测试 JSON 序列化。"""
+    """测试 JSON 序列化."""
     print("=== JSON Tests ===")
 
     # 字符串
@@ -56,7 +56,7 @@ def test_json() raises:
 
 
 def test_router() raises:
-    """测试路由匹配。"""
+    """测试路由匹配."""
     print("=== Router Tests ===")
 
     var router = Router()
@@ -107,7 +107,7 @@ def test_router() raises:
 
 
 def test_params() raises:
-    """测试参数解析。"""
+    """测试参数解析."""
     print("=== Params Tests ===")
 
     # Path params
@@ -166,7 +166,7 @@ def test_params() raises:
 
 
 def test_string_builder() raises:
-    """测试线性字符串构建 + UTF-8 解码。"""
+    """测试线性字符串构建 + UTF-8 解码."""
     print("=== StringBuilder Tests ===")
 
     # decode UTF-8 bytes (héllo: 68 C3 A9 6C 6C 6F)
@@ -197,7 +197,7 @@ def test_string_builder() raises:
 
 
 def test_span_to_str() raises:
-    """测试 bulk 字节 span → UTF-8 字符串解码。"""
+    """测试 bulk 字节 span → UTF-8 字符串解码."""
     print("=== SpanToStr Tests ===")
 
     # ASCII
