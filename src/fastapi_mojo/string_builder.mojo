@@ -191,3 +191,29 @@ def main() raises:
         print("OK: 256KB built linearly")
 
     print("StringBuilder test completed!")
+
+# Bulk decode of a raw byte span (e.g. a CStringSlice.as_bytes() from the
+# C bridge) into a UTF-8 String, in amortized O(n). The C side has already
+# validated the UTF-8; isolated/invalid sequences still degrade to U+FFFD.
+def span_to_str(bs: Span[UInt8, ...]) -> String:
+    var sb = StringBuilder()
+    var n = len(bs)
+    var i = 0
+    while i < n:
+        var b = Int(bs[i])
+        if b < 0x80:
+            sb.append_byte(b)
+            i += 1
+        elif b < 0xC0:
+            sb.append_codepoint(0xFFFD)
+            i += 1
+        elif b < 0xE0:
+            sb.append_codepoint((b & 0x1F) * 64 + (Int(bs[i + 1]) & 0x3F))
+            i += 2
+        elif b < 0xF0:
+            sb.append_codepoint((b & 0x0F) * 4096 + (Int(bs[i + 1]) & 0x3F) * 64 + (Int(bs[i + 2]) & 0x3F))
+            i += 3
+        else:
+            sb.append_codepoint((b & 0x07) * 262144 + (Int(bs[i + 1]) & 0x3F) * 4096 + (Int(bs[i + 2]) & 0x3F) * 64 + (Int(bs[i + 3]) & 0x3F))
+            i += 4
+    return sb.take()

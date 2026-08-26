@@ -3,12 +3,12 @@
 # Final HTTP server: json.mojo + router.mojo + params.mojo + middleware + static files
 # Features: CORS, graceful shutdown, HEAD support, request ID, timing, static files
 
-from std.ffi import external_call
+from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
 from middleware import Middleware
-from string_builder import decode_utf8_bytes, next_codepoint_len
+from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
@@ -116,31 +116,13 @@ def main() raises:
         req_num += 1
         var req_id = generate_request_id(req_num)
 
-        # Read request fields as raw bytes, then UTF-8 decode.
-        # (chr()-per-byte would both corrupt multi-byte UTF-8 and be O(n^2).)
-        var m_len = external_call["get_method_len", Int]()
-        var method_bytes = List[Int]()
-        for i in range(m_len):
-            method_bytes.append(external_call["read_method_byte", Int](i))
-        var method = decode_utf8_bytes(method_bytes)
-
-        var p_len = external_call["get_path_len", Int]()
-        var path_bytes = List[Int]()
-        for i in range(p_len):
-            path_bytes.append(external_call["read_path_byte", Int](i))
-        var path = decode_utf8_bytes(path_bytes)
-
-        var q_len = external_call["get_query_len", Int]()
-        var query_bytes = List[Int]()
-        for i in range(q_len):
-            query_bytes.append(external_call["read_query_byte", Int](i))
-        var query = decode_utf8_bytes(query_bytes)
-
-        var b_len = external_call["get_body_len", Int]()
-        var body_bytes = List[Int]()
-        for i in range(b_len):
-            body_bytes.append(external_call["read_body_byte", Int](i))
-        var body_str = decode_utf8_bytes(body_bytes)
+        # Request fields are transferred from the C bridge in bulk as
+        # CStringSlice (pointer + length) and UTF-8 decoded here in
+        # amortized O(n) (the C side already validated the UTF-8).
+        var method = span_to_str(external_call["get_method_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+        var path = span_to_str(external_call["get_path_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+        var query = span_to_str(external_call["get_query_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+        var body_str = span_to_str(external_call["get_body_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
 
         # Handle OPTIONS preflight (CORS)
         if method == "OPTIONS":

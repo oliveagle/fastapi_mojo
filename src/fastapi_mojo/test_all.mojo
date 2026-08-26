@@ -5,7 +5,7 @@
 from json import json_serialize, json_serialize_dict, json_escape
 from router import Router, RouteMatch
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams, url_decode
-from string_builder import decode_utf8_bytes, StringBuilder
+from string_builder import decode_utf8_bytes, StringBuilder, span_to_str
 
 
 def test_json() raises:
@@ -196,6 +196,40 @@ def test_string_builder() raises:
     print("StringBuilder tests passed!")
 
 
+def test_span_to_str() raises:
+    """测试 bulk 字节 span → UTF-8 字符串解码。"""
+    print("=== SpanToStr Tests ===")
+
+    # ASCII
+    var s1 = String("hello")
+    assert span_to_str(s1.as_c_string_slice().as_bytes()) == "hello", "ASCII failed"
+    # 2-byte (é)
+    var s2 = String("caf\u00e9")
+    assert span_to_str(s2.as_c_string_slice().as_bytes()) == "caf\u00e9", "2-byte failed"
+    # 3-byte (世)
+    var s3 = String("\u4e16\u754c")
+    assert span_to_str(s3.as_c_string_slice().as_bytes()) == "\u4e16\u754c", "3-byte failed"
+    # 4-byte (emoji)
+    var s4 = String("a\U0001F600b")
+    assert span_to_str(s4.as_c_string_slice().as_bytes()) == "a\U0001F600b", "4-byte failed"
+    # mixed
+    var s5 = String("Hi \u00e9 \u4e16 \U0001F600 end")
+    assert span_to_str(s5.as_c_string_slice().as_bytes()) == "Hi \u00e9 \u4e16 \U0001F600 end", "mixed failed"
+    # empty
+    var s6 = String("")
+    assert span_to_str(s6.as_c_string_slice().as_bytes()) == "", "empty failed"
+    # 1MB: linear smoke (amortized O(n))
+    var big = StringBuilder()
+    var i = 0
+    while i < 1000000:
+        big.append_byte(97)
+        i += 1
+    var big_s = big.take()
+    var r = span_to_str(big_s.as_c_string_slice().as_bytes())
+    assert r.byte_length() == 1000000, "1MB length wrong"
+    print("SpanToStr tests passed!")
+
+
 def main() raises:
     print("Running all tests...")
     test_json()
@@ -203,4 +237,6 @@ def main() raises:
     test_params()
     test_string_builder()
     print("")
+    test_span_to_str()
+
     print("All tests passed!")
