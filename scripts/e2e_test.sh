@@ -253,6 +253,13 @@ PY
 if [[ "$CC_RESULT" == OK* ]]; then pass "100-continue -> interim 100 then 200, no 1s stall ($CC_RESULT)"
 else fail "100-continue -> interim 100 then 200, no 1s stall" "$CC_RESULT"; fi
 
+# chunked Transfer-Encoding -> 411 (bodies are read strictly by Content-Length;
+# the old behavior silently dropped the body and answered 200)
+CHUNKED_HEX=$(python3 -c "print((b'POST /items HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n').hex())")
+expect_raw_status "chunked -> 411 Length Required" "411 Length Required" "$CHUNKED_HEX"
+CHUNKED_LC_HEX=$(python3 -c "print((b'POST /items HTTP/1.1\r\nHost: x\r\ntransfer-encoding: chunked\r\n\r\n').hex())")
+expect_raw_status "chunked (lowercase header) -> 411" "411 Length Required" "$CHUNKED_LC_HEX"
+
 # --- HEAD / OPTIONS ----------------------------------------------------------
 
 echo "== HEAD / OPTIONS =="

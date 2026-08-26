@@ -1,5 +1,9 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v9: Transfer-Encoding requests are rejected with 411 Length Required
+//     (bodies are read strictly by Content-Length; old behavior silently
+//     dropped chunked bodies and answered 200 with no data).
+//
 // v8: Expect: 100-continue — interim "HTTP/1.1 100 Continue" is sent
 //     before the body is read (was: clients stalling ~1s waiting for it).
 //
@@ -240,6 +244,25 @@ long send_error_json(int fd, const char *status, const char *msg);
 // (Defined below; needed by recv_and_parse for the 100-continue interim.)
 static int send_all(int fd, const char *buf, int len);
 
+// Case-insensitive search for a header NAME (line-anchored: at the start
+// of the buffer or right after \n) in hdr[0..hlen).
+static int has_header_name_ci(const char *hdr, size_t hlen, const char *name) {
+    size_t nlen = strlen(name);
+    if (nlen == 0 || nlen > hlen) return 0;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        if (i > 0 && hdr[i - 1] != '\n') continue;
+        int match = 1;
+        for (size_t k = 0; k < nlen; k++) {
+            if (tolower((unsigned char)hdr[i + k]) != tolower((unsigned char)name[k])) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) return 1;
+    }
+    return 0;
+}
+
 // Case-insensitive check for "Expect: 100-continue" among the header lines
 // in hdr[0..hlen). (100-continue is the only Expect value we honor; per
 // RFC 7231 \u00a75.1.1 we must answer it with an interim response or a 4xx,
@@ -376,6 +399,17 @@ long recv_and_parse(int fd) {
             content_length = content_length * 10 + (*cl - '0');
             cl++;
         }
+    }
+
+    // 4b) Transfer-Encoding (chunked or otherwise) is not supported: we
+    // read bodies strictly by Content-Length. Answer 411 so the client can
+    // retry with a length, instead of us silently processing a request
+    // whose body we cannot see (old behavior: 200 with an empty body).
+    if (has_header_name_ci(hdr, (size_t)hdr_end, "Transfer-Encoding")) {
+        send_error_json(fd, "411 Length Required",
+                        "Transfer-Encoding not supported; send Content-Length");
+        free(hdr);
+        return -9;
     }
 
     // 5) Body size limit — checked BEFORE any clamping (v2 bug).
