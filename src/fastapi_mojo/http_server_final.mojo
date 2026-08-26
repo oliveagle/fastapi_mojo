@@ -8,6 +8,7 @@ from json import json_serialize_dict
 from router import Router, RouteMatch
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
 from middleware import Middleware
+from string_builder import decode_utf8_bytes, next_codepoint_len
 
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
@@ -33,14 +34,31 @@ def log_request(req_id: String, method: String, path: String, query: String, sta
 
 
 def is_static_path(path: String) -> Bool:
-    """Check if path should be served as static file."""
-    for c in path:
-        if c == '.':
-            return True
-    if path.byte_length() >= 7:
-        if (path[byte=0] == '/' and path[byte=1] == 's' and path[byte=2] == 't' and
-            path[byte=3] == 'a' and path[byte=4] == 't' and path[byte=5] == 'i' and
-            path[byte=6] == 'c'):
+    """Check if path should be served as a static file.
+
+    Only paths with a known file extension are treated as static, so API
+    routes (e.g. /hello, /items/42) are never misrouted. Previously ANY path
+    containing a dot was treated as static (bug).
+    """
+    # Find the LAST dot (boundary-aware; '.' is ASCII so codepoint steps
+    # always land on boundaries).
+    var idx = -1
+    var i = 0
+    var n = path.byte_length()
+    while i < n:
+        if path[byte=i] == '.':
+            idx = i
+        i += next_codepoint_len(path, i)
+    if idx < 0:
+        return False
+    var ext = path[byte=idx:]
+    var known: List[String] = [
+        ".html", ".htm", ".css", ".js", ".mjs", ".json", ".xml", ".txt",
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+        ".woff", ".woff2", ".pdf", ".map", ".css.map",
+    ]
+    for k in known:
+        if ext == k:
             return True
     return False
 
@@ -89,8 +107,9 @@ def main() raises:
 
         var n = external_call["recv_and_parse", Int](cfd)
         if n < 0:
-            if n == -2:
-                print("[" + String(req_num) + "] → 413 Payload Too Large")
+            # C bridge already sent the appropriate error response:
+            # -1 (malloc fail / no data), -2 (413 too large),
+            # -3 (400 invalid request-line UTF-8), -4 (400 invalid body UTF-8)
             _ = external_call["close_fd", Int](cfd)
             continue
         if n == 0:
@@ -100,33 +119,31 @@ def main() raises:
         req_num += 1
         var req_id = generate_request_id(req_num)
 
+        # Read request fields as raw bytes, then UTF-8 decode.
+        # (chr()-per-byte would both corrupt multi-byte UTF-8 and be O(n^2).)
         var m_len = external_call["get_method_len", Int]()
-        var method = String("")
+        var method_bytes = List[Int]()
         for i in range(m_len):
-            var b = external_call["read_method_byte", Int](i)
-            if b >= 0:
-                method += chr(b)
+            method_bytes.append(external_call["read_method_byte", Int](i))
+        var method = decode_utf8_bytes(method_bytes)
 
         var p_len = external_call["get_path_len", Int]()
-        var path = String("")
+        var path_bytes = List[Int]()
         for i in range(p_len):
-            var b = external_call["read_path_byte", Int](i)
-            if b >= 0:
-                path += chr(b)
+            path_bytes.append(external_call["read_path_byte", Int](i))
+        var path = decode_utf8_bytes(path_bytes)
 
         var q_len = external_call["get_query_len", Int]()
-        var query = String("")
+        var query_bytes = List[Int]()
         for i in range(q_len):
-            var b = external_call["read_query_byte", Int](i)
-            if b >= 0:
-                query += chr(b)
+            query_bytes.append(external_call["read_query_byte", Int](i))
+        var query = decode_utf8_bytes(query_bytes)
 
         var b_len = external_call["get_body_len", Int]()
-        var body_str = String("")
+        var body_bytes = List[Int]()
         for i in range(b_len):
-            var b = external_call["read_body_byte", Int](i)
-            if b >= 0:
-                body_str += chr(b)
+            body_bytes.append(external_call["read_body_byte", Int](i))
+        var body_str = decode_utf8_bytes(body_bytes)
 
         # Handle OPTIONS preflight (CORS)
         if method == "OPTIONS":
@@ -143,10 +160,17 @@ def main() raises:
 
         # Try static file serving for GET/HEAD requests
         if (effective_method == "GET") and is_static_path(path):
-            _ = external_call["send_static_file", Int](
-                cfd,
-                path.as_c_string_slice(),
-            )
+            if is_head:
+                # HEAD: headers only, no body (a body would violate HTTP)
+                _ = external_call["send_static_file_head", Int](
+                    cfd,
+                    path.as_c_string_slice(),
+                )
+            else:
+                _ = external_call["send_static_file", Int](
+                    cfd,
+                    path.as_c_string_slice(),
+                )
             _ = external_call["close_fd", Int](cfd)
             log_request(req_id, method, path, query, "200 OK (static)")
             continue
