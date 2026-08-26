@@ -36,6 +36,12 @@ command -v "$PYTHON_BIN" >/dev/null || { echo "缺少 python3"; exit 1; }
 command -v hey >/dev/null || { echo "缺少 hey（go install github.com/rakyll/hey@latest）"; exit 1; }
 command -v mojo >/dev/null || { echo "缺少 mojo"; exit 1; }
 
+# 单一二进制：若不存在则自动构建（benchmark 目标是最终交付物）
+if [[ ! -f "$ROOT/build/fastapi_mojo" ]]; then
+    echo "build/fastapi_mojo 不存在，自动构建单一二进制..."
+    "$ROOT/build_single.sh" || { echo "构建失败"; exit 1; }
+fi
+
 # --history 直接透传
 if [[ "${1:-}" == "--history" ]]; then
     "$PYTHON_BIN" bench.py --history "${@:2}"

@@ -57,8 +57,9 @@ def parse_args():
     p = argparse.ArgumentParser(description="Unified benchmark runner for fastapi_mojo")
     p.add_argument("--server-dir", default="src/fastapi_mojo",
                    help="目录，在其中启动服务器（默认 src/fastapi_mojo）")
-    p.add_argument("--server-cmd", default="mojo run hello.mojo",
-                   help="服务器启动命令（默认 'mojo run hello.mojo'）")
+    p.add_argument("--server-cmd", default="../../build/fastapi_mojo",
+                   help="服务器启动命令（默认单一二进制 ../../build/fastapi_mojo，"
+                        "相对于 --server-dir；需先 ./build_single.sh 构建）")
     p.add_argument("--port", type=int, default=8000, help="服务器端口（默认 8000）")
     p.add_argument("--hey", default="hey", help="hey 二进制路径（默认 PATH 中的 hey）")
     p.add_argument("--scenarios", default=None,
