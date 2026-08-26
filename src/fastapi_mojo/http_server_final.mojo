@@ -112,7 +112,7 @@ def main() raises:
             # -1 (malloc fail / no data), -2 (413 too large),
             # -3 (400 invalid request-line UTF-8), -4 (400 invalid body UTF-8),
             # -5 (408 request timeout — Slowloris guard),
-            # -6 (400 malformed request line)
+            # -6 (400 malformed request line), -7 (431 header too large)
             _ = external_call["close_fd", Int](cfd)
             continue
         if n == 0:

@@ -1,5 +1,8 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v6: oversized request headers (>= HDR_BUF_SIZE, 16KB) -> 431 Request
+//     Header Fields Too Large (was: silent connection reset).
+//
 // v5: request-line validation (400 Bad Request on malformed METHOD/PATH/
 //     protocol token, e.g. a bare "BLAH\r\n\r\n"; was: 404 for path "").
 //
@@ -250,7 +253,19 @@ long recv_and_parse(int fd) {
         hdr_end = find_header_end(hdr, total);
     }
     if (total <= 0) { free(hdr); return 0; }
-    if (hdr_end < 0) { free(hdr); return 0; }  // incomplete headers
+    if (hdr_end < 0) {
+        // Buffer filled before the header terminator was found: the request
+        // header fields exceed HDR_BUF_SIZE (16KB) -> 431, not a silent
+        // close (a connection reset with no status was the old behavior).
+        if (total >= HDR_BUF_SIZE - 1) {
+            send_error_json(fd, "431 Request Header Fields Too Large",
+                            "Request header too large");
+            free(hdr);
+            return -7;
+        }
+        free(hdr);
+        return 0;  // incomplete headers (client disconnected): drop silently
+    }
 
     // 2) Reset globals
     g_method_len = g_path_len = g_query_len = g_body_len = 0;
