@@ -15,6 +15,10 @@
 //
 // The Mojo side reads request fields byte-by-byte via the read_*_byte
 // accessors (single-threaded sequential server, so global state is safe).
+//
+// Diagnostics: set FASTAPI_MOJO_CDEBUG=1 to trace accept/parse/send events
+// to stderr (including send failures with errno — e.g. EPIPE when a client
+// resets the connection mid-response).
 
 #define _GNU_SOURCE
 #include <sys/socket.h>
@@ -25,8 +29,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <stdarg.h>
 
 #define HDR_BUF_SIZE 16384      // request header buffer (first line + headers)
 #define MAX_METHOD 16
@@ -46,6 +52,17 @@ static int g_max_body_size = DEFAULT_MAX_BODY_SIZE;
 
 static volatile int g_running = 1;
 
+static int g_cdebug = -1;
+static void cdebug(const char *fmt, ...) {
+    if (g_cdebug == -1) g_cdebug = getenv("FASTAPI_MOJO_CDEBUG") ? 1 : 0;
+    if (!g_cdebug) return;
+    va_list ap; va_start(ap, fmt);
+    fprintf(stderr, "[cbridge] ");
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
+
 void signal_handler(int sig) { (void)sig; g_running = 0; }
 
 void setup_signal_handlers() {
@@ -56,6 +73,12 @@ void setup_signal_handlers() {
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    // SIGPIPE: clients routinely reset the connection mid-response (e.g. they
+    // abort a large upload after receiving a 413). Without ignoring it, the
+    // next send() kills the whole server process. With SIG_IGN, send() fails
+    // with EPIPE and send_all() returns -1, so the connection is simply
+    // dropped and the server keeps serving.
+    signal(SIGPIPE, SIG_IGN);
 }
 
 int is_running() { return g_running; }
@@ -98,7 +121,9 @@ int create_bound_socket(int port) {
 int accept_connection(int sfd) {
     if (!g_running) return -1;
     struct sockaddr_in ca; socklen_t cl = sizeof(ca);
-    return accept(sfd, (struct sockaddr*)&ca, &cl);
+    int cfd = accept(sfd, (struct sockaddr*)&ca, &cl);
+    if (cfd >= 0) cdebug("accept fd=%d", cfd);
+    return cfd;
 }
 
 // Read more bytes into buf at offset off; returns bytes read (0 on EOF/error).
@@ -228,6 +253,7 @@ int recv_and_parse(int fd) {
 
     // 5) Body size limit — checked BEFORE any clamping (v2 bug).
     if (content_length > g_max_body_size) {
+        cdebug("413 fd=%d content_length=%d (unread body stays in kernel)", fd, content_length);
         send_error_json(fd, "413 Payload Too Large", "Request body too large");
         free(hdr);
         return -2;
@@ -251,6 +277,8 @@ int recv_and_parse(int fd) {
         g_body_len = got;
     }
 
+    cdebug("parsed fd=%d method_len=%d path_len=%d query_len=%d body_len=%d",
+           fd, g_method_len, g_path_len, g_query_len, g_body_len);
     free(hdr);
 
     // 7) UTF-8 validation of the request line.
@@ -306,10 +334,24 @@ static int send_all(int fd, const char *buf, int len) {
     int off = 0;
     while (off < len) {
         int n = send(fd, buf + off, (size_t)(len - off), 0);
-        if (n <= 0) return -1;
+        if (n <= 0) {
+            cdebug("send_all fd=%d off=%d len=%d n=%d errno=%d (%s)",
+                   fd, off, len, n, errno, strerror(errno));
+            return -1;
+        }
         off += n;
     }
     return 0;
+}
+
+// Track the last response status line so the Mojo side can log the real
+// status for static file responses (which return 403/404/413 internally).
+static char g_last_status[32] = "";
+
+int get_last_status_len() { return (int)strlen(g_last_status); }
+int read_last_status_byte(int i) {
+    int n = (int)strlen(g_last_status);
+    return (i >= 0 && i < n) ? (unsigned char)g_last_status[i] : -1;
 }
 
 // Send a full HTTP response (header + optional body) with a real length.
@@ -328,6 +370,7 @@ static int send_response(int fd, const char *status, const char *content_type,
         "\r\n",
         status, content_type, body_len);
     if (hlen < 0 || hlen >= (int)sizeof(hdr)) return -1;
+    snprintf(g_last_status, sizeof g_last_status, "%s", status);
     if (send_all(fd, hdr, hlen) != 0) return -1;
     if (include_body && body_len > 0) {
         if (send_all(fd, body, body_len) != 0) return -1;
