@@ -4,7 +4,8 @@
 
 from json import json_serialize, json_serialize_dict, json_escape
 from router import Router, RouteMatch
-from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
+from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams, url_decode
+from string_builder import decode_utf8_bytes, StringBuilder
 
 
 def test_json() raises:
@@ -34,6 +35,14 @@ def test_json() raises:
     # null
     var n = json_serialize(None)
     assert n == "null", "Null serialize failed"
+
+    # multibyte passthrough (no mojibake)
+    var m = json_escape("é😀")
+    assert m == "é😀", "Multibyte escape failed"
+
+    # control char -> \u00XX
+    var cc = json_escape("ab")
+    assert cc == "a\u0001b", "Control char escape failed"
 
     # 字典
     var d = Dict[String, String]()
@@ -126,7 +135,54 @@ def test_params() raises:
     var b3 = parse_body_json("not json")
     assert b3.has_error, "Invalid JSON should have error"
 
+    # UTF-8 percent decode
+    var q3 = parse_query_params("msg=%C3%A9%20ok")
+    assert q3.values["msg"] == "é ok", "UTF-8 percent decode failed"
+
+    # malformed %XX kept literal
+    var q4 = parse_query_params("bad=%zz%41")
+    assert q4.values["bad"] == "%zzA", "Malformed %XX failed"
+
+    # surrogate pair -> single codepoint
+    var b4 = parse_body_json('{"emoji":"\\uD83D\\uDE00"}')
+    assert b4.values["emoji"] == "😀", "Surrogate pair failed"
+
+    # lone surrogate -> U+FFFD
+    var b5 = parse_body_json('{"bad":"\\ud800"}')
+    assert b5.values["bad"] == "\uFFFD", "Lone surrogate failed"
+
     print("Params tests passed!")
+
+
+def test_string_builder() raises:
+    """测试线性字符串构建 + UTF-8 解码。"""
+    print("=== StringBuilder Tests ===")
+
+    # decode UTF-8 bytes (héllo: 68 C3 A9 6C 6C 6F)
+    var bs = List[Int]()
+    for b in [0x68, 0xC3, 0xA9, 0x6C, 0x6C, 0x6F]:
+        bs.append(b)
+    assert decode_utf8_bytes(bs) == "héllo", "UTF-8 decode failed"
+
+    # 4-byte codepoint (U+1F600: F0 9F 98 80)
+    var bs2 = List[Int]()
+    for b in [0xF0, 0x9F, 0x98, 0x80]:
+        bs2.append(b)
+    assert decode_utf8_bytes(bs2) == "😀", "4-byte UTF-8 decode failed"
+
+    # invalid byte -> U+FFFD
+    var bs3 = List[Int]()
+    for b in [0x61, 0xFF, 0x62]:
+        bs3.append(b)
+    assert decode_utf8_bytes(bs3) == "a\uFFFD" + "b", "U+FFFD failed"
+
+    # linear build
+    var sb = StringBuilder()
+    for _ in range(10000):
+        sb.append("abc")
+    assert sb.take().byte_length() == 30000, "StringBuilder failed"
+
+    print("StringBuilder tests passed!")
 
 
 def main() raises:
@@ -134,5 +190,6 @@ def main() raises:
     test_json()
     test_router()
     test_params()
+    test_string_builder()
     print("")
     print("All tests passed!")
