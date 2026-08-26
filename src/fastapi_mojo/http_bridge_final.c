@@ -1,5 +1,8 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v5: request-line validation (400 Bad Request on malformed METHOD/PATH/
+//     protocol token, e.g. a bare "BLAH\r\n\r\n"; was: 404 for path "").
+//
 // v4: Slowloris guard (per-connection SO_RCVTIMEO/SO_SNDTIMEO, default 5s,
 //     FASTAPI_MOJO_RECV_TIMEOUT; stalled clients get 408 Request Timeout and
 //     the connection is dropped, the single-threaded server keeps serving).
@@ -275,6 +278,33 @@ long recv_and_parse(int fd) {
             g_path[k] = 0;
             g_path_len = k;
             break;
+        }
+    }
+
+    // 3b) Validate the request line: METHOD SP PATH SP HTTP/1.x
+    // (RFC 7230 §2.7/§3: method is an uppercase token, the target starts
+    // with '/', we accept HTTP/1.0 and HTTP/1.1 only). Anything else —
+    // e.g. a bare "BLAH\r\n\r\n" — is a 400, not a 404 for path "".
+    {
+        int ok_method = (g_method_len >= 1 && g_method_len < MAX_METHOD);
+        for (int k = 0; ok_method && k < g_method_len; k++) {
+            unsigned char c = (unsigned char)g_method[k];
+            if (c < 'A' || c > 'Z') ok_method = 0;
+        }
+        int ok_path = (g_path_len >= 1 && g_path[0] == '/');
+        char proto[16];
+        int plen = 0;
+        int j = i;
+        if (j < total && hdr[j] == ' ') j++;
+        while (j < total && hdr[j] != '\r' && plen < (int)sizeof(proto) - 1)
+            proto[plen++] = hdr[j++];
+        proto[plen] = 0;
+        int ok_proto = (strcmp(proto, "HTTP/1.0") == 0 ||
+                        strcmp(proto, "HTTP/1.1") == 0);
+        if (!ok_method || !ok_path || !ok_proto) {
+            send_error_json(fd, "400 Bad Request", "Malformed request line");
+            free(hdr);
+            return -6;
         }
     }
 
