@@ -229,6 +229,30 @@ expect_raw_status "raw bad-utf8 path -> 400" "400 Bad Request" "$BADPATH_HEX"
 BIGHDR_HEX=$(python3 -c "print((b'GET / HTTP/1.1\r\n' + b'X-Pad: ' + b'a'*17000 + b'\r\nHost: x\r\n\r\n').hex())")
 expect_raw_status "17KB headers -> 431" "431 Request Header Fields Too Large" "$BIGHDR_HEX"
 
+# 100-continue: server must send the interim 100 before the body, then the
+# final 200 — total well under the ~1s client stall of the old behavior.
+CC_RESULT=$(python3 - "$PORT" <<'PY'
+import socket, time, sys
+PORT = int(sys.argv[1])
+t0 = time.time()
+s = socket.create_connection(('127.0.0.1', PORT), timeout=8)
+s.send(b'POST /items HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 9\r\n\r\n' + b'{"x":"1"}')
+data = b''
+while True:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+dt = time.time() - t0
+s.close()
+text = data.decode(errors='replace')
+ok = ('100 Continue' in text) and ('200 OK' in text) and dt < 0.9
+print(('OK' if ok else 'FAIL') + ' dt=%.3fs' % dt)
+PY
+)
+if [[ "$CC_RESULT" == OK* ]]; then pass "100-continue -> interim 100 then 200, no 1s stall ($CC_RESULT)"
+else fail "100-continue -> interim 100 then 200, no 1s stall" "$CC_RESULT"; fi
+
 # --- HEAD / OPTIONS ----------------------------------------------------------
 
 echo "== HEAD / OPTIONS =="

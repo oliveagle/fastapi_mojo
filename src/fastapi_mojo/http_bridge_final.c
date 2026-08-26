@@ -1,5 +1,8 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v8: Expect: 100-continue — interim "HTTP/1.1 100 Continue" is sent
+//     before the body is read (was: clients stalling ~1s waiting for it).
+//
 // v7: 405 support — send_response takes an extra header line, and
 //     send_simple_response_allow() emits the RFC 7231 Allow header for
 //     "path exists, method not registered" (was: 404).
@@ -49,6 +52,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #define HDR_BUF_SIZE 16384      // request header buffer (first line + headers)
 #define MAX_METHOD 16
@@ -233,6 +237,36 @@ static int utf8_valid(const char *s, int len) {
 // JSON error response with a correctly computed Content-Length.
 // (Defined below send_response; prototype here for use in recv_and_parse.)
 long send_error_json(int fd, const char *status, const char *msg);
+// (Defined below; needed by recv_and_parse for the 100-continue interim.)
+static int send_all(int fd, const char *buf, int len);
+
+// Case-insensitive check for "Expect: 100-continue" among the header lines
+// in hdr[0..hlen). (100-continue is the only Expect value we honor; per
+// RFC 7231 \u00a75.1.1 we must answer it with an interim response or a 4xx,
+// never ignore it.)
+static int expect_100_continue(const char *hdr, size_t hlen) {
+    size_t i = 0;
+    while (i + 7 <= hlen) {
+        char name[8];
+        for (int k = 0; k < 7; k++) name[k] = (char)tolower((unsigned char)hdr[i + k]);
+        name[7] = 0;
+        if (strcmp(name, "expect:") == 0) {
+            size_t j = i + 7;
+            while (j < hlen && hdr[j] != '\r' && hdr[j] != '\n') {
+                if (j + 12 <= hlen) {
+                    char val[13];
+                    for (int k = 0; k < 12; k++) val[k] = (char)tolower((unsigned char)hdr[j + k]);
+                    val[12] = 0;
+                    if (strcmp(val, "100-continue") == 0) return 1;
+                }
+                j++;
+            }
+            return 0;
+        }
+        i++;
+    }
+    return 0;
+}
 
 long recv_and_parse(int fd) {
     char *hdr = malloc(HDR_BUF_SIZE);
@@ -352,6 +386,16 @@ long recv_and_parse(int fd) {
         return -2;
     }
     if (content_length > MAX_BODY) content_length = MAX_BODY;
+
+    // 5b) Expect: 100-continue — send the interim response BEFORE reading
+    // the body, otherwise the client (e.g. curl) stalls ~1s waiting for it.
+    // (Only reached when we are about to read a body; 413 above already
+    // rejected oversized requests without one.)
+    if (content_length > 0 && expect_100_continue(hdr, (size_t)hdr_end)) {
+        cdebug("100-continue fd=%d", fd);
+        (void)send_all(fd, "HTTP/1.1 100 Continue\r\n\r\n",
+                       (int)strlen("HTTP/1.1 100 Continue\r\n\r\n"));
+    }
 
     // 6) Read body: some may already be in hdr (after header end)
     int body_in_hdr = total - hdr_end;
