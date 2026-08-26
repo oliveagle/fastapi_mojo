@@ -1,5 +1,9 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v4: Slowloris guard (per-connection SO_RCVTIMEO/SO_SNDTIMEO, default 5s,
+//     FASTAPI_MOJO_RECV_TIMEOUT; stalled clients get 408 Request Timeout and
+//     the connection is dropped, the single-threaded server keeps serving).
+//
 // v3: correctness fixes on top of the v2 hardening:
 //   - 413 check now runs BEFORE the MAX_BODY clamp (v2 clamped Content-Length
 //     to exactly MAX_BODY, so the limit check was dead code and oversized
@@ -52,6 +56,13 @@ static int g_max_body_size = DEFAULT_MAX_BODY_SIZE;
 
 static volatile int g_running = 1;
 
+// Slowloris guard: a stalled client (half-sent request line, or slow reads of
+// our response) must not block the single-threaded server. Per-connection
+// SO_RCVTIMEO/SO_SNDTIMEO turn a stall into EAGAIN, which recv_and_parse
+// answers with 408 and closes. Default 5s; override with
+// FASTAPI_MOJO_RECV_TIMEOUT (seconds, 1..300).
+static int g_recv_timeout_ms = 5000;
+
 static int g_cdebug = -1;
 static void cdebug(const char *fmt, ...) {
     if (g_cdebug == -1) g_cdebug = getenv("FASTAPI_MOJO_CDEBUG") ? 1 : 0;
@@ -81,7 +92,7 @@ void setup_signal_handlers() {
     signal(SIGPIPE, SIG_IGN);
 }
 
-int is_running() { return g_running; }
+long is_running() { return g_running; }
 
 void set_static_dir(const char *dir) {
     // FASTAPI_MOJO_STATIC_DIR overrides the directory so the single binary
@@ -103,8 +114,12 @@ void set_max_body_size(int size) {
     if (size > 0 && size <= MAX_BODY) g_max_body_size = size;
 }
 
-int create_bound_socket(int port) {
+// Forward decl (definition lives with the other recv helpers below).
+static void init_recv_timeout(void);
+
+long create_bound_socket(int port) {
     setup_signal_handlers();
+    init_recv_timeout();
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int opt = 1;
@@ -118,19 +133,38 @@ int create_bound_socket(int port) {
     return fd;
 }
 
-int accept_connection(int sfd) {
+long accept_connection(int sfd) {
     if (!g_running) return -1;
     struct sockaddr_in ca; socklen_t cl = sizeof(ca);
     int cfd = accept(sfd, (struct sockaddr*)&ca, &cl);
-    if (cfd >= 0) cdebug("accept fd=%d", cfd);
+    if (cfd < 0) return cfd;
+    // Slowloris guard: bound how long this client may stall us.
+    struct timeval tv;
+    tv.tv_sec = (time_t)(g_recv_timeout_ms / 1000);
+    tv.tv_usec = (suseconds_t)(g_recv_timeout_ms % 1000) * 1000;
+    setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    cdebug("accept fd=%d", cfd);
     return cfd;
 }
 
-// Read more bytes into buf at offset off; returns bytes read (0 on EOF/error).
-static int recv_more(int fd, char *buf, int off, int n) {
+// Read bytes with per-connection timeout. Returns >0 on data, 0 on clean
+// EOF, -1 on error/timeout (errno preserved; EAGAIN/EWOULDBLOCK = timeout).
+static int recv_timeout(int fd, char *buf, int n) {
     if (n <= 0) return 0;
-    int r = recv(fd, buf + off, (size_t)n, 0);
-    return (r > 0) ? r : 0;
+    return (int)recv(fd, buf, (size_t)n, 0);
+}
+
+static int is_timeout_errno(void) {
+    return (errno == EAGAIN || errno == EWOULDBLOCK);
+}
+
+static void init_recv_timeout(void) {
+    const char *env = getenv("FASTAPI_MOJO_RECV_TIMEOUT");
+    if (env) {
+        long v = atol(env);
+        if (v >= 1 && v <= 300) g_recv_timeout_ms = (int)(v * 1000);
+    }
 }
 
 // Find the header terminator; returns index of '\0' placed after "\r\n\r\n", or -1.
@@ -186,18 +220,26 @@ static int utf8_valid(const char *s, int len) {
 
 // JSON error response with a correctly computed Content-Length.
 // (Defined below send_response; prototype here for use in recv_and_parse.)
-int send_error_json(int fd, const char *status, const char *msg);
+long send_error_json(int fd, const char *status, const char *msg);
 
-int recv_and_parse(int fd) {
+long recv_and_parse(int fd) {
     char *hdr = malloc(HDR_BUF_SIZE);
     if (!hdr) return -1;
     int total = 0;
 
-    // 1) Read until headers complete
+    // 1) Read until headers complete (stalled client -> 408)
     int hdr_end = -1;
     while (total < HDR_BUF_SIZE - 1 && hdr_end < 0) {
-        int n = recv_more(fd, hdr, total, HDR_BUF_SIZE - 1 - total);
-        if (n <= 0) break;
+        int n = recv_timeout(fd, hdr + total, HDR_BUF_SIZE - 1 - total);
+        if (n < 0) {
+            if (is_timeout_errno()) {
+                send_error_json(fd, "408 Request Timeout", "Request timeout");
+                free(hdr);
+                return -5;
+            }
+            break;  // reset / error: drop silently
+        }
+        if (n == 0) break;  // clean EOF
         total += n;
         hdr[total] = '\0';
         hdr_end = find_header_end(hdr, total);
@@ -269,8 +311,16 @@ int recv_and_parse(int fd) {
             got = body_in_hdr;
         }
         while (got < content_length && got < MAX_BODY) {
-            int n = recv_more(fd, g_body + got, 0, content_length - got);
-            if (n <= 0) break;
+            int n = recv_timeout(fd, g_body + got, content_length - got);
+            if (n < 0) {
+                if (is_timeout_errno()) {
+                    send_error_json(fd, "408 Request Timeout", "Request timeout");
+                    free(hdr);
+                    return -5;
+                }
+                break;  // reset / error: drop silently
+            }
+            if (n == 0) break;  // clean EOF: short body
             got += n;
         }
         g_body[got] = 0;
@@ -298,16 +348,20 @@ int recv_and_parse(int fd) {
 }
 
 // Byte accessors for the Mojo side
-int get_method_len() { return g_method_len; }
-int get_path_len() { return g_path_len; }
-int get_query_len() { return g_query_len; }
-int get_body_len() { return g_body_len; }
-int read_method_byte(int i) { return (i>=0 && i<g_method_len) ? (unsigned char)g_method[i] : -1; }
-int read_path_byte(int i) { return (i>=0 && i<g_path_len) ? (unsigned char)g_path[i] : -1; }
-int read_query_byte(int i) { return (i>=0 && i<g_query_len) ? (unsigned char)g_query[i] : -1; }
-int read_body_byte(int i) { return (i>=0 && i<g_body_len) ? (unsigned char)g_body[i] : -1; }
+long get_method_len() { return g_method_len; }
+long get_path_len() { return g_path_len; }
+long get_query_len() { return g_query_len; }
+long get_body_len() { return g_body_len; }
+long read_method_byte(int i) { return (i>=0 && i<g_method_len) ? (unsigned char)g_method[i] : -1; }
+long read_path_byte(int i) { return (i>=0 && i<g_path_len) ? (unsigned char)g_path[i] : -1; }
+long read_query_byte(int i) { return (i>=0 && i<g_query_len) ? (unsigned char)g_query[i] : -1; }
+long read_body_byte(int i) { return (i>=0 && i<g_body_len) ? (unsigned char)g_body[i] : -1; }
 
-int close_fd(int fd) { return close(fd); }
+long close_fd(int fd) { return close(fd); }
+
+// Exit the process with a failure code (used when bind fails — a server
+// that cannot listen must not report success to the operator/CI).
+void bridge_fail(void) { exit(1); }
 
 // Content-Type detection by extension
 const char* get_content_type(const char *path) {
@@ -348,8 +402,8 @@ static int send_all(int fd, const char *buf, int len) {
 // status for static file responses (which return 403/404/413 internally).
 static char g_last_status[32] = "";
 
-int get_last_status_len() { return (int)strlen(g_last_status); }
-int read_last_status_byte(int i) {
+long get_last_status_len() { return (int)strlen(g_last_status); }
+long read_last_status_byte(int i) {
     int n = (int)strlen(g_last_status);
     return (i >= 0 && i < n) ? (unsigned char)g_last_status[i] : -1;
 }
@@ -378,7 +432,7 @@ static int send_response(int fd, const char *status, const char *content_type,
     return 0;
 }
 
-int send_error_json(int fd, const char *status, const char *msg) {
+long send_error_json(int fd, const char *status, const char *msg) {
     char body[256];
     int blen = snprintf(body, sizeof body, "{\"error\":\"%s\",\"status\":\"%s\"}", msg, status);
     if (blen < 0) blen = 0;
@@ -387,17 +441,17 @@ int send_error_json(int fd, const char *status, const char *msg) {
 }
 
 // Dynamic JSON response
-int send_simple_response(int fd, const char *status, const char *body) {
+long send_simple_response(int fd, const char *status, const char *body) {
     return send_response(fd, status, "application/json", body, (int)strlen(body), 1);
 }
 
 // HEAD: headers only, no body
-int send_head_response(int fd, const char *status, const char *body) {
+long send_head_response(int fd, const char *status, const char *body) {
     return send_response(fd, status, "application/json", body, (int)strlen(body), 0);
 }
 
 // OPTIONS preflight
-int send_preflight_response(int fd) {
+long send_preflight_response(int fd) {
     const char *resp =
         "HTTP/1.1 204 No Content\r\n"
         "Content-Length: 0\r\n"
@@ -446,10 +500,10 @@ static int serve_static_file(int fd, const char *path, int include_body) {
     return rc;
 }
 
-int send_static_file(int fd, const char *path) {
+long send_static_file(int fd, const char *path) {
     return serve_static_file(fd, path, 1);
 }
 
-int send_static_file_head(int fd, const char *path) {
+long send_static_file_head(int fd, const char *path) {
     return serve_static_file(fd, path, 0);
 }

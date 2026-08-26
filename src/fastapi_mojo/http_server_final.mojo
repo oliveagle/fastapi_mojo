@@ -89,6 +89,7 @@ def main() raises:
     var sfd = external_call["create_bound_socket", Int](8000)
     if sfd < 0:
         print("ERROR: bind failed")
+        external_call["bridge_fail", NoneType]()
         return
     print("Listening on http://127.0.0.1:8000")
     print("Press Ctrl+C to stop")
@@ -109,7 +110,8 @@ def main() raises:
         if n < 0:
             # C bridge already sent the appropriate error response:
             # -1 (malloc fail / no data), -2 (413 too large),
-            # -3 (400 invalid request-line UTF-8), -4 (400 invalid body UTF-8)
+            # -3 (400 invalid request-line UTF-8), -4 (400 invalid body UTF-8),
+            # -5 (408 request timeout — Slowloris guard)
             _ = external_call["close_fd", Int](cfd)
             continue
         if n == 0:
