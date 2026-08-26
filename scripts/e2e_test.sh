@@ -237,21 +237,101 @@ PORT = int(sys.argv[1])
 t0 = time.time()
 s = socket.create_connection(('127.0.0.1', PORT), timeout=8)
 s.send(b'POST /items HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 9\r\n\r\n' + b'{"x":"1"}')
+# interim response (exactly "HTTP/1.1 100 Continue\r\n\r\n")
+interim = b''
+while not interim.endswith(b'\r\n\r\n'):
+    interim += s.recv(1)
+# final response: headers + Content-Length bytes
 data = b''
-while True:
-    chunk = s.recv(65536)
-    if not chunk:
-        break
-    data += chunk
+while b'\r\n\r\n' not in data:
+    data += s.recv(65536)
+hdr, _, rest = data.partition(b'\r\n\r\n')
+cl = 0
+for line in hdr.split(b'\r\n'):
+    if line.lower().startswith(b'content-length:'):
+        cl = int(line.split(b':')[1])
+while len(rest) < cl:
+    rest += s.recv(65536)
 dt = time.time() - t0
 s.close()
-text = data.decode(errors='replace')
-ok = ('100 Continue' in text) and ('200 OK' in text) and dt < 0.9
+ok = ('100 Continue' in interim.decode()) and ('200 OK' in hdr.decode()) and dt < 0.9
 print(('OK' if ok else 'FAIL') + ' dt=%.3fs' % dt)
 PY
 )
 if [[ "$CC_RESULT" == OK* ]]; then pass "100-continue -> interim 100 then 200, no 1s stall ($CC_RESULT)"
 else fail "100-continue -> interim 100 then 200, no 1s stall" "$CC_RESULT"; fi
+
+# keep-alive: several requests on ONE TCP connection; HTTP/1.1 answers
+# "Connection: keep-alive"; a client "Connection: close" is honored.
+KA_RESULT=$(python3 - "$PORT" <<'PY'
+import socket, sys
+PORT = int(sys.argv[1])
+
+def read_response(s):
+    data = b''
+    while b'\r\n\r\n' not in data:
+        c = s.recv(65536)
+        if not c:
+            break
+        data += c
+    hdr, _, rest = data.partition(b'\r\n\r\n')
+    cl = 0
+    for line in hdr.split(b'\r\n'):
+        if line.lower().startswith(b'content-length:'):
+            cl = int(line.split(b':')[1])
+    while len(rest) < cl:
+        rest += s.recv(65536)
+    return hdr.decode(errors='replace')
+
+results = []
+# 1) three sequential requests on one connection
+s = socket.create_connection(('127.0.0.1', PORT), timeout=5)
+try:
+    h1 = read_response(s) if False else None
+    s.sendall(b'GET /health HTTP/1.1\r\nHost: x\r\n\r\n')
+    h1 = read_response(s)
+    s.sendall(b'GET / HTTP/1.1\r\nHost: x\r\n\r\n')
+    h2 = read_response(s)
+    s.sendall(b'GET /items/42 HTTP/1.1\r\nHost: x\r\n\r\n')
+    h3 = read_response(s)
+    ok1 = '200 OK' in h1 and '200 OK' in h2 and '200 OK' in h3
+    ok2 = 'keep-alive' in h1.lower()
+    results.append(('3 requests on 1 connection', ok1))
+    results.append(('response says Connection: keep-alive', ok2))
+finally:
+    s.close()
+# 2) client Connection: close is honored (server closes after the response)
+s = socket.create_connection(('127.0.0.1', PORT), timeout=5)
+s.sendall(b'GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+h = read_response(s)
+s.settimeout(2)
+try:
+    extra = s.recv(65536)
+    ok3 = (extra == b'') and '200 OK' in h and 'close' in h.lower()
+    results.append(('client Connection: close honored', ok3))
+except socket.timeout:
+    results.append(('client Connection: close honored', False))
+s.close()
+# 3) idle keep-alive connection: server closes silently on timeout
+import time
+s = socket.create_connection(('127.0.0.1', PORT), timeout=8)
+s.sendall(b'GET /health HTTP/1.1\r\nHost: x\r\n\r\n')
+read_response(s)
+t0 = time.time()
+try:
+    s.settimeout(6)
+    extra = s.recv(65536)
+    idle_closed = (extra == b'')
+    results.append(('idle keep-alive closed by server', idle_closed))
+except socket.timeout:
+    results.append(('idle keep-alive closed by server', False))
+s.close()
+ok = all(r[1] for r in results)
+print(('OK' if ok else 'FAIL') + ' ' + '; '.join('%s=%s' % r for r in results))
+PY
+)
+if [[ "$KA_RESULT" == OK* ]]; then pass "keep-alive: reuse + Connection: close + idle cleanup ($KA_RESULT)"
+else fail "keep-alive: reuse + Connection: close + idle cleanup" "$KA_RESULT"; fi
 
 # chunked Transfer-Encoding -> 411 (bodies are read strictly by Content-Length;
 # the old behavior silently dropped the body and answered 200)

@@ -1,5 +1,16 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v10b: TCP_NODELAY on accepted connections — the keep-alive response
+//      (header + body, two sends) triggered the classic Nagle/delayed-ACK
+//      40ms stall per request; with NODELAY each request is one RTT.
+//
+// v10: HTTP/1.1 keep-alive — one connection serves a sequence of requests.
+//      The Connection header is now dynamic (computed per request: HTTP/1.1
+//      keeps unless the client says close; HTTP/1.0 closes unless the client
+//      says keep-alive). Error responses always close (uncertain state).
+//      Idle keep-alive connections are closed silently (recv timeout with no
+//      bytes, return -10); a stalled mid-request client still gets 408.
+//
 // v9: Transfer-Encoding requests are rejected with 411 Length Required
 //     (bodies are read strictly by Content-Length; old behavior silently
 //     dropped chunked bodies and answered 200 with no data).
@@ -44,6 +55,7 @@
 #define _GNU_SOURCE
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string.h>
@@ -82,6 +94,18 @@ static volatile int g_running = 1;
 // answers with 408 and closes. Default 5s; override with
 // FASTAPI_MOJO_RECV_TIMEOUT (seconds, 1..300).
 static int g_recv_timeout_ms = 5000;
+
+// Keep-alive state, recomputed by recv_and_parse for every request
+// (single-threaded server, so globals are safe):
+//   g_protocol_11        — the current request speaks HTTP/1.1
+//   g_close_after_response — 1: the next response announces "Connection: close"
+//                            and the server closes the fd right after it;
+//                            0: keep-alive, serve the next request on the same
+//                            fd. Default 1 (close): the safe behavior for every
+//                            error path, where the connection state is uncertain
+//                            (e.g. an unread body).
+static int g_protocol_11 = 0;
+static int g_close_after_response = 1;
 
 static int g_cdebug = -1;
 static void cdebug(const char *fmt, ...) {
@@ -137,6 +161,10 @@ void set_max_body_size(int size) {
 // Forward decl (definition lives with the other recv helpers below).
 static void init_recv_timeout(void);
 
+// Keep-alive: after a fully-parsed request, 0 = the connection may be reused
+// (the response announced "keep-alive"), 1 = the server closes it.
+long get_close_after_response(void) { return g_close_after_response; }
+
 long create_bound_socket(int port) {
     setup_signal_handlers();
     init_recv_timeout();
@@ -164,6 +192,14 @@ long accept_connection(int sfd) {
     tv.tv_usec = (suseconds_t)(g_recv_timeout_ms % 1000) * 1000;
     setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    // TCP_NODELAY: the response is sent in two parts (header, then body).
+    // Without it, Nagle holds the (small) body segment until the client
+    // ACKs the header — and a keep-alive client's delayed-ACK logic waits
+    // the full 40ms with no outgoing data to piggyback on: 40ms per
+    // request on every persistent connection (classic Nagle/delayed-ACK
+    // stall). One-way RTT is all we need here.
+    int nodelay = 1;
+    setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
     cdebug("accept fd=%d", cfd);
     return cfd;
 }
@@ -263,6 +299,31 @@ static int has_header_name_ci(const char *hdr, size_t hlen, const char *name) {
     return 0;
 }
 
+// Directive scan of the Connection header value:
+// returns 1 if "close" is present, 2 if "keep-alive" is present (close wins),
+// 0 if the header is absent or carries other directives only.
+static int connection_directive(const char *hdr, size_t hlen) {
+    size_t nlen = 10;  // strlen("Connection")
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        if (i > 0 && hdr[i - 1] != '\n') continue;
+        if (strncasecmp(hdr + i, "Connection", nlen) != 0) continue;
+        size_t j = i + nlen;
+        while (j < hlen && (hdr[j] == ' ' || hdr[j] == '\t')) j++;
+        if (j >= hlen || hdr[j] != ':') continue;
+        j++;
+        int has_close = 0, has_keep = 0;
+        while (j < hlen && hdr[j] != '\r' && hdr[j] != '\n') {
+            if (strncasecmp(hdr + j, "close", 5) == 0) has_close = 1;
+            if (strncasecmp(hdr + j, "keep-alive", 10) == 0) has_keep = 1;
+            j++;
+        }
+        if (has_close) return 1;
+        if (has_keep) return 2;
+        return 0;
+    }
+    return 0;
+}
+
 // Case-insensitive check for "Expect: 100-continue" among the header lines
 // in hdr[0..hlen). (100-continue is the only Expect value we honor; per
 // RFC 7231 \u00a75.1.1 we must answer it with an interim response or a 4xx,
@@ -302,6 +363,14 @@ long recv_and_parse(int fd) {
         int n = recv_timeout(fd, hdr + total, HDR_BUF_SIZE - 1 - total);
         if (n < 0) {
             if (is_timeout_errno()) {
+                if (total == 0) {
+                    // Idle keep-alive connection: the client sent nothing on
+                    // this connection. There is no request to answer — just
+                    // close (a 408 here would be noise for connection pools).
+                    free(hdr);
+                    return -10;
+                }
+                // The client started a request and then stalled (Slowloris).
                 send_error_json(fd, "408 Request Timeout", "Request timeout");
                 free(hdr);
                 return -5;
@@ -331,6 +400,8 @@ long recv_and_parse(int fd) {
     // 2) Reset globals
     g_method_len = g_path_len = g_query_len = g_body_len = 0;
     g_body[0] = 0;
+    g_protocol_11 = 0;
+    g_close_after_response = 1;
 
     // 3) Parse request line: METHOD SP PATH SP HTTP/x.y
     int i = 0;
@@ -377,6 +448,7 @@ long recv_and_parse(int fd) {
         proto[plen] = 0;
         int ok_proto = (strcmp(proto, "HTTP/1.0") == 0 ||
                         strcmp(proto, "HTTP/1.1") == 0);
+        if (ok_proto) g_protocol_11 = (strcmp(proto, "HTTP/1.1") == 0);
         if (!ok_method || !ok_path || !ok_proto) {
             send_error_json(fd, "400 Bad Request", "Malformed request line");
             free(hdr);
@@ -456,8 +528,21 @@ long recv_and_parse(int fd) {
         g_body_len = got;
     }
 
-    cdebug("parsed fd=%d method_len=%d path_len=%d query_len=%d body_len=%d",
-           fd, g_method_len, g_path_len, g_query_len, g_body_len);
+    // 9) Keep-alive decision (RFC 7230 §6): HTTP/1.1 keeps the connection
+    // unless the client says "Connection: close"; HTTP/1.0 closes unless the
+    // client says "Connection: keep-alive". The request is fully consumed
+    // here, so the connection is clean and reusable.
+    {
+        int keep = g_protocol_11 ? 1 : 0;
+        int dir = connection_directive(hdr, (size_t)hdr_end);
+        if (dir == 1) keep = 0;
+        if (dir == 2) keep = 1;
+        g_close_after_response = keep ? 0 : 1;
+    }
+
+    cdebug("parsed fd=%d method_len=%d path_len=%d query_len=%d body_len=%d keep=%d",
+           fd, g_method_len, g_path_len, g_query_len, g_body_len,
+           !g_close_after_response);
     free(hdr);
 
     // 7) UTF-8 validation of the request line.
@@ -549,14 +634,15 @@ static int send_response(int fd, const char *status, const char *content_type,
         "HTTP/1.1 %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %d\r\n"
-        "Connection: close\r\n"
+        "Connection: %s\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"
         "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
         "Access-Control-Max-Age: 86400\r\n"
         "%s"
         "\r\n",
-        status, content_type, body_len, ex);
+        status, content_type, body_len,
+        g_close_after_response ? "close" : "keep-alive", ex);
     if (hlen < 0 || hlen >= (int)sizeof(hdr)) return -1;
     snprintf(g_last_status, sizeof g_last_status, "%s", status);
     if (send_all(fd, hdr, hlen) != 0) return -1;
