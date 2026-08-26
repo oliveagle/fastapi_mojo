@@ -171,8 +171,16 @@ def main() raises:
                     cfd,
                     path.as_c_string_slice(),
                 )
+            # Log the REAL status (the C side may have answered 403/404/413
+            # for the static request).
+            var sl_len = external_call["get_last_status_len", Int]()
+            var sl = String("")
+            for i in range(sl_len):
+                var sb = external_call["read_last_status_byte", Int](i)
+                if sb >= 0:
+                    sl += chr(sb)
             _ = external_call["close_fd", Int](cfd)
-            log_request(req_id, method, path, query, "200 OK (static)")
+            log_request(req_id, method, path, query, sl + " (static)")
             continue
 
         # --- Route matching ---
