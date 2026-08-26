@@ -910,9 +910,39 @@ static int send_response(int fd, const char *status, const char *content_type,
     return 0;
 }
 
+// Minimal JSON string escaper for a C string: escapes \" \\ and control
+// chars (<0x20) as \\u00XX. Writes the escaped string (NUL-terminated) to
+// out; returns the escaped length, or -1 if out is too small.
+static int json_escape_cstr(const char *in, char *out, int out_size) {
+    int o = 0;
+    for (const unsigned char *cp = (const unsigned char *)in; *cp; cp++) {
+        unsigned char c = *cp;
+        const char *esc;
+        int esc_len;
+        char tmp[7];
+        if (c == '"')           { esc = "\\\""; esc_len = 2; }
+        else if (c == '\\')    { esc = "\\\\"; esc_len = 2; }
+        else if (c == '\b')    { esc = "\\b"; esc_len = 2; }
+        else if (c == '\f')    { esc = "\\f"; esc_len = 2; }
+        else if (c == '\n')    { esc = "\\n"; esc_len = 2; }
+        else if (c == '\r')    { esc = "\\r"; esc_len = 2; }
+        else if (c == '\t')    { esc = "\\t"; esc_len = 2; }
+        else if (c < 0x20)      { snprintf(tmp, sizeof tmp, "\\u%04x", c); esc = tmp; esc_len = 6; }
+        else                    { esc = (const char *)cp; esc_len = 1; }
+        if (o + esc_len + 1 > out_size) return -1;
+        memcpy(out + o, esc, (size_t)esc_len);
+        o += esc_len;
+    }
+    out[o] = 0;
+    return o;
+}
+
 long send_error_json(int fd, const char *status, const char *msg) {
-    char body[256];
-    int blen = snprintf(body, sizeof body, "{\"error\":\"%s\",\"status\":\"%s\"}", msg, status);
+    char em[256], es[256], body[600];
+    // Escape msg/status so user-influenced text can never break the JSON.
+    if (json_escape_cstr(msg, em, (int)sizeof em) < 0) snprintf(em, sizeof em, "error");
+    if (json_escape_cstr(status, es, (int)sizeof es) < 0) snprintf(es, sizeof es, "error");
+    int blen = snprintf(body, sizeof body, "{\"error\":\"%s\",\"status\":\"%s\"}", em, es);
     if (blen < 0) blen = 0;
     if (blen >= (int)sizeof body) blen = (int)sizeof body - 1;
     return send_response(fd, status, "application/json", body, blen, 1, NULL);

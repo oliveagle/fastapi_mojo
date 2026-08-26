@@ -8,7 +8,7 @@
 **当前阶段：Phase 3 — 单一 Binary 交付（已达成）**
 
 - ✅ Mojo 原生 HTTP 服务器（C FFI socket 桥接 + Mojo 路由/参数/JSON）
-- ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 仅依赖 libc（基础运行时）
+- ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
 
@@ -137,7 +137,7 @@ curl http://127.0.0.1:8000/test.json
 - [Mojo](https://docs.modular.com/mojo/) 1.0.0（`pip install modular`）
 - GCC（编译 C 桥接 + shim）
 - binutils（objcopy 嵌入运行时）
-- 运行期：仅 glibc 系基础运行时（libc/libm/libstdc++/libgcc_s）
+- 运行期：仅 glibc 基础运行时。实际 `ldd` 输出为 `libc.so.6` + 系统 `linux-vdso.so.1` / `ld-linux-x86-64.so.2`（内核/加载器组件）；**不依赖** libm / libstdc++ / libgcc_s / Python / .venv
 
 ## 架构
 
@@ -164,7 +164,7 @@ curl http://127.0.0.1:8000/test.json
 │  ├── 11 个 KGEN_CompilerRT_* 符号转发                  │
 │  └── atexit：清理临时目录                              │
 └────────────────────────────────────────────────────────┘
-        运行期依赖：libc / libm / libstdc++ / libgcc_s（基础运行时）
+        运行期依赖：仅 libc（+ 系统 vdso / ld-linux）
 ```
 
 ## 架构决策记录（ADR）
