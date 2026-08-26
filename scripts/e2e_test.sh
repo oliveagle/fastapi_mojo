@@ -133,9 +133,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[setup] starting server on port $PORT (recv timeout 2s)..."
+echo "[setup] starting server on port $PORT (recv timeout 2s, idle timeout 2s)..."
 ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
-    FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_E2E_PORT="$PORT" "$BIN" \
+    FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_E2E_PORT="$PORT" "$BIN" \
     > "$TMP/server.log" 2>&1 ) &
 SERVER_PID=$!
 
@@ -214,10 +215,8 @@ else fail "POST 1.1MB body -> 413" "got $BIG_CODE"; fi
 
 # 400: malformed request line
 expect_raw_status "raw 'BLAH' -> 400" "400 Bad Request" "424c41480d0a0d0a"
-# 400: invalid UTF-8 in path
-expect_raw_status "raw bad-utf8 path -> 400" "400 Bad Request" \
-    "474554202f0d0d0a504154483a20485454502f312e310d0a0d0a" # "GET /?bad"
-# (the hex above is a placeholder; real test below uses generated hex)
+# 400: request line without protocol
+expect_raw_status "raw no-protocol -> 400" "400 Bad Request" "474554202f0d0d0a504154483a20485454502f312e310d0a0d0a"
 # 400: invalid UTF-8 in body
 BADBODY_HEX=$(python3 -c "print((b'POST /items HTTP/1.1\r\nContent-Length: 3\r\n\r\n\xff\xfe\x80').hex())")
 expect_raw_status "raw bad-utf8 body -> 400" "400 Bad Request" "$BADBODY_HEX"

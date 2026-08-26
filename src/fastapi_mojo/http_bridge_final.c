@@ -1,5 +1,15 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v11: poll-based event loop — one poll() watches the listen socket plus
+//      every accepted connection (per-connection state machine, MAX_CONNS
+//      cap). Fixes the v10 head-of-line blocking: idle keep-alive
+//      connections no longer stall other clients (measured: hey 10k/100c
+//      0.32s -> stuck ~500s under v10). Slowloris is guarded by
+//      per-connection deadlines (no progress for RECV_TIMEOUT, or total
+//      request time > MAX_REQUEST -> 408); idle connections close after
+//      IDLE_TIMEOUT (default 60s). Mojo still dispatches one parsed
+//      request at a time; only I/O wait is shared.
+//
 // v10b: TCP_NODELAY on accepted connections — the keep-alive response
 //      (header + body, two sends) triggered the classic Nagle/delayed-ACK
 //      40ms stall per request; with NODELAY each request is one RTT.
@@ -65,6 +75,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -81,8 +92,7 @@
 #define RESP_HDR_SIZE 1024      // response header buffer
 
 static char g_method[MAX_METHOD], g_path[MAX_PATH], g_query[MAX_QUERY];
-static char g_body[MAX_BODY + 1];  // +1 for the NUL terminator
-static int g_method_len, g_path_len, g_query_len, g_body_len;
+static int g_method_len, g_path_len, g_query_len;
 static char g_static_dir[MAX_STATIC_DIR] = "./static";
 static int g_max_body_size = DEFAULT_MAX_BODY_SIZE;
 
@@ -106,6 +116,12 @@ static int g_recv_timeout_ms = 5000;
 //                            (e.g. an unread body).
 static int g_protocol_11 = 0;
 static int g_close_after_response = 1;
+
+// Event loop (v11): the listen socket lives here (C-driven poll loop);
+// per-connection deadlines.
+static long g_listen_fd = -1;
+static long g_idle_max_ms = 60000;   // idle keep-alive connections (FASTAPI_MOJO_IDLE_TIMEOUT)
+static long g_max_request_ms = 30000;  // total time allowed per request (FASTAPI_MOJO_MAX_REQUEST)
 
 static int g_cdebug = -1;
 static void cdebug(const char *fmt, ...) {
@@ -178,14 +194,103 @@ long create_bound_socket(int port) {
     a.sin_port = htons((unsigned short)port);
     if (bind(fd, (struct sockaddr*)&a, sizeof(a)) < 0) { close(fd); return -1; }
     if (listen(fd, 128) < 0) { close(fd); return -1; }
+    g_listen_fd = fd;
     return fd;
 }
 
-long accept_connection(int sfd) {
-    if (!g_running) return -1;
-    struct sockaddr_in ca; socklen_t cl = sizeof(ca);
-    int cfd = accept(sfd, (struct sockaddr*)&ca, &cl);
-    if (cfd < 0) return cfd;
+// ---------- v11: poll-based event loop ----------
+//
+// v10 (blocking recv, one connection at a time) serializes keep-alive:
+// the server stuck waiting on one connection's idle recv cannot service
+// any other client. Measured with the hey benchmark: 100 concurrent
+// workers x (work + 5s idle wait) -> the 10k/100c scenario stalls ~500s
+// (baseline 0.32s). v11 moves I/O multiplexing into the C bridge:
+// one poll() watches the listen socket plus every accepted connection.
+//
+//   - idle keep-alive connections block nothing; they are closed after
+//     FASTAPI_MOJO_IDLE_TIMEOUT (default 60s)
+//   - a connection with a partial request gets a per-connection deadline:
+//     no progress for FASTAPI_MOJO_RECV_TIMEOUT (default 5s) OR total
+//     request time > FASTAPI_MOJO_MAX_REQUEST (default 30s) -> 408
+//     (Slowloris, both the "send nothing" and "dribble bytes" variants)
+//   - the connection cap is MAX_CONNS; overflow gets 503
+//   - the Mojo side still dispatches one fully-parsed request at a time
+//     (single-threaded runtime); only the I/O wait is shared
+//
+// Per-connection state:
+//   hdr[HDR_BUF_SIZE] — bytes of the current request so far
+//   phase 0 — waiting for the complete header
+//   phase 1 — header done, waiting for the Content-Length body
+//   phase 2 — request complete, Mojo is dispatching (conn_done resets)
+// Bodies are malloc'd per connection (cl+1) and freed in conn_done.
+// Completed requests are exposed via the g_method/g_path/g_query globals
+// and the body accessors (which point at the active connection).
+
+#define MAX_CONNS 1024
+#define POLL_TICK_MS 1000
+
+struct conn {
+    int in_use;
+    int fd;
+    int phase;
+    char hdr[HDR_BUF_SIZE];
+    int hdr_total;
+    int cl;             // parsed Content-Length
+    char *body;         // malloc(cl+1) when cl > 0
+    int body_got;
+    long connected_ms;
+    long last_active_ms; // last completed response (or accept time)
+    long first_data_ms;  // first byte of the current request (0 = none)
+    long last_data_ms;   // last byte of the current request (0 = none)
+};
+
+static struct conn g_conns[MAX_CONNS];
+static struct conn *g_active_conn = NULL;
+
+static long now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static struct conn *find_conn(int fd) {
+    for (int i = 0; i < MAX_CONNS; i++)
+        if (g_conns[i].in_use && g_conns[i].fd == fd)
+            return &g_conns[i];
+    return NULL;
+}
+
+static struct conn *alloc_conn(int fd) {
+    for (int i = 0; i < MAX_CONNS; i++) {
+        if (!g_conns[i].in_use) {
+            struct conn *c = &g_conns[i];
+            memset(c, 0, sizeof(*c));
+            c->in_use = 1;
+            c->fd = fd;
+            long t = now_ms();
+            c->connected_ms = t;
+            c->last_active_ms = t;
+            return c;
+        }
+    }
+    return NULL;
+}
+
+static void close_conn(struct conn *c) {
+    if (!c->in_use) return;
+    if (c->body) { free(c->body); c->body = NULL; }
+    if (c->fd >= 0) close(c->fd);
+    if (g_active_conn == c) g_active_conn = NULL;
+    c->in_use = 0;
+    c->fd = -1;
+    c->phase = 0;
+    c->hdr_total = 0;
+    c->body_got = 0;
+    c->first_data_ms = 0;
+    c->last_data_ms = 0;
+}
+
+static void setup_conn_fd(int cfd) {
     // Slowloris guard: bound how long this client may stall us.
     struct timeval tv;
     tv.tv_sec = (time_t)(g_recv_timeout_ms / 1000);
@@ -194,25 +299,10 @@ long accept_connection(int sfd) {
     setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     // TCP_NODELAY: the response is sent in two parts (header, then body).
     // Without it, Nagle holds the (small) body segment until the client
-    // ACKs the header — and a keep-alive client's delayed-ACK logic waits
-    // the full 40ms with no outgoing data to piggyback on: 40ms per
-    // request on every persistent connection (classic Nagle/delayed-ACK
-    // stall). One-way RTT is all we need here.
+    // ACKs the header — a keep-alive client's delayed-ACK logic waits the
+    // full 40ms with no outgoing data to piggyback on: 40ms per request.
     int nodelay = 1;
     setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-    cdebug("accept fd=%d", cfd);
-    return cfd;
-}
-
-// Read bytes with per-connection timeout. Returns >0 on data, 0 on clean
-// EOF, -1 on error/timeout (errno preserved; EAGAIN/EWOULDBLOCK = timeout).
-static int recv_timeout(int fd, char *buf, int n) {
-    if (n <= 0) return 0;
-    return (int)recv(fd, buf, (size_t)n, 0);
-}
-
-static int is_timeout_errno(void) {
-    return (errno == EAGAIN || errno == EWOULDBLOCK);
 }
 
 static void init_recv_timeout(void) {
@@ -221,16 +311,24 @@ static void init_recv_timeout(void) {
         long v = atol(env);
         if (v >= 1 && v <= 300) g_recv_timeout_ms = (int)(v * 1000);
     }
+    const char *env_idle = getenv("FASTAPI_MOJO_IDLE_TIMEOUT");
+    if (env_idle) {
+        long v = atol(env_idle);
+        if (v >= 1 && v <= 3600) g_idle_max_ms = v * 1000;
+    }
+    const char *env_req = getenv("FASTAPI_MOJO_MAX_REQUEST");
+    if (env_req) {
+        long v = atol(env_req);
+        if (v >= 1 && v <= 3600) g_max_request_ms = v * 1000;
+    }
 }
 
-// Find the header terminator; returns index of '\0' placed after "\r\n\r\n", or -1.
 static int find_header_end(const char *buf, int total) {
     char *p = (char*)memmem(buf, (size_t)total, "\r\n\r\n", 4);
     if (!p) return -1;
     return (int)(p - buf) + 4;
 }
 
-// Portable bounded search: find needle in hay[0..hlen)
 static char *bounded_strstr(const char *hay, size_t hlen, const char *needle) {
     size_t nlen = strlen(needle);
     if (nlen == 0 || nlen > hlen) return NULL;
@@ -241,7 +339,6 @@ static char *bounded_strstr(const char *hay, size_t hlen, const char *needle) {
     return NULL;
 }
 
-// Strict UTF-8 validation (no overlongs, no surrogates, no > U+10FFFF).
 static int utf8_valid(const char *s, int len) {
     int i = 0;
     while (i < len) {
@@ -280,8 +377,6 @@ long send_error_json(int fd, const char *status, const char *msg);
 // (Defined below; needed by recv_and_parse for the 100-continue interim.)
 static int send_all(int fd, const char *buf, int len);
 
-// Case-insensitive search for a header NAME (line-anchored: at the start
-// of the buffer or right after \n) in hdr[0..hlen).
 static int has_header_name_ci(const char *hdr, size_t hlen, const char *name) {
     size_t nlen = strlen(name);
     if (nlen == 0 || nlen > hlen) return 0;
@@ -324,7 +419,7 @@ static int connection_directive(const char *hdr, size_t hlen) {
     return 0;
 }
 
-// Case-insensitive check for "Expect: 100-continue" among the header lines
+// Case-insensitive check for "Expect: 100-continue"// Case-insensitive check for "Expect: 100-continue" among the header lines
 // in hdr[0..hlen). (100-continue is the only Expect value we honor; per
 // RFC 7231 \u00a75.1.1 we must answer it with an interim response or a 4xx,
 // never ignore it.)
@@ -352,66 +447,28 @@ static int expect_100_continue(const char *hdr, size_t hlen) {
     return 0;
 }
 
-long recv_and_parse(int fd) {
-    char *hdr = malloc(HDR_BUF_SIZE);
-    if (!hdr) return -1;
-    int total = 0;
+// Parse a completed header (c->hdr[0..hdr_end)); fills the request-line
+// globals, applies the protocol rules (400/411/413/100/keep-alive) and sets
+// up the body phase. Returns 1 = request complete (no body, or the body is
+// already fully buffered), 0 = body still arriving (phase 1), -1 = connection
+// closed (an error response was already sent).
+static int finish_header(struct conn *c) {
+    int hdr_end = find_header_end(c->hdr, c->hdr_total);
 
-    // 1) Read until headers complete (stalled client -> 408)
-    int hdr_end = -1;
-    while (total < HDR_BUF_SIZE - 1 && hdr_end < 0) {
-        int n = recv_timeout(fd, hdr + total, HDR_BUF_SIZE - 1 - total);
-        if (n < 0) {
-            if (is_timeout_errno()) {
-                if (total == 0) {
-                    // Idle keep-alive connection: the client sent nothing on
-                    // this connection. There is no request to answer — just
-                    // close (a 408 here would be noise for connection pools).
-                    free(hdr);
-                    return -10;
-                }
-                // The client started a request and then stalled (Slowloris).
-                send_error_json(fd, "408 Request Timeout", "Request timeout");
-                free(hdr);
-                return -5;
-            }
-            break;  // reset / error: drop silently
-        }
-        if (n == 0) break;  // clean EOF
-        total += n;
-        hdr[total] = '\0';
-        hdr_end = find_header_end(hdr, total);
-    }
-    if (total <= 0) { free(hdr); return 0; }
-    if (hdr_end < 0) {
-        // Buffer filled before the header terminator was found: the request
-        // header fields exceed HDR_BUF_SIZE (16KB) -> 431, not a silent
-        // close (a connection reset with no status was the old behavior).
-        if (total >= HDR_BUF_SIZE - 1) {
-            send_error_json(fd, "431 Request Header Fields Too Large",
-                            "Request header too large");
-            free(hdr);
-            return -7;
-        }
-        free(hdr);
-        return 0;  // incomplete headers (client disconnected): drop silently
-    }
-
-    // 2) Reset globals
-    g_method_len = g_path_len = g_query_len = g_body_len = 0;
-    g_body[0] = 0;
+    // Per-request reset.
+    g_method_len = g_path_len = g_query_len = 0;
+    g_method[0] = g_path[0] = g_query[0] = 0;
     g_protocol_11 = 0;
     g_close_after_response = 1;
 
-    // 3) Parse request line: METHOD SP PATH SP HTTP/x.y
+    // 1) Request line: METHOD SP PATH SP HTTP/1.x
     int i = 0;
-    while (i < total && hdr[i] != ' ' && g_method_len < MAX_METHOD - 1)
-        g_method[g_method_len++] = hdr[i++];
+    while (i < c->hdr_total && c->hdr[i] != ' ' && g_method_len < MAX_METHOD - 1)
+        g_method[g_method_len++] = c->hdr[i++];
     g_method[g_method_len] = 0;
-    if (i < total && hdr[i] == ' ') i++;  // skip space after method
-
-    while (i < total && hdr[i] != ' ' && hdr[i] != '\r' && g_path_len < MAX_PATH - 1)
-        g_path[g_path_len++] = hdr[i++];
+    if (i < c->hdr_total && c->hdr[i] == ' ') i++;
+    while (i < c->hdr_total && c->hdr[i] != ' ' && c->hdr[i] != '\r' && g_path_len < MAX_PATH - 1)
+        g_path[g_path_len++] = c->hdr[i++];
     g_path[g_path_len] = 0;
 
     // Path may include query: /path?query
@@ -428,38 +485,55 @@ long recv_and_parse(int fd) {
         }
     }
 
-    // 3b) Validate the request line: METHOD SP PATH SP HTTP/1.x
-    // (RFC 7230 §2.7/§3: method is an uppercase token, the target starts
-    // with '/', we accept HTTP/1.0 and HTTP/1.1 only). Anything else —
-    // e.g. a bare "BLAH\r\n\r\n" — is a 400, not a 404 for path "".
+    // 2) Request-line validation (v5): 400 unless the method is an uppercase
+    //    token, the target starts with '/', and the protocol is exactly
+    //    HTTP/1.0 or HTTP/1.1 with nothing after it.
     {
         int ok_method = (g_method_len >= 1 && g_method_len < MAX_METHOD);
         for (int k = 0; ok_method && k < g_method_len; k++) {
-            unsigned char c = (unsigned char)g_method[k];
-            if (c < 'A' || c > 'Z') ok_method = 0;
+            unsigned char ch = (unsigned char)g_method[k];
+            if (ch < 'A' || ch > 'Z') ok_method = 0;
         }
         int ok_path = (g_path_len >= 1 && g_path[0] == '/');
         char proto[16];
         int plen = 0;
         int j = i;
-        if (j < total && hdr[j] == ' ') j++;
-        while (j < total && hdr[j] != '\r' && plen < (int)sizeof(proto) - 1)
-            proto[plen++] = hdr[j++];
+        if (j < c->hdr_total && c->hdr[j] == ' ') j++;
+        while (j < c->hdr_total && c->hdr[j] != '\r' && plen < (int)sizeof(proto) - 1)
+            proto[plen++] = c->hdr[j++];
         proto[plen] = 0;
         int ok_proto = (strcmp(proto, "HTTP/1.0") == 0 ||
                         strcmp(proto, "HTTP/1.1") == 0);
         if (ok_proto) g_protocol_11 = (strcmp(proto, "HTTP/1.1") == 0);
         if (!ok_method || !ok_path || !ok_proto) {
-            send_error_json(fd, "400 Bad Request", "Malformed request line");
-            free(hdr);
-            return -6;
+            send_error_json(c->fd, "400 Bad Request", "Malformed request line");
+            close_conn(c);
+            return -1;
         }
     }
 
-    // 4) Parse Content-Length (capped at MAX_BODY + 1 so the limit check
-    //    below can distinguish "too large" from "exactly at the cap").
+    // 2b) Request-line UTF-8 validation (v3): invalid bytes -> 400 (the
+    //      Mojo side would otherwise decode them as U+FFFD and route a
+    //      garbled path).
+    if (!utf8_valid(g_method, g_method_len) ||
+        !utf8_valid(g_path, g_path_len) ||
+        !utf8_valid(g_query, g_query_len)) {
+        send_error_json(c->fd, "400 Bad Request", "Invalid UTF-8 in request line");
+        close_conn(c);
+        return -1;
+    }
+
+    // 3) Transfer-Encoding is not supported (v9): 411.
+    if (has_header_name_ci(c->hdr, (size_t)hdr_end, "Transfer-Encoding")) {
+        send_error_json(c->fd, "411 Length Required",
+                        "Transfer-Encoding not supported; send Content-Length");
+        close_conn(c);
+        return -1;
+    }
+
+    // 4) Content-Length (capped so the limit check can distinguish).
     int content_length = 0;
-    char *cl = bounded_strstr(hdr, (size_t)hdr_end, "Content-Length:");
+    char *cl = bounded_strstr(c->hdr, (size_t)hdr_end, "Content-Length:");
     if (cl) {
         cl += 15;
         while (*cl == ' ' || *cl == '\t') cl++;
@@ -472,106 +546,282 @@ long recv_and_parse(int fd) {
             cl++;
         }
     }
-
-    // 4b) Transfer-Encoding (chunked or otherwise) is not supported: we
-    // read bodies strictly by Content-Length. Answer 411 so the client can
-    // retry with a length, instead of us silently processing a request
-    // whose body we cannot see (old behavior: 200 with an empty body).
-    if (has_header_name_ci(hdr, (size_t)hdr_end, "Transfer-Encoding")) {
-        send_error_json(fd, "411 Length Required",
-                        "Transfer-Encoding not supported; send Content-Length");
-        free(hdr);
-        return -9;
-    }
-
-    // 5) Body size limit — checked BEFORE any clamping (v2 bug).
     if (content_length > g_max_body_size) {
-        cdebug("413 fd=%d content_length=%d (unread body stays in kernel)", fd, content_length);
-        send_error_json(fd, "413 Payload Too Large", "Request body too large");
-        free(hdr);
-        return -2;
+        cdebug("413 fd=%d content_length=%d", c->fd, content_length);
+        send_error_json(c->fd, "413 Payload Too Large", "Request body too large");
+        close_conn(c);
+        return -1;
     }
     if (content_length > MAX_BODY) content_length = MAX_BODY;
+    c->cl = content_length;
 
-    // 5b) Expect: 100-continue — send the interim response BEFORE reading
-    // the body, otherwise the client (e.g. curl) stalls ~1s waiting for it.
-    // (Only reached when we are about to read a body; 413 above already
-    // rejected oversized requests without one.)
-    if (content_length > 0 && expect_100_continue(hdr, (size_t)hdr_end)) {
-        cdebug("100-continue fd=%d", fd);
-        (void)send_all(fd, "HTTP/1.1 100 Continue\r\n\r\n",
+    // 5) Expect: 100-continue (v8): interim response before the body.
+    if (content_length > 0 && expect_100_continue(c->hdr, (size_t)hdr_end)) {
+        cdebug("100-continue fd=%d", c->fd);
+        (void)send_all(c->fd, "HTTP/1.1 100 Continue\r\n\r\n",
                        (int)strlen("HTTP/1.1 100 Continue\r\n\r\n"));
     }
 
-    // 6) Read body: some may already be in hdr (after header end)
-    int body_in_hdr = total - hdr_end;
-    if (content_length > 0) {
-        int got = 0;
-        if (body_in_hdr > 0 && body_in_hdr <= content_length) {
-            memcpy(g_body, hdr + hdr_end, (size_t)body_in_hdr);
-            got = body_in_hdr;
-        }
-        while (got < content_length && got < MAX_BODY) {
-            int n = recv_timeout(fd, g_body + got, content_length - got);
-            if (n < 0) {
-                if (is_timeout_errno()) {
-                    send_error_json(fd, "408 Request Timeout", "Request timeout");
-                    free(hdr);
-                    return -5;
-                }
-                break;  // reset / error: drop silently
-            }
-            if (n == 0) break;  // clean EOF: short body
-            got += n;
-        }
-        g_body[got] = 0;
-        g_body_len = got;
-    }
-
-    // 9) Keep-alive decision (RFC 7230 §6): HTTP/1.1 keeps the connection
-    // unless the client says "Connection: close"; HTTP/1.0 closes unless the
-    // client says "Connection: keep-alive". The request is fully consumed
-    // here, so the connection is clean and reusable.
+    // 6) Keep-alive decision (v10, RFC 7230 §6).
     {
         int keep = g_protocol_11 ? 1 : 0;
-        int dir = connection_directive(hdr, (size_t)hdr_end);
+        int dir = connection_directive(c->hdr, (size_t)hdr_end);
         if (dir == 1) keep = 0;
         if (dir == 2) keep = 1;
         g_close_after_response = keep ? 0 : 1;
     }
 
-    cdebug("parsed fd=%d method_len=%d path_len=%d query_len=%d body_len=%d keep=%d",
-           fd, g_method_len, g_path_len, g_query_len, g_body_len,
-           !g_close_after_response);
-    free(hdr);
-
-    // 7) UTF-8 validation of the request line.
-    if (!utf8_valid(g_method, g_method_len) ||
-        !utf8_valid(g_path, g_path_len) ||
-        !utf8_valid(g_query, g_query_len)) {
-        send_error_json(fd, "400 Bad Request", "Invalid UTF-8 in request line");
-        return -3;
+    // 7) Body (some may already be in the header buffer).
+    int body_in_hdr = c->hdr_total - hdr_end;
+    c->first_data_ms = now_ms();
+    c->last_data_ms = c->first_data_ms;
+    if (content_length == 0) {
+        c->body = NULL;
+        c->body_got = 0;
+        c->phase = 2;
+        // Extra bytes (a pipelined next request) are dropped: pipelining is
+        // not supported (same limitation as the pre-v11 server).
+        return 1;
     }
-    // 8) UTF-8 validation of the body (JSON is UTF-8; the Mojo decoder
-    //    turns invalid bytes into U+FFFD, which would silently corrupt data).
-    if (g_body_len > 0 && !utf8_valid(g_body, g_body_len)) {
-        send_error_json(fd, "400 Bad Request", "Invalid UTF-8 in request body");
-        return -4;
+    c->body = malloc((size_t)content_length + 1);
+    if (!c->body) {
+        send_error_json(c->fd, "500 Internal Server Error", "Out of memory");
+        close_conn(c);
+        return -1;
     }
-    return total;
+    c->body_got = 0;
+    if (body_in_hdr > 0) {
+        int copy = body_in_hdr < content_length ? body_in_hdr : content_length;
+        memcpy(c->body, c->hdr + hdr_end, (size_t)copy);
+        c->body_got = copy;
+    }
+    if (c->body_got >= content_length) {
+        c->body[c->body_got] = 0;
+        c->phase = 2;
+        if (!utf8_valid(c->body, c->body_got)) {
+            send_error_json(c->fd, "400 Bad Request", "Invalid UTF-8 in request body");
+            close_conn(c);
+            return -1;
+        }
+        return 1;
+    }
+    c->phase = 1;
+    return 0;
 }
 
-// Byte accessors for the Mojo side
+// Read available data from a connection and advance its state machine.
+// Returns 1 = a request is complete, 0 = still waiting, -1 = the connection
+// was closed (an error response was sent where appropriate).
+static int pump_conn(struct conn *c) {
+    if (c->phase == 0) {
+        // Header already complete (accumulated earlier, e.g. carried over)?
+        if (find_header_end(c->hdr, c->hdr_total) >= 0)
+            return finish_header(c);
+        if (c->hdr_total >= HDR_BUF_SIZE - 1) {
+            send_error_json(c->fd, "431 Request Header Fields Too Large",
+                            "Request header too large");
+            close_conn(c);
+            return -1;
+        }
+        int n = recv(c->fd, c->hdr + c->hdr_total, (size_t)(HDR_BUF_SIZE - 1 - c->hdr_total), MSG_DONTWAIT);
+        if (n <= 0) {
+            if (n == 0) { close_conn(c); return -1; }  // EOF
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;  // spurious
+            close_conn(c);
+            return -1;
+        }
+        c->hdr_total += n;
+        if (c->first_data_ms == 0) c->first_data_ms = now_ms();
+        c->last_data_ms = now_ms();
+        return pump_conn(c);  // one retry: the header may now be complete
+    }
+    // phase 1: body still arriving
+    int n = recv(c->fd, c->body + c->body_got, (size_t)(c->cl - c->body_got), MSG_DONTWAIT);
+    if (n <= 0) {
+        if (n == 0) {
+            // Client closed mid-body: complete with the short body (the
+            // pre-v11 behavior processed it rather than hanging).
+            c->body[c->body_got] = 0;
+            c->phase = 2;
+            if (c->body_got > 0 && !utf8_valid(c->body, c->body_got)) {
+                send_error_json(c->fd, "400 Bad Request", "Invalid UTF-8 in request body");
+                close_conn(c);
+                return -1;
+            }
+            return 1;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        close_conn(c);
+        return -1;
+    }
+    c->body_got += n;
+    c->last_data_ms = now_ms();
+    if (c->body_got >= c->cl) {
+        c->body[c->body_got] = 0;
+        c->phase = 2;
+        if (!utf8_valid(c->body, c->body_got)) {
+            send_error_json(c->fd, "400 Bad Request", "Invalid UTF-8 in request body");
+            close_conn(c);
+            return -1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+// Per-connection deadlines, checked on every poll tick (1s):
+//  - partial request without progress for g_recv_timeout_ms -> 408
+//    (Slowloris "send nothing after a few bytes")
+//  - request in flight longer than g_max_request_ms -> 408
+//    (Slowloris "dribble a byte every few seconds" / too-slow upload)
+//  - idle keep-alive connection older than g_idle_max_ms -> silent close
+//    (no request to answer; a 408 would just be noise for connection pools)
+static void check_deadlines(void) {
+    long now = now_ms();
+    for (int i = 0; i < MAX_CONNS; i++) {
+        struct conn *c = &g_conns[i];
+        if (!c->in_use || c->phase == 2) continue;
+        if (c->first_data_ms != 0) {
+            if (now - c->last_data_ms >= g_recv_timeout_ms ||
+                now - c->first_data_ms >= g_max_request_ms) {
+                send_error_json(c->fd, "408 Request Timeout", "Request timeout");
+                close_conn(c);
+            }
+        } else if (now - c->last_active_ms >= g_idle_max_ms) {
+            close_conn(c);
+        }
+    }
+}
+
+// Block until a request is fully parsed (or the server is shutting down).
+// Returns the fd of the completed request (>0; its fields are in the globals
+// and the body accessors) or 0 (a connection was closed, or nothing to do —
+// the Mojo side just loops again).
+long recv_and_parse(void) {
+    static struct pollfd pf[1 + MAX_CONNS];
+    static int pf_pos[MAX_CONNS];
+
+    for (;;) {
+        if (!g_running) return 0;
+
+        int nfd = 0;
+        pf[nfd].fd = (int)g_listen_fd;
+        pf[nfd].events = POLLIN;
+        nfd++;
+        for (int i = 0; i < MAX_CONNS; i++) {
+            if (!g_conns[i].in_use) continue;
+            pf_pos[i] = nfd;
+            pf[nfd].fd = g_conns[i].fd;
+            pf[nfd].events = POLLIN;
+            nfd++;
+        }
+
+        int pr = poll(pf, (nfds_t)nfd, POLL_TICK_MS);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            usleep(10000);
+            continue;
+        }
+
+        // New connection (exactly one per poll iteration: a second
+        // blocking accept() here would stall the event loop; any further
+        // pending connections are picked up on the next iteration, since
+        // the listen fd stays readable while the backlog is non-empty).
+        if (pf[0].revents & (POLLIN | POLLHUP)) {
+            struct sockaddr_in ca;
+            socklen_t cl = sizeof(ca);
+            int cfd = accept((int)g_listen_fd, (struct sockaddr *)&ca, &cl);
+            if (cfd >= 0) {
+                setup_conn_fd(cfd);
+                struct conn *c = alloc_conn(cfd);
+                if (!c) {
+                    // Connection cap reached.
+                    send_error_json(cfd, "503 Service Unavailable", "Too many connections");
+                    close(cfd);
+                    cdebug("accept fd=%d rejected (MAX_CONNS)", cfd);
+                } else {
+                    cdebug("accept fd=%d", cfd);
+                    // The client usually sends right after the handshake:
+                    // try to pump it now (non-blocking; the next poll
+                    // iteration picks up the rest).
+                    int r = pump_conn(c);
+                    if (r == 1) {
+                        g_active_conn = c;
+                        c->last_active_ms = now_ms();
+                        cdebug("request ready fd=%d (first poll)", c->fd);
+                        return c->fd;
+                    }
+                }
+            }
+        }
+
+        if (pr > 0) {
+            for (int i = 0; i < MAX_CONNS; i++) {
+                struct conn *c = &g_conns[i];
+                if (!c->in_use) continue;
+                int re = pf[pf_pos[i]].revents;
+                if (!(re & (POLLIN | POLLHUP | POLLERR))) continue;
+                if ((re & (POLLERR | POLLHUP)) && !(re & POLLIN)) {
+                    close_conn(c);
+                    continue;
+                }
+                int r = pump_conn(c);
+                if (r == 1) {
+                    g_active_conn = c;
+                    c->last_active_ms = now_ms();
+                    cdebug("request ready fd=%d method_len=%d path_len=%d query_len=%d body_len=%d",
+                           c->fd, g_method_len, g_path_len, g_query_len, c->body_got);
+                    return c->fd;
+                }
+                // r == 0: still waiting; r == -1: connection closed
+            }
+        }
+
+        check_deadlines();
+    }
+}
+
+// Mojo calls this after responding to the request on fd: reuse=1 keeps the
+// connection for the next request (keep-alive), reuse=0 closes it. Frees the
+// request's body buffer and resets the per-request state.
+void conn_done(int fd, int reuse) {
+    struct conn *c = find_conn(fd);
+    if (!c) return;
+    if (c->body) { free(c->body); c->body = NULL; }
+    c->body_got = 0;
+    c->phase = 0;
+    c->hdr_total = 0;
+    c->first_data_ms = 0;
+    c->last_data_ms = 0;
+    if (reuse && g_running) {
+        c->last_active_ms = now_ms();
+    } else {
+        close_conn(c);
+    }
+}
+
+// Shutdown: close the listen socket and every active connection.
+void server_shutdown(void) {
+    for (int i = 0; i < MAX_CONNS; i++)
+        close_conn(&g_conns[i]);
+    if (g_listen_fd >= 0) {
+        close((int)g_listen_fd);
+        g_listen_fd = -1;
+    }
+}
+
 long get_method_len() { return g_method_len; }
 long get_path_len() { return g_path_len; }
 long get_query_len() { return g_query_len; }
-long get_body_len() { return g_body_len; }
+long get_body_len() { return g_active_conn ? g_active_conn->body_got : 0; }
 long read_method_byte(int i) { return (i>=0 && i<g_method_len) ? (unsigned char)g_method[i] : -1; }
 long read_path_byte(int i) { return (i>=0 && i<g_path_len) ? (unsigned char)g_path[i] : -1; }
 long read_query_byte(int i) { return (i>=0 && i<g_query_len) ? (unsigned char)g_query[i] : -1; }
-long read_body_byte(int i) { return (i>=0 && i<g_body_len) ? (unsigned char)g_body[i] : -1; }
-
-long close_fd(int fd) { return close(fd); }
+long read_body_byte(int i) {
+    struct conn *c = g_active_conn;
+    if (!c || !c->body) return -1;
+    return (i >= 0 && i < c->body_got) ? (unsigned char)c->body[i] : -1;
+}
 
 // Exit the process with a failure code (used when bind fails — a server
 // that cannot listen must not report success to the operator/CI).

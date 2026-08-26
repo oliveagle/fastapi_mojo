@@ -102,216 +102,204 @@ def main() raises:
             print("\nShutdown signal received...")
             break
 
-        var cfd = external_call["accept_connection", Int](sfd)
-        if cfd < 0:
+        # v11: the C bridge owns the socket I/O — a poll() event loop over
+        # the listen socket plus every active connection. It blocks until
+        # one request is fully parsed, then returns its fd (the fields are
+        # in the bridge globals, exposed by get_*_len/read_*_byte). Keep-
+        # alive works because idle connections no longer block the loop.
+        # 0 = nothing to do right now: a connection was closed (client EOF,
+        # idle timeout, Slowloris 408, or an error response) — loop again.
+        var cfd = external_call["recv_and_parse", Int]()
+        if cfd <= 0:
             continue
 
-        # HTTP/1.1 keep-alive: serve a sequence of requests on this
-        # connection until either side closes it. The C bridge computes
-        # per request whether the connection is reusable (protocol + the
-        # client's Connection header); every error path closes.
-        var conn_alive = True
-        while conn_alive:
-            if not external_call["is_running", Int]():
-                break
+        req_num += 1
+        var req_id = generate_request_id(req_num)
 
-            var n = external_call["recv_and_parse", Int](cfd)
-            if n < 0:
-                # C bridge already sent the appropriate error response:
-                # -1 (malloc fail / no data), -2 (413 too large),
-                # -3 (400 invalid request-line UTF-8), -4 (400 invalid body UTF-8),
-                # -5 (408 request timeout — Slowloris guard),
-                # -6 (400 malformed request line), -7 (431 header too large),
-                # -9 (411 Transfer-Encoding not supported),
-                # -10 (idle keep-alive connection — closed silently, no response)
-                break
-            if n == 0:
-                break  # client closed the connection (clean FIN)
+        # Read request fields as raw bytes, then UTF-8 decode.
+        # (chr()-per-byte would both corrupt multi-byte UTF-8 and be O(n^2).)
+        var m_len = external_call["get_method_len", Int]()
+        var method_bytes = List[Int]()
+        for i in range(m_len):
+            method_bytes.append(external_call["read_method_byte", Int](i))
+        var method = decode_utf8_bytes(method_bytes)
 
-            req_num += 1
-            var req_id = generate_request_id(req_num)
+        var p_len = external_call["get_path_len", Int]()
+        var path_bytes = List[Int]()
+        for i in range(p_len):
+            path_bytes.append(external_call["read_path_byte", Int](i))
+        var path = decode_utf8_bytes(path_bytes)
 
-            # Read request fields as raw bytes, then UTF-8 decode.
-            # (chr()-per-byte would both corrupt multi-byte UTF-8 and be O(n^2).)
-            var m_len = external_call["get_method_len", Int]()
-            var method_bytes = List[Int]()
-            for i in range(m_len):
-                method_bytes.append(external_call["read_method_byte", Int](i))
-            var method = decode_utf8_bytes(method_bytes)
+        var q_len = external_call["get_query_len", Int]()
+        var query_bytes = List[Int]()
+        for i in range(q_len):
+            query_bytes.append(external_call["read_query_byte", Int](i))
+        var query = decode_utf8_bytes(query_bytes)
 
-            var p_len = external_call["get_path_len", Int]()
-            var path_bytes = List[Int]()
-            for i in range(p_len):
-                path_bytes.append(external_call["read_path_byte", Int](i))
-            var path = decode_utf8_bytes(path_bytes)
+        var b_len = external_call["get_body_len", Int]()
+        var body_bytes = List[Int]()
+        for i in range(b_len):
+            body_bytes.append(external_call["read_body_byte", Int](i))
+        var body_str = decode_utf8_bytes(body_bytes)
 
-            var q_len = external_call["get_query_len", Int]()
-            var query_bytes = List[Int]()
-            for i in range(q_len):
-                query_bytes.append(external_call["read_query_byte", Int](i))
-            var query = decode_utf8_bytes(query_bytes)
+        # Handle OPTIONS preflight (CORS)
+        if method == "OPTIONS":
+            _ = external_call["send_preflight_response", Int](cfd)
+            log_request(req_id, method, path, query, "204 No Content")
+            external_call["conn_done", NoneType](cfd, False)  # preflight response announces Connection: close
+        else:
+            # Handle HEAD method (same as GET but no body)
+            var is_head = method == "HEAD"
+            var effective_method = method
+            if is_head:
+                effective_method = "GET"
 
-            var b_len = external_call["get_body_len", Int]()
-            var body_bytes = List[Int]()
-            for i in range(b_len):
-                body_bytes.append(external_call["read_body_byte", Int](i))
-            var body_str = decode_utf8_bytes(body_bytes)
 
-            # Handle OPTIONS preflight (CORS)
-            if method == "OPTIONS":
-                _ = external_call["send_preflight_response", Int](cfd)
-                log_request(req_id, method, path, query, "204 No Content")
-                conn_alive = False  # preflight response announces Connection: close
-            else:
-                # Handle HEAD method (same as GET but no body)
-                var is_head = method == "HEAD"
-                var effective_method = method
+            # Try static file serving for GET/HEAD requests
+            if (effective_method == "GET") and is_static_path(path):
                 if is_head:
-                    effective_method = "GET"
-
-
-                # Try static file serving for GET/HEAD requests
-                if (effective_method == "GET") and is_static_path(path):
-                    if is_head:
-                        # HEAD: headers only, no body (a body would violate HTTP)
-                        _ = external_call["send_static_file_head", Int](
-                            cfd,
-                            path.as_c_string_slice(),
-                        )
-                    else:
-                        _ = external_call["send_static_file", Int](
-                            cfd,
-                            path.as_c_string_slice(),
-                        )
-                    # Log the REAL status (the C side may have answered 403/404/413
-                    # for the static request).
-                    var sl_len = external_call["get_last_status_len", Int]()
-                    var sl = String("")
-                    for i in range(sl_len):
-                        var sb = external_call["read_last_status_byte", Int](i)
-                        if sb >= 0:
-                            sl += chr(sb)
-
-                    log_request(req_id, method, path, query, sl + " (static)")
-
-                    if external_call["get_close_after_response", Int]() != 0:
-                        conn_alive = False
+                    # HEAD: headers only, no body (a body would violate HTTP)
+                    _ = external_call["send_static_file_head", Int](
+                        cfd,
+                        path.as_c_string_slice(),
+                    )
                 else:
-                    # --- Route matching ---
-                    var route_result = router.match_route_with_params(path, effective_method)
+                    _ = external_call["send_static_file", Int](
+                        cfd,
+                        path.as_c_string_slice(),
+                    )
+                # Log the REAL status (the C side may have answered 403/404/413
+                # for the static request).
+                var sl_len = external_call["get_last_status_len", Int]()
+                var sl = String("")
+                for i in range(sl_len):
+                    var sb = external_call["read_last_status_byte", Int](i)
+                    if sb >= 0:
+                        sl += chr(sb)
 
-                    var query_params = parse_query_params(query)
-                    var body_params = ParsedParams()
-                    if (effective_method == "POST" or effective_method == "PUT") and body_str.byte_length() > 0:
-                        body_params = parse_body_json(body_str)
+                log_request(req_id, method, path, query, sl + " (static)")
 
-                    # --- Handler dispatch ---
-                    var resp_data = Dict[String, String]()
-                    var status_line = "200 OK"
-                    var is_405 = False
-                    var allow_methods = List[String]()
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
+            else:
+                # --- Route matching ---
+                var route_result = router.match_route_with_params(path, effective_method)
 
-                    if not route_result.matched:
-                        # Path exists but method not registered -> 405 + Allow (RFC 7231).
-                        # Path does not exist at all -> 404.
-                        allow_methods = router.methods_for_path(path)
-                        if len(allow_methods) > 0:
-                            is_405 = True
-                            status_line = "405 Method Not Allowed"
-                            resp_data = build_error_response("405", "Method not allowed")
-                        else:
-                            status_line = "404 Not Found"
-                            resp_data = build_error_response("404", "Route not found")
+                var query_params = parse_query_params(query)
+                var body_params = ParsedParams()
+                if (effective_method == "POST" or effective_method == "PUT") and body_str.byte_length() > 0:
+                    body_params = parse_body_json(body_str)
+
+                # --- Handler dispatch ---
+                var resp_data = Dict[String, String]()
+                var status_line = "200 OK"
+                var is_405 = False
+                var allow_methods = List[String]()
+
+                if not route_result.matched:
+                    # Path exists but method not registered -> 405 + Allow (RFC 7231).
+                    # Path does not exist at all -> 404.
+                    allow_methods = router.methods_for_path(path)
+                    if len(allow_methods) > 0:
+                        is_405 = True
+                        status_line = "405 Method Not Allowed"
+                        resp_data = build_error_response("405", "Method not allowed")
                     else:
-                        var handler = route_result.handler_name
-                        if handler == "index":
-                            resp_data["message"] = "Welcome to Mojo HTTP Server"
-                            resp_data["version"] = "1.7.0"
-                        elif handler == "health":
-                            resp_data["status"] = "healthy"
-                            resp_data["uptime"] = "running"
-                        elif handler == "status":
-                            var uptime_ms = external_call["gettimeofday_ms", Int]() - start_time
-                            var uptime_s = uptime_ms // 1000
-                            resp_data["status"] = "running"
-                            resp_data["version"] = "1.7.0"
-                            resp_data["uptime"] = String(uptime_s) + "s"
-                            resp_data["requests_served"] = String(req_num)
-                            resp_data["routes"] = String(router.route_count())
-                            resp_data["middleware"] = "request_id, logging, timing"
-                        elif handler == "routes":
-                            resp_data["routes_count"] = String(router.route_count())
-                            resp_data["GET /"] = "index"
-                            resp_data["GET /health"] = "health"
-                            resp_data["GET /status"] = "status"
-                            resp_data["GET /routes"] = "routes"
-                            resp_data["GET /hello"] = "hello"
-                            resp_data["GET /items"] = "list_items"
-                            resp_data["POST /items"] = "create_item"
-                            resp_data["GET /items/{id}"] = "get_item"
-                            resp_data["DELETE /items/{id}"] = "delete_item"
-                        elif handler == "hello":
-                            resp_data["message"] = "Hello from Mojo!"
-                            if "name" in query_params.values:
-                                resp_data["greeting"] = "Hello, " + query_params.values["name"] + "!"
-                        elif handler == "list_items":
-                            resp_data["items"] = "[]"
-                            resp_data["message"] = "List all items"
-                        elif handler == "create_item":
-                            resp_data["message"] = "Item created"
-                            for key in body_params.values:
-                                resp_data["item_" + key] = body_params.values[key]
-                        elif handler == "get_item":
-                            resp_data["message"] = "Get item by ID"
-                            for key in route_result.params:
-                                resp_data[key] = route_result.params[key]
-                        elif handler == "delete_item":
-                            resp_data["message"] = "Item deleted"
-                            for key in route_result.params:
-                                resp_data[key] = route_result.params[key]
-                        else:
-                            resp_data = build_error_response("500", "Unknown handler: " + handler)
-                            status_line = "500 Internal Server Error"
-
-                    resp_data["method"] = method
-                    resp_data["path"] = path
-                    resp_data["handler"] = route_result.handler_name
-                    resp_data["request_id"] = req_id
-
-                    for key in query_params.values:
-                        resp_data["query_" + key] = query_params.values[key]
-
-                    var body = json_serialize_dict(resp_data)
-
-                    # Use HEAD response for HEAD requests (headers only, no body);
-                    # 405 carries the Allow header.
-                    if is_head:
-                        _ = external_call["send_head_response", Int](
-                            cfd,
-                            status_line.as_c_string_slice(),
-                            body.as_c_string_slice(),
-                        )
-                    elif is_405:
-                        var allow_str = ", ".join(allow_methods)
-                        _ = external_call["send_simple_response_allow", Int](
-                            cfd,
-                            status_line.as_c_string_slice(),
-                            body.as_c_string_slice(),
-                            allow_str.as_c_string_slice(),
-                        )
+                        status_line = "404 Not Found"
+                        resp_data = build_error_response("404", "Route not found")
+                else:
+                    var handler = route_result.handler_name
+                    if handler == "index":
+                        resp_data["message"] = "Welcome to Mojo HTTP Server"
+                        resp_data["version"] = "1.7.0"
+                    elif handler == "health":
+                        resp_data["status"] = "healthy"
+                        resp_data["uptime"] = "running"
+                    elif handler == "status":
+                        var uptime_ms = external_call["gettimeofday_ms", Int]() - start_time
+                        var uptime_s = uptime_ms // 1000
+                        resp_data["status"] = "running"
+                        resp_data["version"] = "1.7.0"
+                        resp_data["uptime"] = String(uptime_s) + "s"
+                        resp_data["requests_served"] = String(req_num)
+                        resp_data["routes"] = String(router.route_count())
+                        resp_data["middleware"] = "request_id, logging, timing"
+                    elif handler == "routes":
+                        resp_data["routes_count"] = String(router.route_count())
+                        resp_data["GET /"] = "index"
+                        resp_data["GET /health"] = "health"
+                        resp_data["GET /status"] = "status"
+                        resp_data["GET /routes"] = "routes"
+                        resp_data["GET /hello"] = "hello"
+                        resp_data["GET /items"] = "list_items"
+                        resp_data["POST /items"] = "create_item"
+                        resp_data["GET /items/{id}"] = "get_item"
+                        resp_data["DELETE /items/{id}"] = "delete_item"
+                    elif handler == "hello":
+                        resp_data["message"] = "Hello from Mojo!"
+                        if "name" in query_params.values:
+                            resp_data["greeting"] = "Hello, " + query_params.values["name"] + "!"
+                    elif handler == "list_items":
+                        resp_data["items"] = "[]"
+                        resp_data["message"] = "List all items"
+                    elif handler == "create_item":
+                        resp_data["message"] = "Item created"
+                        for key in body_params.values:
+                            resp_data["item_" + key] = body_params.values[key]
+                    elif handler == "get_item":
+                        resp_data["message"] = "Get item by ID"
+                        for key in route_result.params:
+                            resp_data[key] = route_result.params[key]
+                    elif handler == "delete_item":
+                        resp_data["message"] = "Item deleted"
+                        for key in route_result.params:
+                            resp_data[key] = route_result.params[key]
                     else:
-                        _ = external_call["send_simple_response", Int](
-                            cfd,
-                            status_line.as_c_string_slice(),
-                            body.as_c_string_slice(),
-                        )
+                        resp_data = build_error_response("500", "Unknown handler: " + handler)
+                        status_line = "500 Internal Server Error"
+
+                resp_data["method"] = method
+                resp_data["path"] = path
+                resp_data["handler"] = route_result.handler_name
+                resp_data["request_id"] = req_id
+
+                for key in query_params.values:
+                    resp_data["query_" + key] = query_params.values[key]
+
+                var body = json_serialize_dict(resp_data)
+
+                # Use HEAD response for HEAD requests (headers only, no body);
+                # 405 carries the Allow header.
+                if is_head:
+                    _ = external_call["send_head_response", Int](
+                        cfd,
+                        status_line.as_c_string_slice(),
+                        body.as_c_string_slice(),
+                    )
+                elif is_405:
+                    var allow_str = ", ".join(allow_methods)
+                    _ = external_call["send_simple_response_allow", Int](
+                        cfd,
+                        status_line.as_c_string_slice(),
+                        body.as_c_string_slice(),
+                        allow_str.as_c_string_slice(),
+                    )
+                else:
+                    _ = external_call["send_simple_response", Int](
+                        cfd,
+                        status_line.as_c_string_slice(),
+                        body.as_c_string_slice(),
+                    )
 
 
-                    log_request(req_id, method, path, query, status_line)
+                log_request(req_id, method, path, query, status_line)
 
-                    if external_call["get_close_after_response", Int]() != 0:
-                        conn_alive = False
-        _ = external_call["close_fd", Int](cfd)
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
 
-    _ = external_call["close_fd", Int](sfd)
+    external_call["server_shutdown", NoneType]()
     print("Server stopped gracefully.")
