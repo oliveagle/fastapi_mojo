@@ -28,12 +28,13 @@
 
 | 阶段 | 状态 | 说明 |
 |------|------|------|
-| Phase 0: Wrapper 引导 | 🔄 进行中 | Mojo 薄壳调 Python FastAPI，跑通 benchmark 与路由 |
-| Phase 1: 核心组件 Mojo 化 | 📋 待启动 | HTTP server / JSON / Router / 参数解析 全部 Mojo 原生 |
-| Phase 2: 去 Python 化 | 📋 待启动 | 移除 Python interop，静态链接为单一 binary |
-| Phase 3: 单 Binary 交付 | 🎯 终点 | `mojo build` 产出独立可执行文件 |
+| Phase 0: Wrapper 引导 | ✅ 完成 | Mojo 薄壳调 Python FastAPI（已拆除，历史阶段） |
+| Phase 1: 核心组件 Mojo 化 | ✅ 完成 | HTTP server（C FFI 桥接）/ JSON / Router / 参数解析 全部原生 |
+| Phase 2: 去 Python 化 | ✅ 完成 | 零 Python 运行期依赖（.venv 仅保留给 benchmark 工具链） |
+| Phase 3: 单 Binary 交付 | ✅ **已达成** | `./build_single.sh` 产出 `build/fastapi_mojo`，ldd 仅 libc |
 
-**当前所有 C1~C4 的完成，都是在 Phase 0 内积累领域知识；Phase 1 才是真正的攻坚。**
+**本标已达成**：单一文件部署（scp 即运行）。实现机制见 `docs/adr/0003-single-binary-mechanism/`
+（Mojo 1.0.0 无静态运行时库 → 嵌入 + 启动暂存 + dlopen 符号转发）。
 
 ---
 
@@ -89,12 +90,13 @@
 - **已决策-6 (C2)**：Mojo 构造 JSON + Response 包装
 - **已决策-7 (C3)**：Mojo 路由表 + 批量注册
 - **已决策-8 (C4)**：Path/Body 参数解析迁移到 Mojo
-- **已决策-9 (C5)**：Mojo HTTP 服务器 — 🚧 阻塞（Mojo 1.0.0 无网络模块）
-- **已决策-10**：不自造 JSON 序列化，直接包 orjson ⚠️ *与本标冲突，Phase 1 需重审*
-- **已决策-11**：.venv 环境隔离 ⚠️ *bootstrap-only，Phase 2 必须移除*
-- **已决策-12**：异常 → JSON 响应（orjson 序列化）⚠️ *依赖 orjson，Phase 1 需重审*
+- **已决策-9 (C5)**：Mojo HTTP 服务器 — ✅ 达成（C FFI socket 桥接 + Mojo 原生协议层；Mojo 1.0.0 无网络模块的约束经 C 桥接绕过）
+- **已决策-10**：不自造 JSON 序列化，直接包 orjson — ✅ **已重审并替换**：json.mojo 原生线性时间序列化（orjson 路径已删除）
+- **已决策-11**：.venv 环境隔离 — ✅ **服务器侧已移除**（bootstrap 结束）；.venv 仅保留给 benchmark 工具链（bench.py），非运行期依赖
+- **已决策-12**：异常 → JSON 响应（orjson 序列化）— ✅ **已替换**：错误响应由 json.mojo 原生构造
 - **已决策-13**：**项目本标 = Mojo 单 Binary 零依赖部署**（本文件 §1）
+- **已决策-14**：单一二进制实现机制 = 运行时嵌入 + 启动暂存 + dlopen 符号转发（见 ADR-0003）；构建入口 `./build_single.sh`，部署 `./deploy.sh`
 
 ---
 
-*最后更新：2026-08-23*
+*最后更新：2026-08-26*

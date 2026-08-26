@@ -1,65 +1,85 @@
 # fastapi_mojo
 
-> 🎯 **项目本标（North Star）**：**用 Mojo 把代码编译成一个单一 Binary，运行时零外部依赖**（不依赖 Python / pip / .venv）。
+> 🎯 **项目本标（North Star）**：**用 Mojo 把代码编译成一个单一 Binary，运行时零外部依赖**（不依赖 Python / pip / .venv / 附带 .so）。
 > 详见 `AGENTS.md` §1 与 `docs/adr/0002-single-binary-deployment/`。
 
 用 **Mojo** 实现一套 FastAPI 的实验仓库。
 
-**当前阶段：Phase 1 — Native Mojo HTTP Server**
+**当前阶段：Phase 3 — 单一 Binary 交付（已达成）**
 
-Mojo 原生 HTTP 服务器，零 Python 依赖，支持：
-- 7 个 REST API 路由（GET/POST/DELETE）
-- 模式匹配路由（`/items/{item_id}`）
-- Query/Path/Body 参数解析
-- JSON 序列化
-- CORS 支持
-- 静态文件服务
-- 优雅关闭（SIGINT/SIGINT）
-- 请求 ID 追踪
+- ✅ Mojo 原生 HTTP 服务器（C FFI socket 桥接 + Mojo 路由/参数/JSON）
+- ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 仅依赖 libc（基础运行时）
+- ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
+- ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
+
+## 单一二进制是怎么做到的
+
+Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so`、
+`libMSupportGlobals.so`、`libAsyncRTRuntimeGlobals.so`），没有静态库，
+`mojo build` 也没有 `--static`。本项目采用的机制（见 `runtime_shim.c`）：
+
+1. `mojo build --emit object` 产出服务器对象（其外部依赖仅为 11 个
+   `KGEN_CompilerRT_*` C API 符号 + libc + C 桥接符号）；
+2. 3 个运行时 .so 用 `objcopy -I binary` 作为数据嵌入可执行文件；
+3. 进程启动时（`main` 之前的 C constructor）把运行时暂存到私有临时目录
+   （`/dev/shm` 或 `/tmp`），`dlopen` 并绑定这 11 个符号的转发函数；
+4. 退出时（atexit）清理临时目录。
+
+对用户的效果：**scp 一个文件即可运行**，部署目录里没有任何 .so。
+运行期临时目录是 dlopen 的硬性要求（Linux 无法从内存 dlopen）。
 
 ## 目录结构
 
 ```
 .
+├── build_single.sh                # ★ 单一二进制构建脚本（推荐入口）
+├── deploy.sh                      # 构建 + 自包含验证 + 输出 build/deploy/fastapi_mojo
+├── bench_native.sh                # curl 快速基准
+├── benchmark.sh                   # 固定姿势 benchmark（唯一压测入口，AGENTS.md §4）
 ├── src/fastapi_mojo/
-│   ├── http_bridge_final.c      # C FFI 桥接：socket I/O + CORS + 静态文件
-│   ├── http_server_final.mojo   # HTTP 服务器主程序
-│   ├── json.mojo                # JSON 序列化
-│   ├── router.mojo              # 模式匹配路由
-│   ├── params.mojo              # 参数解析
-│   ├── test_all.mojo            # 集成测试
-│   ├── static/                  # 静态文件目录
-│   │   ├── index.html
-│   │   └── test.json
-│   └── libhttp_bridge_final.so  # C 桥接库
-├── deploy.sh                    # 编译 + 打包部署脚本
-├── bench_native.sh              # 原生服务器基准测试
-├── docs/adr/                    # 架构决策记录
-└── .beads/                      # 任务管理
+│   ├── http_server_final.mojo     # HTTP 服务器主程序（路由/handler/日志）
+│   ├── http_bridge_final.c        # C FFI 桥接：socket I/O + CORS + 静态文件 + 限流 + 信号
+│   ├── runtime_shim.c             # 单一二进制：运行时嵌入/暂存/dlopen/符号转发
+│   ├── router.mojo                # 模式匹配路由（{param} segment）
+│   ├── params.mojo                # Path/Query/Body 参数解析（UTF-8 安全 JSON parser）
+│   ├── json.mojo                  # 线性时间 JSON 序列化
+│   ├── string_builder.mojo        # 线性字符串构建 + UTF-8 字节解码
+│   ├── middleware.mojo            # 中间件定义
+│   ├── test_all.mojo              # 集成测试
+│   └── static/                    # 静态文件目录
+│       ├── index.html
+│       └── test.json
+├── docs/adr/                      # 架构决策记录（含 6 条架构隔离约束声明）
+└── .beads/                        # beads-rust 任务管理
 ```
 
 ## 快速开始
 
-### 编译运行
+```bash
+# 依赖：mojo 1.0.0（pip install modular）、gcc、binutils
+./build_single.sh
+./build/fastapi_mojo          # 监听 http://127.0.0.1:8000
+```
+
+静态文件目录默认为工作目录下的 `./static`，可用环境变量覆盖：
+
+```bash
+FASTAPI_MOJO_STATIC_DIR=/opt/static ./build/fastapi_mojo
+```
+
+### 部署（单文件）
+
+```bash
+./deploy.sh                   # 构建 + 验证，输出 build/deploy/fastapi_mojo
+scp build/deploy/fastapi_mojo user@host:/opt/fastapi_mojo/
+ssh user@host '/opt/fastapi_mojo'
+```
+
+### 测试
 
 ```bash
 cd src/fastapi_mojo
-
-# 编译 C 桥接
-gcc -shared -fPIC -o libhttp_bridge_final.so http_bridge_final.c -lc
-
-# 运行服务器
-mojo run -Xlinker -L. -Xlinker -lhttp_bridge_final http_server_final.mojo
-```
-
-### 部署
-
-```bash
-# 编译 + 打包（输出到 build/deploy/）
-./deploy.sh
-
-# 部署到远程
-scp -r build/deploy/ user@host:/opt/fastapi_mojo/
+for f in json params router string_builder test_all; do mojo run $f.mojo; done
 ```
 
 ## API 路由
@@ -68,124 +88,103 @@ scp -r build/deploy/ user@host:/opt/fastapi_mojo/
 |------|------|------|
 | GET | `/` | 欢迎页面 |
 | GET | `/health` | 健康检查 |
-| GET | `/hello?name=Mojo` | 个性化问候 |
+| GET | `/status` | 运行状态（uptime/请求数/路由数） |
+| GET | `/routes` | 路由表 |
+| GET | `/hello?name=Mojo` | 个性化问候（UTF-8 查询参数） |
 | GET | `/items` | 获取所有项目 |
-| POST | `/items` | 创建项目 |
+| POST | `/items` | 创建项目（JSON body，UTF-8 安全） |
 | GET | `/items/{item_id}` | 获取单个项目 |
 | DELETE | `/items/{item_id}` | 删除项目 |
+
+其他能力：CORS（含 OPTIONS 预检）、HEAD（无 body）、静态文件（含目录穿越 403 防护）、
+body 限流（默认 1MB，超限 413）、非法 UTF-8 请求 400、请求 ID 追踪、优雅关闭（SIGINT/SIGTERM）。
 
 ### 示例
 
 ```bash
-# 欢迎页面
 curl http://127.0.0.1:8000/
-# {"message": "Welcome to Mojo HTTP Server", "version": "1.4.0", ...}
-
-# 健康检查
 curl http://127.0.0.1:8000/health
-# {"status": "healthy", "uptime": "running", ...}
-
-# 个性化问候
 curl "http://127.0.0.1:8000/hello?name=Mojo"
-# {"message": "Hello from Mojo!", "greeting": "Hello, Mojo!", ...}
-
-# 创建项目
 curl -X POST http://127.0.0.1:8000/items -d '{"name":"Widget"}'
-# {"message": "Item created", "item_name": "Widget", ...}
-
-# 获取项目
 curl http://127.0.0.1:8000/items/42
-# {"message": "Get item by ID", "item_id": "42", ...}
-
-# 删除项目
 curl -X DELETE http://127.0.0.1:8000/items/42
-# {"message": "Item deleted", "item_id": "42", ...}
+curl -I http://127.0.0.1:8000/            # HEAD：仅头无 body
 ```
 
 ## 静态文件
 
-将文件放在 `static/` 目录，服务器会自动服务：
+将文件放在静态目录（默认 `src/fastapi_mojo/static/` 或 `FASTAPI_MOJO_STATIC_DIR`），
+仅已知扩展名的路径（.html/.css/.js/.json/图片等）走静态服务，API 路由不受影响：
 
 ```bash
-mkdir -p static
-echo '<h1>Hello</h1>' > static/index.html
-
-curl http://127.0.0.1:8000/index.html
-# <h1>Hello</h1>
+curl http://127.0.0.1:8000/test.json
+# {"status": "ok"}
 ```
-
-支持的文件类型：
-- HTML/CSS/JS
-- JSON/XML
-- 图片（PNG/JPG/GIF/SVG/ICO）
-- 字体（WOFF/WOFF2）
-- PDF
 
 ## 基准测试
 
 ```bash
-# 运行基准测试（默认 100 请求，5 并发）
+# 快速（curl 顺序）
 ./bench_native.sh
 
-# 自定义请求数和并发数
-./bench_native.sh 1000 10
+# 固定姿势（唯一压测入口，AGENTS.md §4；自动写 SQLite 长期跟踪）
+./benchmark.sh --server-cmd ../../build/fastapi_mojo --server-dir src/fastapi_mojo
+./benchmark.sh --history
 ```
 
 ## 依赖
 
-- [Mojo](https://docs.modular.com/mojo/) 1.0.0+
-- GCC（编译 C 桥接）
-- Bash
+- [Mojo](https://docs.modular.com/mojo/) 1.0.0（`pip install modular`）
+- GCC（编译 C 桥接 + shim）
+- binutils（objcopy 嵌入运行时）
+- 运行期：仅 glibc 系基础运行时（libc/libm/libstdc++/libgcc_s）
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Mojo Server                       │
-├─────────────────────────────────────────────────────┤
-│  http_server_final.mojo                             │
-│  ├── 路由匹配 (router.mojo)                         │
-│  ├── 参数解析 (params.mojo)                         │
-│  ├── JSON 序列化 (json.mojo)                        │
-│  └── 静态文件服务                                    │
-├─────────────────────────────────────────────────────┤
-│  http_bridge_final.c                                │
-│  ├── Socket I/O                                     │
-│  ├── CORS 头部                                      │
-│  ├── Content-Type 检测                              │
-│  └── 信号处理 (SIGINT/SIGTERM)                      │
-└─────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│              fastapi_mojo（单一可执行文件）               │
+├────────────────────────────────────────────────────────┤
+│  http_server_final.mojo                                │
+│  ├── 路由匹配 (router.mojo)                            │
+│  ├── 参数解析 (params.mojo, UTF-8 安全 JSON parser)    │
+│  ├── JSON 序列化 (json.mojo, 线性时间)                 │
+│  ├── 字符串构建 (string_builder.mojo, 线性时间)        │
+│  └── 静态文件 / CORS / 限流 / 日志                      │
+├────────────────────────────────────────────────────────┤
+│  http_bridge_final.c（C FFI，随 binary 静态打包）        │
+│  ├── Socket I/O（read/parse 完整 body）                │
+│  ├── UTF-8 校验（非法请求 400）                        │
+│  ├── Content-Length 限流（413，先检查后截断）          │
+│  └── 信号处理（SIGINT/SIGTERM 优雅关闭）               │
+├────────────────────────────────────────────────────────┤
+│  runtime_shim.c（单一二进制机制）                        │
+│  ├── 嵌入 3 个 Mojo 运行时 .so（objcopy binary 数据）   │
+│  ├── constructor：暂存到 /dev/shm|/tmp + dlopen        │
+│  ├── 11 个 KGEN_CompilerRT_* 符号转发                  │
+│  └── atexit：清理临时目录                              │
+└────────────────────────────────────────────────────────┘
+        运行期依赖：libc / libm / libstdc++ / libgcc_s（基础运行时）
 ```
 
 ## 架构决策记录（ADR）
 
-本项目使用 ADR 记录重要技术决策。所有决策记录位于 `docs/adr/` 目录。
+- **ADR-0001**：Mojo 替换 Python 策略（C1~C4 已落地，C5 经 C FFI 达成）
+- **ADR-0002**：项目本标 = 单一二进制零依赖部署
+- **ADR-0003**：单一二进制实现机制（运行时嵌入 + 暂存 + dlopen shim）
 
-### 决策链
-
-- **已决策-5（C1）**：handler 业务逻辑由 Mojo 构造 lambda 源码
-- **已决策-6（C2）**：Mojo 构造 JSON + Response 包装
-- **已决策-7（C3）**：Mojo 路由表 + 批量注册
-- **已决策-8（C4）**：Path/Body 参数解析迁移到 Mojo
-- **已决策-9（C5）**：Mojo HTTP 服务器（替代 uvicorn）— 已实现
-- **已决策-10**：不自造 JSON 序列化，直接包 orjson
-- **已决策-11**：.venv 环境隔离
-- **已决策-12**：异常 → JSON 响应（orjson 序列化）
-- **已决策-13**：项目本标 = Mojo 单 Binary 零依赖部署（ADR-0002）
-
-详见 `docs/adr/0001-mojo-replacement-strategy/` 与 `docs/adr/0002-single-binary-deployment/`。
+决策链：已决策-5~13 见 `docs/adr/0001-mojo-replacement-strategy/` 与 `AGENTS.md` §6。
 
 ## 路线图
 
 - [x] C FFI 桥接（socket I/O）
-- [x] JSON 序列化
+- [x] JSON 序列化（线性时间）
 - [x] 模式匹配路由
-- [x] 参数解析
-- [x] REST API（7 个路由）
+- [x] 参数解析（UTF-8 安全）
+- [x] REST API（9 个路由 + HEAD/OPTIONS/静态文件）
 - [x] CORS 支持
-- [x] 静态文件服务
-- [x] 优雅关闭
+- [x] 优雅关闭（SIGINT/SIGTERM）
 - [x] 请求 ID 追踪
-- [ ] 中间件支持
-- [ ] WebSocket 支持
-- [ ] 单一二进制打包（Phase 2）
+- [x] 中间件（request_id / logging / timing）
+- [x] **单一二进制打包（Phase 3，本标达成）**
+- [ ] WebSocket 支持（待 Mojo 网络生态成熟）

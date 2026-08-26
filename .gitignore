@@ -7,3 +7,6 @@ build/
 *_test
 *_rpath
 *_rpath_only
+# agent/tool state
+.omo/
+.codegraph/
