@@ -26,12 +26,41 @@ for tool in mojo gcc objcopy; do
 done
 
 # Locate the Mojo runtime libraries.
+# Priority: $MODULAR_LIB env (always wins) > python3 import > pip/pip3 show
+# > python3.10..3.13 import scan. No hardcoded version-specific path.
+find_modular_lib() {
+    local d py
+    # 1) default python3
+    d="$(python3 -c 'import modular, os; d = os.path.dirname(modular.__file__) if getattr(modular, "__file__", None) else modular.__path__[0]; print(os.path.join(d, "lib"))' 2>/dev/null || true)"
+    [[ -n "$d" && -d "$d" ]] && { echo "$d"; return 0; }
+    # 2) pip show (Location -> site-packages/modular/lib)
+    for pipcmd in "python3 -m pip" "pip" "pip3"; do
+        d="$($pipcmd show modular 2>/dev/null | awk -F': *' '/^Location:/{print $2}' || true)"
+        if [[ -n "$d" && -d "$d/modular/lib" ]]; then echo "$d/modular/lib"; return 0; fi
+    done
+    # 3) scan other interpreter versions
+    for py in python3.13 python3.12 python3.11 python3.10; do
+        command -v "$py" >/dev/null 2>&1 || continue
+        d="$("$py" -c 'import modular, os; d = os.path.dirname(modular.__file__) if getattr(modular, "__file__", None) else modular.__path__[0]; print(os.path.join(d, "lib"))' 2>/dev/null || true)"
+        [[ -n "$d" && -d "$d" ]] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+
 if [[ -z "${MODULAR_LIB:-}" ]]; then
-    MODULAR_LIB="$(python3 -c 'import modular, os; print(os.path.join(os.path.dirname(modular.__file__), "lib"))' 2>/dev/null || true)"
-    [[ -z "$MODULAR_LIB" ]] && MODULAR_LIB="$HOME/.local/lib/python3.12/site-packages/modular/lib"
+    MODULAR_LIB="$(find_modular_lib || true)"
+fi
+if [[ -z "${MODULAR_LIB:-}" ]]; then
+    echo "ERROR: could not auto-locate the Mojo runtime library dir."
+    echo "  tried: python3 import / pip show / python3.10..3.13"
+    echo "  fix:   MODULAR_LIB=/path/to/site-packages/modular/lib ./build_single.sh"
+    exit 1
 fi
 for so in libKGENCompilerRTShared.so libMSupportGlobals.so libAsyncRTRuntimeGlobals.so; do
-    [[ -f "$MODULAR_LIB/$so" ]] || { echo "ERROR: $MODULAR_LIB/$so not found (set MODULAR_LIB)"; exit 1; }
+    [[ -f "$MODULAR_LIB/$so" ]] || {
+        echo "ERROR: $MODULAR_LIB/$so not found (point MODULAR_LIB at the right modular/lib)"
+        exit 1
+    }
 done
 
 if [[ "${1:-}" == "--clean" ]]; then
