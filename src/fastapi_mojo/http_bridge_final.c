@@ -36,6 +36,8 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 
 #define HDR_BUF_SIZE 16384      // request header buffer (first line + headers)
@@ -472,13 +474,29 @@ static int serve_static_file(int fd, const char *path, int include_body) {
     else
         snprintf(full_path, sizeof(full_path), "%s%s", g_static_dir, path);
 
-    // Security: prevent directory traversal
-    if (strstr(full_path, "..") != NULL)
+    // Security: prevent directory traversal AND symlink escape.
+    // The old strstr(full_path, "..") both rejected legitimate names
+    // (e.g. "a..b.html") and did not stop symlinks, which fopen follows —
+    // a link static/evil.html -> /etc/hostname was served with 200.
+    // Now: realpath() the static dir and the candidate, require the
+    // resolved candidate to stay inside the resolved dir, and open the
+    // final component with O_NOFOLLOW (TOCTOU hardening).
+    char resolved_dir[PATH_MAX];
+    char resolved_path[PATH_MAX];
+    if (!realpath(g_static_dir, resolved_dir))
+        return send_error_json(fd, "404 Not Found", "Not Found");
+    if (!realpath(full_path, resolved_path))
+        return send_error_json(fd, "404 Not Found", "Not Found");
+    size_t dlen = strlen(resolved_dir);
+    if (strncmp(resolved_path, resolved_dir, dlen) != 0 ||
+        (resolved_path[dlen] != '/' && resolved_path[dlen] != '\0'))
         return send_error_json(fd, "403 Forbidden", "Forbidden");
 
-    FILE *f = fopen(full_path, "rb");
-    if (!f)
-        return send_error_json(fd, "404 Not Found", "Not Found");
+    int ffd = open(resolved_path, O_RDONLY | O_NOFOLLOW);
+    if (ffd < 0)
+        return send_error_json(fd, "403 Forbidden", "Forbidden");
+    FILE *f = fdopen(ffd, "rb");
+    if (!f) { close(ffd); return send_error_json(fd, "404 Not Found", "Not Found"); }
 
     fseek(f, 0, SEEK_END);
     long file_size = ftell(f);
@@ -495,7 +513,7 @@ static int serve_static_file(int fd, const char *path, int include_body) {
     if (rd < (size_t)file_size) file_size = (long)rd;
     content[file_size] = 0;
 
-    int rc = send_response(fd, "200 OK", get_content_type(full_path), content, (int)file_size, include_body);
+    int rc = send_response(fd, "200 OK", get_content_type(resolved_path), content, (int)file_size, include_body);
     free(content);
     return rc;
 }
