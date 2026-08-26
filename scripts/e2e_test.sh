@@ -190,6 +190,22 @@ expect_code "DELETE /items/42 -> 200" 200 "$BASE/items/42" DELETE
 echo "== error paths =="
 expect_code "GET /nope -> 404" 404 "$BASE/nope"
 
+# 405: path exists, method not registered (with Allow header)
+expect_code "POST /health -> 405" 405 "$BASE/health" POST
+POST_HEALTH_HDRS=$(curl -s -D - -o /dev/null --max-time 10 -X POST "$BASE/health")
+if [[ "$POST_HEALTH_HDRS" == *"Allow: GET"* ]]; then pass "405 carries Allow: GET"
+else fail "405 carries Allow: GET" "headers: ${POST_HEALTH_HDRS:0:160}"; fi
+expect_code "DELETE / -> 405" 405 "$BASE/" DELETE
+ROOT_DEL_HDRS=$(curl -s -D - -o /dev/null --max-time 10 -X DELETE "$BASE/")
+if [[ "$ROOT_DEL_HDRS" == *"Allow: GET"* ]]; then pass "405 (root) carries Allow: GET"
+else fail "405 (root) carries Allow: GET" "headers: ${ROOT_DEL_HDRS:0:160}"; fi
+# /items has GET+POST, so DELETE /items -> 405 with both in Allow
+expect_code "DELETE /items -> 405" 405 "$BASE/items" DELETE
+ITEMS_DEL_HDRS=$(curl -s -D - -o /dev/null --max-time 10 -X DELETE "$BASE/items")
+if [[ "$ITEMS_DEL_HDRS" == *"Allow: "* && "$ITEMS_DEL_HDRS" == *"GET"* && "$ITEMS_DEL_HDRS" == *"POST"* ]]; then
+    pass "DELETE /items Allow lists GET+POST"
+else fail "DELETE /items Allow lists GET+POST" "headers: ${ITEMS_DEL_HDRS:0:160}"; fi
+
 # 413: body over the 1MB limit (--data @file: a 1.1MB argv would hit ARG_MAX)
 python3 -c "open('$TMP/big.json','wb').write(b'x' * 1100000)"
 BIG_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST --data @"$TMP/big.json" "$BASE/items")

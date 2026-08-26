@@ -35,6 +35,11 @@ struct Route:
         """检查路由是否匹配（精确 + pattern）。"""
         if self.method != method:
             return False
+        return self.match_path_only(path)
+
+    def match_path_only(self, path: String) -> Bool:
+        """仅按路径匹配（忽略 method）。用于 405 检测：
+        路径存在但方法未注册时，应回 405 + Allow 而不是 404。"""
         return self._match_path(path)
 
     def match_with_params(self, path: String, method: String) -> RouteMatch:
@@ -108,6 +113,15 @@ struct Router:
                 return result^
         return RouteMatch()
 
+    def methods_for_path(self, path: String) -> List[String]:
+        """返回某路径已注册的所有方法（pattern 感知）。
+        空列表 = 该路径不存在（404）；非空但请求方法不在其中 = 405。"""
+        var result = List[String]()
+        for i in range(len(self.routes)):
+            if self.routes[i].match_path_only(path):
+                result.append(self.routes[i].method)
+        return result.copy()
+
     def route_count(self) -> Int:
         """获取路由数量。"""
         return len(self.routes)
@@ -124,6 +138,19 @@ def main() raises:
     router.add_route("/items/{item_id}", "GET", "get_item")
 
     print("Route count: " + String(router.route_count()))
+
+    # 405 detection: methods_for_path
+    var ms = router.methods_for_path("/items")
+    if len(ms) != 2 or not ("GET" in ms and "POST" in ms):
+        print("FAIL: /items methods_for_path expected [GET, POST], got " + ", ".join(ms))
+    var ms2 = router.methods_for_path("/items/42")
+    if len(ms2) != 1 or not ("GET" in ms2):
+        print("FAIL: /items/42 methods_for_path expected [GET], got " + ", ".join(ms2))
+    var ms3 = router.methods_for_path("/users")
+    if len(ms3) != 0:
+        print("FAIL: /users methods_for_path expected [], got " + ", ".join(ms3))
+    if len(ms) == 2 and len(ms2) == 1 and len(ms3) == 0:
+        print("OK: methods_for_path (405 detection)")
 
     # 精确匹配
     if router.match_route("/", "GET"):

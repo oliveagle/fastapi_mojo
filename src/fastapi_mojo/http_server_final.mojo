@@ -197,10 +197,20 @@ def main() raises:
         # --- Handler dispatch ---
         var resp_data = Dict[String, String]()
         var status_line = "200 OK"
+        var is_405 = False
+        var allow_methods = List[String]()
 
         if not route_result.matched:
-            status_line = "404 Not Found"
-            resp_data = build_error_response("404", "Route not found")
+            # Path exists but method not registered -> 405 + Allow (RFC 7231).
+            # Path does not exist at all -> 404.
+            allow_methods = router.methods_for_path(path)
+            if len(allow_methods) > 0:
+                is_405 = True
+                status_line = "405 Method Not Allowed"
+                resp_data = build_error_response("405", "Method not allowed")
+            else:
+                status_line = "404 Not Found"
+                resp_data = build_error_response("404", "Route not found")
         else:
             var handler = route_result.handler_name
             if handler == "index":
@@ -262,12 +272,21 @@ def main() raises:
 
         var body = json_serialize_dict(resp_data)
 
-        # Use HEAD response for HEAD requests (headers only, no body)
+        # Use HEAD response for HEAD requests (headers only, no body);
+        # 405 carries the Allow header.
         if is_head:
             _ = external_call["send_head_response", Int](
                 cfd,
                 status_line.as_c_string_slice(),
                 body.as_c_string_slice(),
+            )
+        elif is_405:
+            var allow_str = ", ".join(allow_methods)
+            _ = external_call["send_simple_response_allow", Int](
+                cfd,
+                status_line.as_c_string_slice(),
+                body.as_c_string_slice(),
+                allow_str.as_c_string_slice(),
             )
         else:
             _ = external_call["send_simple_response", Int](

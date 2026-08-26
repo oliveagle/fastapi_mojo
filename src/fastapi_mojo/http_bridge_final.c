@@ -1,5 +1,9 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v7: 405 support — send_response takes an extra header line, and
+//     send_simple_response_allow() emits the RFC 7231 Allow header for
+//     "path exists, method not registered" (was: 404).
+//
 // v6: oversized request headers (>= HDR_BUF_SIZE, 16KB) -> 431 Request
 //     Header Fields Too Large (was: silent connection reset).
 //
@@ -456,9 +460,13 @@ long read_last_status_byte(int i) {
 }
 
 // Send a full HTTP response (header + optional body) with a real length.
+// `extra` is an optional extra header line (no trailing CRLF, e.g.
+// "Allow: GET, POST"); empty/NULL adds nothing.
 static int send_response(int fd, const char *status, const char *content_type,
-                         const char *body, int body_len, int include_body) {
+                         const char *body, int body_len, int include_body,
+                         const char *extra) {
     char hdr[RESP_HDR_SIZE];
+    const char *ex = (extra && extra[0]) ? extra : "";
     int hlen = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 %s\r\n"
         "Content-Type: %s\r\n"
@@ -468,8 +476,9 @@ static int send_response(int fd, const char *status, const char *content_type,
         "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"
         "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
         "Access-Control-Max-Age: 86400\r\n"
+        "%s"
         "\r\n",
-        status, content_type, body_len);
+        status, content_type, body_len, ex);
     if (hlen < 0 || hlen >= (int)sizeof(hdr)) return -1;
     snprintf(g_last_status, sizeof g_last_status, "%s", status);
     if (send_all(fd, hdr, hlen) != 0) return -1;
@@ -484,17 +493,27 @@ long send_error_json(int fd, const char *status, const char *msg) {
     int blen = snprintf(body, sizeof body, "{\"error\":\"%s\",\"status\":\"%s\"}", msg, status);
     if (blen < 0) blen = 0;
     if (blen >= (int)sizeof body) blen = (int)sizeof body - 1;
-    return send_response(fd, status, "application/json", body, blen, 1);
+    return send_response(fd, status, "application/json", body, blen, 1, NULL);
 }
 
 // Dynamic JSON response
 long send_simple_response(int fd, const char *status, const char *body) {
-    return send_response(fd, status, "application/json", body, (int)strlen(body), 1);
+    return send_response(fd, status, "application/json", body, (int)strlen(body), 1, NULL);
+}
+
+// 405 response carrying the RFC 7231 Allow header (the methods registered
+// for the matched path, computed on the Mojo side).
+long send_simple_response_allow(int fd, const char *status, const char *body,
+                                const char *allow) {
+    char line[256];
+    int n = snprintf(line, sizeof(line), "Allow: %s", allow);
+    if (n < 0 || (size_t)n >= sizeof(line)) n = (int)sizeof(line) - 1;
+    return send_response(fd, status, "application/json", body, (int)strlen(body), 1, line);
 }
 
 // HEAD: headers only, no body
 long send_head_response(int fd, const char *status, const char *body) {
-    return send_response(fd, status, "application/json", body, (int)strlen(body), 0);
+    return send_response(fd, status, "application/json", body, (int)strlen(body), 0, NULL);
 }
 
 // OPTIONS preflight
@@ -558,7 +577,7 @@ static int serve_static_file(int fd, const char *path, int include_body) {
     if (rd < (size_t)file_size) file_size = (long)rd;
     content[file_size] = 0;
 
-    int rc = send_response(fd, "200 OK", get_content_type(resolved_path), content, (int)file_size, include_body);
+    int rc = send_response(fd, "200 OK", get_content_type(resolved_path), content, (int)file_size, include_body, NULL);
     free(content);
     return rc;
 }

@@ -95,6 +95,17 @@ def test_router() raises:
     print("Router tests passed!")
 
 
+    # 405 检测：路径存在但方法未注册
+    var ms_items = router.methods_for_path("/items")
+    assert len(ms_items) == 2, "/items should have 2 methods"
+    var ms_item42 = router.methods_for_path("/items/42")
+    assert len(ms_item42) == 1, "/items/42 should have 1 method (GET)"
+    var ms_root = router.methods_for_path("/")
+    assert len(ms_root) == 1, "/ should have 1 method (GET)"
+    var ms_users = router.methods_for_path("/users")
+    assert len(ms_users) == 0, "/users should have 0 methods (404 not 405)"
+
+
 def test_params() raises:
     """测试参数解析。"""
     print("=== Params Tests ===")
