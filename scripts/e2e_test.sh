@@ -6,7 +6,7 @@
 #   - error paths: 404 / 400 (malformed line, invalid UTF-8 path/body) /
 #     413 / 431 / 408 (Slowloris guard)
 #   - HEAD (headers only, no body) / OPTIONS 204
-#   - static files: 200, symlink-escape 403, ../-traversal 403
+#   - static files: 200, 404, symlink-escape 403, ../-traversal 403
 #   - a stalled client must not block the server (probe during hold)
 #   - server still alive after all attacks
 #
@@ -217,6 +217,12 @@ BIG_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST --data @
 if [[ "$BIG_CODE" == "413" ]]; then pass "POST 1.1MB body -> 413"
 else fail "POST 1.1MB body -> 413" "got $BIG_CODE"; fi
 
+# P4.5: large body POST UNDER the limit (900KB) -> 200
+python3 -c "open('$TMP/big900.bin','wb').write(b'x' * 900000)"
+BIG900_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST --data @"$TMP/big900.bin" "$BASE/items")
+if [[ "$BIG900_CODE" == "200" ]]; then pass "POST 900KB body -> 200 (under 1MB limit)"
+else fail "POST 900KB body -> 200 (under 1MB limit)" "got $BIG900_CODE"; fi
+
 # 400: malformed request line
 expect_raw_status "raw 'BLAH' -> 400" "400 Bad Request" "424c41480d0a0d0a"
 # 400: request line without protocol
@@ -346,11 +352,10 @@ expect_raw_status "chunked (lowercase header) -> 411" "411 Length Required" "$CH
 # --- HEAD / OPTIONS ----------------------------------------------------------
 
 echo "== HEAD / OPTIONS =="
-HEAD_OUT=$(curl -s -I --max-time 10 "$BASE/")
-if [[ "$HEAD_OUT" == *"200 OK"* && "$HEAD_OUT" == *"Content-Length: "* ]]; then
-    # HEAD must carry Content-Length but no body: -I returns only headers,
-    # so verify body is empty by comparing a raw HEAD read.
-    HEAD_RAW=$(python3 -c "
+# HEAD (P4.5): no body, and Content-Length must equal the GET body length
+GET_LEN=$(curl -s --max-time 10 "$BASE/" | wc -c)
+HEAD_CL=$(curl -s -I --max-time 10 "$BASE/" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}')
+HEAD_BODY_BYTES=$(python3 -c "
 import socket
 s = socket.create_connection(('127.0.0.1', $PORT), timeout=5)
 s.send(b'HEAD / HTTP/1.1\r\nHost: x\r\n\r\n')
@@ -359,10 +364,14 @@ hdr, _, body = data.partition(b'\r\n\r\n')
 print(len(body))
 s.close()
 ")
-    if [[ "$HEAD_RAW" == "0" ]]; then pass "HEAD / -> 200, Content-Length set, empty body"
-    else fail "HEAD / -> 200, Content-Length set, empty body" "HEAD body had $HEAD_RAW bytes"; fi
+# CL is per-response correct; two separate requests differ by <=1 byte
+# only when the request_id crosses a digit boundary (req-99 -> req-100).
+DIFF=$((HEAD_CL - GET_LEN)); [[ $DIFF -lt 0 ]] && DIFF=$((DIFF * -1))
+if [[ "$HEAD_BODY_BYTES" == "0" && -n "$HEAD_CL" && "$DIFF" -le 1 ]]; then
+    pass "HEAD / -> empty body, Content-Length ($HEAD_CL) ~= GET body length ($GET_LEN)"
 else
-    fail "HEAD / -> 200, Content-Length set, empty body" "headers: ${HEAD_OUT:0:120}"
+    fail "HEAD / -> empty body, Content-Length ~= GET body length" \
+        "body_bytes=$HEAD_BODY_BYTES cl=$HEAD_CL get_len=$GET_LEN"
 fi
 expect_code "OPTIONS / -> 204" 204 "$BASE/" OPTIONS
 
@@ -372,6 +381,7 @@ echo "== static files =="
 expect_code "GET /index.html -> 200" 200 "$BASE/index.html"
 expect_body_contains "GET /index.html body" "<html" "$BASE/index.html"
 expect_code "GET /test.json -> 200" 200 "$BASE/test.json"
+expect_code "static missing file -> 404" 404 "$BASE/missing_e2e.html"
 
 # symlink escape: static/evil.html -> /etc/hostname must be 403
 ln -s /etc/hostname "$SRC/static/evil_e2e.html"
@@ -414,16 +424,39 @@ PROBE_MS=$(( ( $(date +%s%N) - PROBE_START ) / 1000000 ))
 wait "$HOLDER" 2>/dev/null
 STALLED_RESP=$(cat "$TMP/stalled_resp" 2>/dev/null || echo NONE)
 
-if [[ "$PROBE_CODE" == "200" && "$PROBE_MS" -lt 4000 ]]; then
-    pass "probe /health during stalled client -> 200 in ${PROBE_MS}ms"
+if [[ "$PROBE_CODE" == "200" && "$PROBE_MS" -lt 1000 ]]; then
+    pass "probe /health during stalled client -> 200 in ${PROBE_MS}ms (<1s)"
 else
-    fail "probe /health during stalled client -> 200 in ${PROBE_MS}ms" "code=$PROBE_CODE ms=$PROBE_MS"
+    fail "probe /health during stalled client -> 200 in ${PROBE_MS}ms (<1s)" "code=$PROBE_CODE ms=$PROBE_MS"
 fi
 if [[ "$STALLED_RESP" == *"408"* ]]; then
     pass "stalled client got 408"
 else
     fail "stalled client got 408" "got: $STALLED_RESP"
 fi
+
+# --- concurrency ---------------------------------------------------------------
+
+echo "== concurrency =="
+# P4.5: 50 parallel curls must all get 200 (event loop: no head-of-line
+# blocking; a stalled or slow client cannot starve the others).
+CONC_DIR="$TMP/conc"
+mkdir -p "$CONC_DIR"
+CONC_PIDS=()
+for i in $(seq 1 50); do
+    ( curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$BASE/health" > "$CONC_DIR/$i" ) &
+    CONC_PIDS+=($!)
+done
+# wait only for the curl subshells (a bare `wait` would also wait for the
+# server process, which runs forever)
+for p in "${CONC_PIDS[@]}"; do wait "$p"; done
+CONC_FAILS=0
+for i in $(seq 1 50); do
+    code=$(cat "$CONC_DIR/$i" 2>/dev/null)
+    if [[ "$code" != "200" ]]; then CONC_FAILS=$((CONC_FAILS + 1)); fi
+done
+if [[ "$CONC_FAILS" == "0" ]]; then pass "50 concurrent curls: all 200"
+else fail "50 concurrent curls: all 200" "$CONC_FAILS non-200 responses"; fi
 
 # --- liveness ------------------------------------------------------------------
 
