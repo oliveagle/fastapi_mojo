@@ -161,6 +161,8 @@ BASE="http://127.0.0.1:$PORT"
 echo "== routes =="
 expect_code "GET / -> 200" 200 "$BASE/"
 expect_body_contains "GET / body" "Welcome to Mojo HTTP Server" "$BASE/"
+# middleware (P4.3): timing hook adds duration_ms to JSON responses
+expect_body_contains "GET / has duration_ms (timing middleware)" '"duration_ms"' "$BASE/"
 expect_code "GET /health -> 200" 200 "$BASE/health"
 expect_body_contains "GET /health body" "healthy" "$BASE/health"
 expect_code "GET /status -> 200" 200 "$BASE/status"

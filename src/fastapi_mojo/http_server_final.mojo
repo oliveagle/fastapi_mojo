@@ -10,7 +10,7 @@ from json import json_serialize_dict
 from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
-from middleware import Middleware
+from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 
 
@@ -20,20 +20,6 @@ def build_error_response(status: String, message: String) -> Dict[String, String
     resp["error"] = message
     resp["status"] = status
     return resp^
-
-
-def generate_request_id(req_num: Int) -> String:
-    """Generate a simple request ID."""
-    return "req-" + String(req_num)
-
-
-def log_request(req_id: String, method: String, path: String, query: String, status: String):
-    """Log request with ID and status."""
-    var log = "[" + req_id + "] " + method + " " + path
-    if query.byte_length() > 0:
-        log += "?" + query
-    log += " → " + status
-    print(log)
 
 
 def is_static_path(path: String) -> Bool:
@@ -119,9 +105,10 @@ def main() raises:
     register_routes(router)   # 用户代码 = 数据 (ADR-0004)
     print("Routes: " + String(router.route_count()))
 
-    var mw_request_id = Middleware("request_id")
-    var mw_logging = Middleware("logging")
-    var mw_timing = Middleware("timing")
+    var mw_chain = MiddlewareChain()
+    mw_chain.add(Middleware("request_id"))
+    mw_chain.add(Middleware("logging"))
+    mw_chain.add(Middleware("timing"))
     print("Middleware: request_id, logging, timing")
 
     # Listen port: CLI --port N > FASTAPI_MOJO_PORT env > 8000 (C side).
@@ -154,7 +141,8 @@ def main() raises:
             continue
 
         req_num += 1
-        var req_id = generate_request_id(req_num)
+        var req_id = mw_request_id(mw_chain, req_num)
+        var start_ms = now_ms()
 
         # Request fields are transferred from the C bridge in bulk as
         # CStringSlice (pointer + length) and UTF-8 decoded here in
@@ -166,8 +154,9 @@ def main() raises:
 
         # Handle OPTIONS preflight (CORS)
         if method == "OPTIONS":
+            var duration_ms = mw_timing(mw_chain, start_ms)
             _ = external_call["send_preflight_response", Int](cfd)
-            log_request(req_id, method, path, query, "204 No Content")
+            mw_logging(mw_chain, req_id, method, path, query, "204 No Content", duration_ms)
             external_call["conn_done", NoneType](cfd, False)  # preflight response announces Connection: close
         else:
             # Handle HEAD method (same as GET but no body)
@@ -199,7 +188,8 @@ def main() raises:
                     if sb >= 0:
                         sl += chr(sb)
 
-                log_request(req_id, method, path, query, sl + " (static)")
+                var duration_ms = mw_timing(mw_chain, start_ms)
+                mw_logging(mw_chain, req_id, method, path, query, sl + " (static)", duration_ms)
 
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
@@ -257,6 +247,10 @@ def main() raises:
                 for key in query_params.values:
                     resp_data["query_" + key] = query_params.values[key]
 
+                var duration_ms = mw_timing(mw_chain, start_ms)
+                if duration_ms >= 0:
+                    resp_data["duration_ms"] = String(duration_ms)
+
                 var body = json_serialize_dict(resp_data)
 
                 # Use HEAD response for HEAD requests (headers only, no body);
@@ -283,7 +277,7 @@ def main() raises:
                     )
 
 
-                log_request(req_id, method, path, query, status_line)
+                mw_logging(mw_chain, req_id, method, path, query, status_line, duration_ms)
 
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
