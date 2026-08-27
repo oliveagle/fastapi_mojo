@@ -70,6 +70,15 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 FASTAPI_MOJO_PORT=9000 ./build/fastapi_mojo   # 环境变量
 ```
 
+多 worker 并发（ADR-0005，默认 1 = 单进程）：
+
+```bash
+FASTAPI_MOJO_WORKERS=8 ./build/fastapi_mojo --port 8000
+# 8 个独立进程共享端口（SO_REUSEPORT，nginx pre-fork 模型）；
+# 每个 worker 独立 Mojo 运行时；pkill -x fastapi_mojo 全杀。
+# 实测（32 核）：200 并发 125k rps（单进程 36k，3.5x），P99 18ms（单进程 50.8ms）
+```
+
 静态文件目录默认为工作目录下的 `./static`，可用环境变量覆盖：
 
 ```bash

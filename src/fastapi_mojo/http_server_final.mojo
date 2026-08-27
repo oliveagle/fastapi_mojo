@@ -112,6 +112,10 @@ def main() raises:
     mw_chain.add(Middleware("timing"))
     print("Middleware: request_id, logging, timing")
 
+    # Worker processes (ADR-0005): FASTAPI_MOJO_WORKERS=N (default 1 = single
+    # process). Must run before create_bound_socket (SO_REUSEPORT binding).
+    external_call["init_workers", NoneType]()
+
     # Listen port: CLI --port N > FASTAPI_MOJO_PORT env > 8000 (C side).
     var port = external_call["get_configured_port", Int]()
     var sfd = external_call["create_bound_socket", Int](port)
@@ -119,6 +123,9 @@ def main() raises:
         print("ERROR: bind failed on port " + String(port))
         external_call["bridge_fail", NoneType]()
         return
+    var worker_id = external_call["get_worker_id", Int]()
+    if worker_id > 0:
+        print("Worker #" + String(worker_id) + " (multi-worker mode, ADR-0005)")
     print("Listening on http://127.0.0.1:" + String(port))
     print("Press Ctrl+C to stop")
 
@@ -206,8 +213,9 @@ def main() raises:
                     body_params = parse_body_json(body_str)
 
                 # --- Handler dispatch ---
-                var resp_data = Dict[String, String]()
-                var status_line = "200 OK"
+                # (both branches below assign resp_data/status_line before use)
+                var resp_data: Dict[String, String]
+                var status_line: String
                 var is_405 = False
                 var allow_methods = List[String]()
 

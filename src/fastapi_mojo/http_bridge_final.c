@@ -1,5 +1,10 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v14: concurrency — multi-process workers + SO_REUSEPORT (ADR-0005):
+//      init_workers() (FASTAPI_MOJO_WORKERS=N, default 1 = single process;
+//      spawner = worker 0, children re-exec themselves for a fresh runtime),
+//      create_bound_socket sets SO_REUSEPORT, get_worker_id().
+//
 // v13: configurable listen port — get_configured_port(): CLI --port N /
 //      --port=N (via /proc/self/cmdline) > FASTAPI_MOJO_PORT env > 8000.
 //
@@ -204,10 +209,65 @@ void set_max_body_size(int size) {
 
 // Forward decl (definition lives with the other recv helpers below).
 static void init_recv_timeout(void);
+// Forward decl (defined below the worker machinery).
+long get_configured_port(void);
 
 // Keep-alive: after a fully-parsed request, 0 = the connection may be reused
 // (the response announced "keep-alive"), 1 = the server closes it.
 long get_close_after_response(void) { return g_close_after_response; }
+
+// ---------- worker processes (ADR-0005) ----------
+//
+// FASTAPI_MOJO_WORKERS=N (>1): the first process (the "spawner") becomes
+// worker 0 and forks N-1 children; each child re-execs itself as worker i
+// (fresh process, fresh Mojo runtime init — forking a process whose KGEN/
+// AsyncRT runtime may hold threads/locks is unsafe). Each worker binds the
+// same port with SO_REUSEPORT; the kernel distributes new connections
+// (nginx pre-fork model). FASTAPI_MOJO_WORKERS unset = 1 (default, single
+// process, exactly the pre-v14 behavior).
+
+static int g_worker_id = 0;
+
+long get_worker_id(void) { return g_worker_id; }
+
+void init_workers(void) {
+    const char *wn = getenv("FASTAPI_MOJO_WORKERS");
+    int n = (wn && wn[0]) ? atoi(wn) : 1;
+    if (n <= 1) return;
+
+    const char *am_worker = getenv("FASTAPI_MOJO_WORKER");
+    if (am_worker && am_worker[0]) {
+        // Already a spawned worker: record my id and go on.
+        g_worker_id = atoi(am_worker);
+        return;
+    }
+
+    // Spawner: I am worker 0.
+    g_worker_id = 0;
+    setenv("FASTAPI_MOJO_WORKER", "0", 1);
+
+    long port = get_configured_port();
+    char port_str[16];
+    snprintf(port_str, sizeof port_str, "%ld", port);
+
+    char exe[1024];
+    ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (len <= 0) return;  // cannot re-exec: continue single-process
+    exe[len] = 0;
+
+    for (int i = 1; i < n; i++) {
+        pid_t pid = fork();
+        if (pid < 0) break;  // fork failed: run with fewer workers
+        if (pid == 0) {
+            char wstr[16];
+            snprintf(wstr, sizeof wstr, "%d", i);
+            setenv("FASTAPI_MOJO_WORKER", wstr, 1);
+            char *argv[] = { exe, "--port", port_str, NULL };
+            execv(exe, argv);
+            _exit(127);  // execv failed
+        }
+    }
+}
 
 // Resolve the listen port. Priority (per task p3-2):
 //   1) CLI  --port N  or  --port=N   (read from /proc/self/cmdline)
@@ -264,6 +324,9 @@ long create_bound_socket(int port) {
     if (fd < 0) return -1;
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    // ADR-0005: workers share the port; the kernel distributes new
+    // connections by 4-tuple hash (no-op for the default single worker).
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = INADDR_ANY;
