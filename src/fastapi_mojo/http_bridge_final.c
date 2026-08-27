@@ -103,6 +103,11 @@ static int g_method_len, g_path_len, g_query_len;
 static char g_static_dir[MAX_STATIC_DIR] = "./static";
 static int g_max_body_size = DEFAULT_MAX_BODY_SIZE;
 
+// Where the single-binary shim staged the embedded static assets
+// (<stage_dir>/static); empty unless the shim ran (i.e. not the single
+// binary). Used as fallback when the CWD-relative default doesn't exist.
+static char g_embedded_static_dir[MAX_STATIC_DIR] = "";
+
 static volatile int g_running = 1;
 
 // Slowloris guard: a stalled client (half-sent request line, or slow reads of
@@ -161,12 +166,28 @@ void setup_signal_handlers() {
 
 long is_running() { return g_running; }
 
+void set_embedded_static_dir(const char *dir) {
+    if (!dir || !dir[0]) return;
+    strncpy(g_embedded_static_dir, dir, MAX_STATIC_DIR - 1);
+    g_embedded_static_dir[MAX_STATIC_DIR - 1] = 0;
+}
+
 void set_static_dir(const char *dir) {
-    // FASTAPI_MOJO_STATIC_DIR overrides the directory so the single binary
-    // is deployable from any CWD.
+    // Resolution priority:
+    //   1) FASTAPI_MOJO_STATIC_DIR env (explicit override, any mode)
+    //   2) the passed dir if it exists (CWD-relative "./static" in dev)
+    //   3) the embedded statics staged by the single-binary shim
+    //   4) the passed dir anyway (old behavior: 404s)
     const char *env = getenv("FASTAPI_MOJO_STATIC_DIR");
     if (env && env[0]) dir = env;
     if (!dir) return;
+    struct stat st;
+    int dir_exists = (stat(dir, &st) == 0 && S_ISDIR(st.st_mode));
+    if (!dir_exists && g_embedded_static_dir[0]) {
+        struct stat est;
+        if (stat(g_embedded_static_dir, &est) == 0 && S_ISDIR(est.st_mode))
+            dir = g_embedded_static_dir;
+    }
     strncpy(g_static_dir, dir, MAX_STATIC_DIR - 1);
     g_static_dir[MAX_STATIC_DIR - 1] = 0;
 }

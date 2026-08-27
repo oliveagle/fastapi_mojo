@@ -121,8 +121,18 @@ curl -I http://127.0.0.1:8000/            # HEAD：仅头无 body
 
 ## 静态文件
 
+**单一 binary 内置了 `src/fastapi_mojo/static/` 下的文件**（objcopy 嵌入，
+启动时暂存到私有临时目录；构建时新增/修改 static 文件会自动重新嵌入）。
+目录解析优先级：
+
+1. `FASTAPI_MOJO_STATIC_DIR` 环境变量（显式覆盖，任何模式）
+2. CWD 下的 `./static`（若存在 — 开发模式）
+3. 内置暂存目录（部署模式：scp 单文件到任意目录即可）
+4. 回退 `./static`（404，旧行为）
+
 将文件放在静态目录（默认 `src/fastapi_mojo/static/` 或 `FASTAPI_MOJO_STATIC_DIR`），
-仅已知扩展名的路径（.html/.css/.js/.json/图片等）走静态服务，API 路由不受影响：
+仅已知扩展名的路径（.html/.css/.js/.json/图片等）走静态服务，API 路由不受影响
+（符号链接/目录穿越均 403）：
 
 ```bash
 curl http://127.0.0.1:8000/test.json

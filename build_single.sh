@@ -96,12 +96,42 @@ for name in payload_kgen payload_msupp payload_asyncrt; do
     SYM_START[$name]="$s"; SYM_END[$name]="$e"
 done
 
+# Embed static assets (single binary: static files travel with the binary).
+# Each regular file under $SRC/static becomes an objcopy payload object; the
+# shim stages them to <stage_dir>/static/ at startup and tells the bridge
+# (set_embedded_static_dir). Max 5 files (EMBED_STATIC_0..4 in runtime_shim.c).
+STATIC_PAYLOAD_OBJS=()
+STATIC_DEFS=()
+n_static=0
+if [[ -d "$SRC/static" ]]; then
+    for f in "$SRC/static"/*; do
+        [[ -f "$f" ]] || continue
+        if (( n_static >= 5 )); then
+            echo "WARNING: static/ has more than 5 files; embedding only the first 5"
+            break
+        fi
+        name="$(basename "$f")"
+        safe="$(printf '%s' "$name" | tr -c 'a-zA-Z0-9_' '_')"
+        cp "$f" "$BUILD/static_$safe.bin"
+        ( cd "$BUILD" && objcopy -I binary -O elf64-x86-64 "static_$safe.bin" "static_$safe.o" )
+        ss=$(nm "$BUILD/static_$safe.o" | awk '$3 ~ /_start$/ {print $3; exit}')
+        se=$(nm "$BUILD/static_$safe.o" | awk '$3 ~ /_end$/   {print $3; exit}')
+        [[ -n "$ss" && -n "$se" ]] || { echo "ERROR: could not extract symbols for static_$safe.o"; exit 1; }
+        STATIC_PAYLOAD_OBJS+=("$BUILD/static_$safe.o")
+        STATIC_DEFS+=(-DEMBED_STATIC_${n_static}_NAME="\"$name\"" -DEMBED_STATIC_${n_static}_START="$ss" -DEMBED_STATIC_${n_static}_END="$se")
+        echo "  embedded static: $name ($ss)"
+        n_static=$((n_static + 1))
+    done
+fi
+STATIC_DEFS+=(-DN_EMBED_STATIC=$n_static)
+
 echo "[3/5] Compiling C bridge + runtime shim..."
 gcc -fPIC -O2 -Wall -c "$SRC/http_bridge_final.c" -o "$BUILD/bridge.o"
 gcc -fPIC -O2 -Wall -c "$SRC/runtime_shim.c" -o "$BUILD/shim.o" \
     -DKGEN_PAYLOAD_START="${SYM_START[payload_kgen]}"   -DKGEN_PAYLOAD_END="${SYM_END[payload_kgen]}" \
     -DMSUPP_PAYLOAD_START="${SYM_START[payload_msupp]}" -DMSUPP_PAYLOAD_END="${SYM_END[payload_msupp]}" \
-    -DASYNCRT_PAYLOAD_START="${SYM_START[payload_asyncrt]}" -DASYNCRT_PAYLOAD_END="${SYM_END[payload_asyncrt]}"
+    -DASYNCRT_PAYLOAD_START="${SYM_START[payload_asyncrt]}" -DASYNCRT_PAYLOAD_END="${SYM_END[payload_asyncrt]}" \
+    "${STATIC_DEFS[@]}"
 
 echo "[4/5] Linking single binary (PIE, shim constructor first)..."
 # NOTE: objcopy binary objects carry no .note.GNU-stack; suppress the exec-stack warning.
@@ -112,6 +142,7 @@ gcc -fPIE -pie -O2 \
     "$BUILD/payload_kgen.o" \
     "$BUILD/payload_msupp.o" \
     "$BUILD/payload_asyncrt.o" \
+    ${STATIC_PAYLOAD_OBJS[@]+"${STATIC_PAYLOAD_OBJS[@]}"} \
     -Wl,--no-warn-mismatch -Wl,-z,noexecstack \
     -o "$OUT" \
     -ldl -lm

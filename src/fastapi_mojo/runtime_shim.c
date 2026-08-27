@@ -24,6 +24,7 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -47,6 +48,62 @@ extern char MSUPP_PAYLOAD_START[];
 extern char MSUPP_PAYLOAD_END[];
 extern char ASYNCRT_PAYLOAD_START[];
 extern char ASYNCRT_PAYLOAD_END[];
+
+/* ---------- embedded static files (optional) ---------- */
+/*
+ * The static/ assets (index.html, test.json, ...) are embedded the same way
+ * as the runtime .so files: objcopy -I binary payloads, staged into
+ * <stage_dir>/static/ at startup, and offered to the bridge via
+ * set_embedded_static_dir(). build_single.sh injects the -D flags:
+ *   -DN_EMBED_STATIC=N -DEMBED_STATIC_i_NAME="..." -DEMBED_STATIC_i_START/END
+ * (max 5 files; N=0 in builds without static assets).
+ */
+#ifndef N_EMBED_STATIC
+#define N_EMBED_STATIC 0
+#endif
+
+#if N_EMBED_STATIC >= 1
+extern char EMBED_STATIC_0_START[];
+extern char EMBED_STATIC_0_END[];
+#endif
+#if N_EMBED_STATIC >= 2
+extern char EMBED_STATIC_1_START[];
+extern char EMBED_STATIC_1_END[];
+#endif
+#if N_EMBED_STATIC >= 3
+extern char EMBED_STATIC_2_START[];
+extern char EMBED_STATIC_2_END[];
+#endif
+#if N_EMBED_STATIC >= 4
+extern char EMBED_STATIC_3_START[];
+extern char EMBED_STATIC_3_END[];
+#endif
+#if N_EMBED_STATIC >= 5
+extern char EMBED_STATIC_4_START[];
+extern char EMBED_STATIC_4_END[];
+#endif
+
+struct embedded_file { const char *name; const char *start; const char *end; };
+static const struct embedded_file g_embedded_files[N_EMBED_STATIC > 0 ? N_EMBED_STATIC : 1] = {
+#if N_EMBED_STATIC >= 1
+    { EMBED_STATIC_0_NAME, EMBED_STATIC_0_START, EMBED_STATIC_0_END },
+#endif
+#if N_EMBED_STATIC >= 2
+    { EMBED_STATIC_1_NAME, EMBED_STATIC_1_START, EMBED_STATIC_1_END },
+#endif
+#if N_EMBED_STATIC >= 3
+    { EMBED_STATIC_2_NAME, EMBED_STATIC_2_START, EMBED_STATIC_2_END },
+#endif
+#if N_EMBED_STATIC >= 4
+    { EMBED_STATIC_3_NAME, EMBED_STATIC_3_START, EMBED_STATIC_3_END },
+#endif
+#if N_EMBED_STATIC >= 5
+    { EMBED_STATIC_4_NAME, EMBED_STATIC_4_START, EMBED_STATIC_4_END },
+#endif
+};
+
+// Bridge side (http_bridge_final.c): records where the staged static dir is.
+extern void set_embedded_static_dir(const char *dir);
 
 #define STAGED_KGEN   "libKGENCompilerRTShared.so"
 #define STAGED_MSUPP  "libMSupportGlobals.so"
@@ -79,7 +136,7 @@ static void vlog(const char *msg) {
 }
 
 static void stage_file(const char *dir, const char *name, const char *data, size_t len) {
-    char path[1024];
+    char path[2048];
     snprintf(path, sizeof path, "%s/%s", dir, name);
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -94,15 +151,34 @@ static void stage_file(const char *dir, const char *name, const char *data, size
 }
 
 static void remove_stage_file(const char *dir, const char *name) {
-    char path[1024];
+    char path[2048];
     snprintf(path, sizeof path, "%s/%s", dir, name);
     (void)unlink(path);
+}
+
+static void stage_embedded_statics(const char *dir) {
+    char subdir[1100];
+    snprintf(subdir, sizeof subdir, "%s/static", dir);
+    if (mkdir(subdir, 0700) != 0 && errno != EEXIST) return;
+    for (int i = 0; i < N_EMBED_STATIC; i++) {
+        stage_file(subdir, g_embedded_files[i].name, g_embedded_files[i].start,
+                   (size_t)(g_embedded_files[i].end - g_embedded_files[i].start));
+    }
+}
+
+static void remove_embedded_statics(const char *dir) {
+    char subdir[1100];
+    snprintf(subdir, sizeof subdir, "%s/static", dir);
+    for (int i = 0; i < N_EMBED_STATIC; i++)
+        remove_stage_file(subdir, g_embedded_files[i].name);
+    (void)rmdir(subdir);
 }
 
 static void remove_all_staged(const char *dir) {
     remove_stage_file(dir, STAGED_KGEN);
     remove_stage_file(dir, STAGED_MSUPP);
     remove_stage_file(dir, STAGED_ASYNC);
+    remove_embedded_statics(dir);
     (void)rmdir(dir);
 }
 
@@ -145,6 +221,8 @@ static int try_stage(const char *base) {
     stage_file(dir, STAGED_ASYNC, ASYNCRT_PAYLOAD_START,
                (size_t)(ASYNCRT_PAYLOAD_END - ASYNCRT_PAYLOAD_START));
 
+    stage_embedded_statics(dir);
+
     setenv("LD_LIBRARY_PATH", dir, 1);
 
     char kgen_path[1024];
@@ -162,6 +240,11 @@ static int try_stage(const char *base) {
 
     strncpy(g_stage_dir, dir, sizeof g_stage_dir - 1);
     g_stage_dir[sizeof g_stage_dir - 1] = 0;
+
+    char static_dir[1100];
+    snprintf(static_dir, sizeof static_dir, "%s/static", dir);
+    set_embedded_static_dir(static_dir);
+
     vlog(dir);
     return 1;
 }
@@ -173,8 +256,48 @@ static void runtime_cleanup(void) {
     }
 }
 
+// Self-heal: remove our stage dirs left behind by earlier instances that
+// were SIGKILLed (SIGKILL skips atexit, so runtime_cleanup never ran).
+// Only touches directories matching our own naming pattern whose owning pid
+// is no longer alive (kill(pid, 0) == ESRCH); a reused/alive pid is left
+// alone.
+static void sweep_orphaned_stages(const char *base) {
+    DIR *d = opendir(base);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "fastapi_mojo_rt_", 16) != 0) continue;
+        char *endp = NULL;
+        long pid = strtol(e->d_name + 16, &endp, 10);
+        if (endp == e->d_name + 16 || pid <= 0) continue;
+        if (kill((pid_t)pid, 0) == 0) continue;      // pid alive: leave it
+        if (errno != ESRCH) continue;               // EPERM etc.: leave it
+        char dirpath[600];
+        snprintf(dirpath, sizeof dirpath, "%s/%s", base, e->d_name);
+        DIR *sd = opendir(dirpath);
+        if (sd) {
+            struct dirent *se;
+            while ((se = readdir(sd)) != NULL) {
+                if (strcmp(se->d_name, ".") == 0 || strcmp(se->d_name, "..") == 0) continue;
+                char fpath[880];
+                snprintf(fpath, sizeof fpath, "%s/%s", dirpath, se->d_name);
+                (void)unlink(fpath);
+                (void)rmdir(fpath);  // subdirs (e.g. static/)
+            }
+            closedir(sd);
+        }
+        (void)rmdir(dirpath);
+        vlog(e->d_name);
+    }
+    closedir(d);
+}
+
 __attribute__((constructor)) static void kgen_runtime_bootstrap(void) {
     if (getenv("FASTAPI_MOJO_DEBUG")) g_verbose = 1;
+
+    /* Sweep stage dirs orphaned by SIGKILLed instances, then stage ours. */
+    sweep_orphaned_stages("/dev/shm");
+    sweep_orphaned_stages("/tmp");
 
     /* /dev/shm (RAM) first: no disk I/O, exec permissions for dlopen. */
     if (try_stage("/dev/shm")) { atexit(runtime_cleanup); return; }
