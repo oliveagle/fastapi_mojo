@@ -62,6 +62,13 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 ./build/fastapi_mojo          # 监听 http://127.0.0.1:8000
 ```
 
+端口配置（优先级：CLI > 环境变量 > 默认 8000）：
+
+```bash
+./build/fastapi_mojo --port 9000        # CLI（也支持 --port=9000）
+FASTAPI_MOJO_PORT=9000 ./build/fastapi_mojo   # 环境变量
+```
+
 静态文件目录默认为工作目录下的 `./static`，可用环境变量覆盖：
 
 ```bash

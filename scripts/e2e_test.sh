@@ -136,7 +136,7 @@ trap cleanup EXIT
 echo "[setup] starting server on port $PORT (recv timeout 2s, idle timeout 2s)..."
 ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
     FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
-    FASTAPI_MOJO_E2E_PORT="$PORT" "$BIN" \
+    "$BIN" --port "$PORT" \
     > "$TMP/server.log" 2>&1 ) &
 SERVER_PID=$!
 
@@ -155,14 +155,6 @@ fi
 
 BASE="http://127.0.0.1:$PORT"
 
-# NOTE: the server currently binds port 8000 (port config lands in
-# p3-deploy-hardening). Until then, --port only changes the client side and
-# the test would fail — the guard above catches the busy case.
-if [[ "$PORT" != "8000" ]]; then
-    echo "WARN: server port is hardcoded to 8000 (task p3.2 pending); running on 8000."
-    PORT=8000
-    BASE="http://127.0.0.1:$PORT"
-fi
 
 # --- routes ----------------------------------------------------------------
 

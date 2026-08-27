@@ -86,12 +86,14 @@ def main() raises:
     var mw_timing = Middleware("timing")
     print("Middleware: request_id, logging, timing")
 
-    var sfd = external_call["create_bound_socket", Int](8000)
+    # Listen port: CLI --port N > FASTAPI_MOJO_PORT env > 8000 (C side).
+    var port = external_call["get_configured_port", Int]()
+    var sfd = external_call["create_bound_socket", Int](port)
     if sfd < 0:
-        print("ERROR: bind failed")
+        print("ERROR: bind failed on port " + String(port))
         external_call["bridge_fail", NoneType]()
         return
-    print("Listening on http://127.0.0.1:8000")
+    print("Listening on http://127.0.0.1:" + String(port))
     print("Press Ctrl+C to stop")
 
     var start_time = external_call["gettimeofday_ms", Int]()

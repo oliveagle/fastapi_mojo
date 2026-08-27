@@ -1,5 +1,8 @@
 // http_bridge_final.c — C bridge: socket I/O + CORS + static files + body limits + graceful shutdown
 //
+// v13: configurable listen port — get_configured_port(): CLI --port N /
+//      --port=N (via /proc/self/cmdline) > FASTAPI_MOJO_PORT env > 8000.
+//
 // v12: bulk field transfer — request fields (method/path/query/body) are
 //      handed to Mojo as CStringSlice (pointer + length) instead of one
 //      external_call per byte (1MB body: ~33ms -> ~5ms transfer).
@@ -184,6 +187,54 @@ static void init_recv_timeout(void);
 // Keep-alive: after a fully-parsed request, 0 = the connection may be reused
 // (the response announced "keep-alive"), 1 = the server closes it.
 long get_close_after_response(void) { return g_close_after_response; }
+
+// Resolve the listen port. Priority (per task p3-2):
+//   1) CLI  --port N  or  --port=N   (read from /proc/self/cmdline)
+//   2) env  FASTAPI_MOJO_PORT
+//   3) default 8000
+long get_configured_port(void) {
+    long port = 8000;
+    const char *env = getenv("FASTAPI_MOJO_PORT");
+    if (env && env[0]) {
+        long v = atol(env);
+        if (v > 0 && v < 65536) port = v;
+    }
+    // CLI overrides env. /proc/self/cmdline is NUL-separated; a single
+    // fread can return SEVERAL arguments at once, so walk it byte-by-byte
+    // and split on NUL (a naive per-fread loop only saw argv[0]).
+    FILE *f = fopen("/proc/self/cmdline", "r");
+    if (f) {
+        char arg[256];
+        size_t alen = 0;
+        int pending_port = 0;  // previous arg was "--port"
+        int c;
+        while ((c = fgetc(f)) != EOF) {
+            if (c == 0) {
+                arg[alen] = 0;
+                if (alen > 0) {
+                    if (pending_port) {
+                        long v = atol(arg);
+                        if (v > 0 && v < 65536) port = v;
+                        break;
+                    }
+                    if (strcmp(arg, "--port") == 0) {
+                        pending_port = 1;
+                    } else if (strncmp(arg, "--port=", 7) == 0) {
+                        long v = atol(arg + 7);
+                        if (v > 0 && v < 65536) port = v;
+                        break;
+                    }
+                }
+                alen = 0;
+            } else if (alen < sizeof(arg) - 1) {
+                arg[alen++] = (char)c;
+            }
+        }
+        fclose(f);
+    }
+    cdebug("get_configured_port: port=%ld", port);
+    return port;
+}
 
 long create_bound_socket(int port) {
     setup_signal_handlers();
