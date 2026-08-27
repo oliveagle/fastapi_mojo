@@ -1,11 +1,14 @@
 # src/fastapi_mojo/http_server_final.mojo
 #
-# Final HTTP server: json.mojo + router.mojo + params.mojo + middleware + static files
+# Final HTTP server: json.mojo + router.mojo + handler.mojo + params.mojo + static files
 # Features: CORS, graceful shutdown, HEAD support, request ID, timing, static files
+# Handler dispatch per ADR-0004: the core only calls run_handler(); the route
+# table is built by register_routes() (user code = data).
 
 from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
 from middleware import Middleware
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
@@ -63,22 +66,57 @@ def is_static_path(path: String) -> Bool:
     return False
 
 
+# 路由表 (用户代码 = 纯数据, ADR-0004): 新增路由不需要改动核心 dispatch.
+def register_routes(mut router: Router) raises:
+    var index_h = Handler(KIND_STATIC(), "index")
+    index_h.set_data("message", "Welcome to Mojo HTTP Server")
+    index_h.set_data("version", "1.8.0")
+    router.add_route("/", "GET", index_h)
+
+    var health_h = Handler(KIND_STATIC(), "health")
+    health_h.set_data("status", "healthy")
+    health_h.set_data("uptime", "running")
+    router.add_route("/health", "GET", health_h)
+
+    router.add_route("/status", "GET", Handler(KIND_STATUS(), "status"))
+    router.add_route("/routes", "GET", Handler(KIND_ROUTES(), "routes"))
+
+    var hello_h = Handler(KIND_TEMPLATE(), "hello")
+    hello_h.set_data("message", "Hello from Mojo!")
+    hello_h.set_data("greeting", "Hello, {name}!")
+    router.add_route("/hello", "GET", hello_h)
+
+    var list_h = Handler(KIND_STATIC(), "list_items")
+    list_h.set_data("items", "[]")
+    list_h.set_data("message", "List all items")
+    router.add_route("/items", "GET", list_h)
+
+    var create_h = Handler(KIND_ECHO(), "create_item")
+    create_h.set_data("message", "Item created")
+    create_h.set_data("_body_prefix", "item_")
+    router.add_route("/items", "POST", create_h)
+
+    var get_h = Handler(KIND_ECHO(), "get_item")
+    get_h.set_data("message", "Get item by ID")
+    router.add_route("/items/{item_id}", "GET", get_h)
+
+    var delete_h = Handler(KIND_ECHO(), "delete_item")
+    delete_h.set_data("message", "Item deleted")
+    router.add_route("/items/{item_id}", "DELETE", delete_h)
+
+    # 验收路由 (ADR-0004 §4): 回显全部参数 — 注册 = 两行数据, 核心零改动
+    router.add_route("/echo", "GET", Handler(KIND_ECHO(), "echo"))
+    router.add_route("/echo", "POST", Handler(KIND_ECHO(), "echo"))
+
+
 def main() raises:
-    print("=== Mojo HTTP Server v1.7 ===")
+    print("=== Mojo HTTP Server v1.8 ===")
 
     external_call["set_static_dir", NoneType]("./static".as_c_string_slice())
     external_call["set_max_body_size", NoneType](1048576)
 
     var router = Router()
-    router.add_route("/", "GET", "index")
-    router.add_route("/health", "GET", "health")
-    router.add_route("/status", "GET", "status")
-    router.add_route("/routes", "GET", "routes")
-    router.add_route("/hello", "GET", "hello")
-    router.add_route("/items", "GET", "list_items")
-    router.add_route("/items", "POST", "create_item")
-    router.add_route("/items/{item_id}", "GET", "get_item")
-    router.add_route("/items/{item_id}", "DELETE", "delete_item")
+    register_routes(router)   # 用户代码 = 数据 (ADR-0004)
     print("Routes: " + String(router.route_count()))
 
     var mw_request_id = Middleware("request_id")
@@ -194,59 +232,26 @@ def main() raises:
                         status_line = "404 Not Found"
                         resp_data = build_error_response("404", "Route not found")
                 else:
-                    var handler = route_result.handler_name
-                    if handler == "index":
-                        resp_data["message"] = "Welcome to Mojo HTTP Server"
-                        resp_data["version"] = "1.7.0"
-                    elif handler == "health":
-                        resp_data["status"] = "healthy"
-                        resp_data["uptime"] = "running"
-                    elif handler == "status":
-                        var uptime_ms = external_call["gettimeofday_ms", Int]() - start_time
-                        var uptime_s = uptime_ms // 1000
-                        resp_data["status"] = "running"
-                        resp_data["version"] = "1.7.0"
-                        resp_data["uptime"] = String(uptime_s) + "s"
-                        resp_data["requests_served"] = String(req_num)
-                        resp_data["routes"] = String(router.route_count())
-                        resp_data["middleware"] = "request_id, logging, timing"
-                    elif handler == "routes":
-                        resp_data["routes_count"] = String(router.route_count())
-                        resp_data["GET /"] = "index"
-                        resp_data["GET /health"] = "health"
-                        resp_data["GET /status"] = "status"
-                        resp_data["GET /routes"] = "routes"
-                        resp_data["GET /hello"] = "hello"
-                        resp_data["GET /items"] = "list_items"
-                        resp_data["POST /items"] = "create_item"
-                        resp_data["GET /items/{id}"] = "get_item"
-                        resp_data["DELETE /items/{id}"] = "delete_item"
-                    elif handler == "hello":
-                        resp_data["message"] = "Hello from Mojo!"
-                        if "name" in query_params.values:
-                            resp_data["greeting"] = "Hello, " + query_params.values["name"] + "!"
-                    elif handler == "list_items":
-                        resp_data["items"] = "[]"
-                        resp_data["message"] = "List all items"
-                    elif handler == "create_item":
-                        resp_data["message"] = "Item created"
-                        for key in body_params.values:
-                            resp_data["item_" + key] = body_params.values[key]
-                    elif handler == "get_item":
-                        resp_data["message"] = "Get item by ID"
-                        for key in route_result.params:
-                            resp_data[key] = route_result.params[key]
-                    elif handler == "delete_item":
-                        resp_data["message"] = "Item deleted"
-                        for key in route_result.params:
-                            resp_data[key] = route_result.params[key]
-                    else:
-                        resp_data = build_error_response("500", "Unknown handler: " + handler)
-                        status_line = "500 Internal Server Error"
+                    # ADR-0004: 核心只调用 run_handler (单一 dispatch 扩展点).
+                    # 新增路由 = register_routes 里加数据; 新增行为 = handler.mojo
+                    # 加一个 KIND_x + run_handler 一个 elif.
+                    var uptime_ms = external_call["gettimeofday_ms", Int]() - start_time
+                    var uptime_s = uptime_ms // 1000
+                    var route_keys = List[String]()
+                    var route_names = List[String]()
+                    for i in range(router.route_count()):
+                        route_keys.append(router.routes[i].method + " " + router.routes[i].path)
+                        route_names.append(router.routes[i].handler.name)
+                    var info = ServerInfo("1.8.0", "request_id, logging, timing", uptime_s,
+                                          req_num, route_keys, route_names)
+                    var result = run_handler(route_result.handler, route_result.params,
+                                             query_params, body_params, info)
+                    status_line = result[0]
+                    resp_data = result[1].copy()
 
                 resp_data["method"] = method
                 resp_data["path"] = path
-                resp_data["handler"] = route_result.handler_name
+                resp_data["handler"] = route_result.handler.name
                 resp_data["request_id"] = req_id
 
                 for key in query_params.values:

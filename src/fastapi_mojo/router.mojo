@@ -1,35 +1,38 @@
 # src/fastapi_mojo/router.mojo
 #
 # Mojo 原生路由表实现（支持 pattern matching）
+# Route 携带 Handler (ADR-0004): 路由 = 数据, 行为由 handler.kind 决定.
+
+from handler import Handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE
 
 
 struct RouteMatch:
     """路由匹配结果."""
     var matched: Bool
     var params: Dict[String, String]
-    var handler_name: String
+    var handler: Handler
 
-    def __init__(out self, matched: Bool, params: Dict[String, String], handler_name: String):
+    def __init__(out self, matched: Bool, params: Dict[String, String], handler: Handler):
         self.matched = matched
         self.params = params.copy()
-        self.handler_name = handler_name
+        self.handler = handler.copy()
 
     def __init__(out self):
         self.matched = False
         self.params = Dict[String, String]()
-        self.handler_name = ""
+        self.handler = Handler(KIND_ECHO(), "")
 
 
 struct Route:
-    """路由条目."""
+    """路由条目 (path + method + Handler)."""
     var path: String
     var method: String
-    var handler_name: String
+    var handler: Handler
 
-    def __init__(out self, path: String, method: String, handler_name: String):
+    def __init__(out self, path: String, method: String, handler: Handler):
         self.path = path
         self.method = method
-        self.handler_name = handler_name
+        self.handler = handler.copy()
 
     def match(self, path: String, method: String) -> Bool:
         """检查路由是否匹配（精确 + pattern）."""
@@ -84,7 +87,7 @@ struct Route:
                 params[param_name] = String(ap)
             elif pp != ap:
                 return RouteMatch()
-        return RouteMatch(True, params, self.handler_name)
+        return RouteMatch(True, params, self.handler)
 
 
 struct Router:
@@ -94,9 +97,9 @@ struct Router:
     def __init__(out self):
         self.routes = List[Route]()
 
-    def add_route(mut self, path: String, method: String, handler_name: String):
-        """添加路由."""
-        self.routes.append(Route(path, method, handler_name))
+    def add_route(mut self, path: String, method: String, handler: Handler):
+        """添加路由 (handler = kind + name + data, ADR-0004)."""
+        self.routes.append(Route(path, method, handler))
 
     def match_route(self, path: String, method: String) -> Bool:
         """匹配路由（精确 + pattern）."""
@@ -131,11 +134,11 @@ def main() raises:
     print("Testing Mojo router with pattern matching...")
 
     var router = Router()
-    router.add_route("/", "GET", "index")
-    router.add_route("/hello", "GET", "hello")
-    router.add_route("/items", "GET", "list_items")
-    router.add_route("/items", "POST", "create_item")
-    router.add_route("/items/{item_id}", "GET", "get_item")
+    router.add_route("/", "GET", Handler(KIND_STATIC(), "index"))
+    router.add_route("/hello", "GET", Handler(KIND_TEMPLATE(), "hello"))
+    router.add_route("/items", "GET", Handler(KIND_STATIC(), "list_items"))
+    router.add_route("/items", "POST", Handler(KIND_ECHO(), "create_item"))
+    router.add_route("/items/{item_id}", "GET", Handler(KIND_ECHO(), "get_item"))
 
     print("Route count: " + String(router.route_count()))
 
@@ -179,15 +182,15 @@ def main() raises:
     # Pattern 提取参数
     var result = router.match_route_with_params("/items/42", "GET")
     if result.matched:
-        print("OK: /items/42 matched, handler=" + result.handler_name)
+        print("OK: /items/42 matched, handler=" + result.handler.name)
         if "item_id" in result.params:
             print("OK: item_id=" + result.params["item_id"])
 
     # 多参数
-    router.add_route("/users/{user_id}/items/{item_id}", "GET", "user_item")
+    router.add_route("/users/{user_id}/items/{item_id}", "GET", Handler(KIND_ECHO(), "user_item"))
     var result2 = router.match_route_with_params("/users/123/items/456", "GET")
     if result2.matched:
-        print("OK: /users/123/items/456 matched, handler=" + result2.handler_name)
+        print("OK: /users/123/items/456 matched, handler=" + result2.handler.name)
         if "user_id" in result2.params and "item_id" in result2.params:
             print("OK: user_id=" + result2.params["user_id"] + ", item_id=" + result2.params["item_id"])
 

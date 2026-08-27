@@ -4,6 +4,7 @@
 
 from json import json_serialize, json_serialize_dict, json_escape
 from router import Router, RouteMatch
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE
 from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams, url_decode
 from string_builder import decode_utf8_bytes, StringBuilder, span_to_str
 
@@ -60,11 +61,11 @@ def test_router() raises:
     print("=== Router Tests ===")
 
     var router = Router()
-    router.add_route("/", "GET", "index")
-    router.add_route("/items", "GET", "list")
-    router.add_route("/items", "POST", "create")
-    router.add_route("/items/{item_id}", "GET", "get")
-    router.add_route("/users/{user_id}/items/{item_id}", "GET", "user_item")
+    router.add_route("/", "GET", Handler(KIND_STATIC(), "index"))
+    router.add_route("/items", "GET", Handler(KIND_STATIC(), "list"))
+    router.add_route("/items", "POST", Handler(KIND_ECHO(), "create"))
+    router.add_route("/items/{item_id}", "GET", Handler(KIND_ECHO(), "get"))
+    router.add_route("/users/{user_id}/items/{item_id}", "GET", Handler(KIND_ECHO(), "user_item"))
 
     # 精确匹配
     assert router.match_route("/", "GET"), "Exact match failed"
@@ -82,7 +83,7 @@ def test_router() raises:
     # 参数提取
     var result = router.match_route_with_params("/items/42", "GET")
     assert result.matched, "match_with_params failed"
-    assert result.handler_name == "get", "Handler name wrong"
+    assert result.handler.name == "get", "Handler name wrong"
     assert "item_id" in result.params, "item_id not in params"
     assert result.params["item_id"] == "42", "item_id value wrong"
 
@@ -230,6 +231,51 @@ def test_span_to_str() raises:
     print("SpanToStr tests passed!")
 
 
+def test_framework() raises:
+    """测试路由注册机制 (ADR-0004): /echo 注册 = 数据, 核心 dispatch 通用."""
+    print("=== Framework Tests ===")
+
+    # 模拟用户代码: 只加数据, 不碰 dispatch
+    var router = Router()
+    router.add_route("/echo", "GET", Handler(KIND_ECHO(), "echo"))
+    router.add_route("/echo", "POST", Handler(KIND_ECHO(), "echo"))
+
+    keys = List[String]()
+    names = List[String]()
+    for i in range(router.route_count()):
+        keys.append(router.routes[i].method + " " + router.routes[i].path)
+        names.append(router.routes[i].handler.name)
+    var info = ServerInfo("1.8.0", "test", 1, 1, keys, names)
+
+    # GET /echo?x=1&y=2 -> 回显 query (query_ 前缀由核心公共逻辑加)
+    var m1 = router.match_route_with_params("/echo", "GET")
+    assert m1.matched, "/echo GET matched"
+    var q1 = parse_query_params("x=1&y=2")
+    var r1 = run_handler(m1.handler, m1.params, q1, ParsedParams(), info)
+    assert r1[0] == "200 OK", "echo GET status"
+    assert m1.handler.name == "echo", "echo handler name"
+
+    # POST /echo body {"a":"b","c":"d"} -> 回显 body 参数
+    var m2 = router.match_route_with_params("/echo", "POST")
+    assert m2.matched, "/echo POST matched"
+    var b2 = parse_body_json('{"a":"b","c":"d"}')
+    var r2 = run_handler(m2.handler, m2.params, ParsedParams(), b2, info)
+    assert r2[1]["a"] == "b", "echo body a"
+    assert r2[1]["c"] == "d", "echo body c"
+
+    # /echo/{id} 风格: path 参数回显
+    var m3 = router.match_route_with_params("/items/42", "GET")
+    # (router 里没有 /items, 用新 router 验证 path 参数)
+    var router2 = Router()
+    router2.add_route("/items/{item_id}", "GET", Handler(KIND_ECHO(), "get"))
+    var m3b = router2.match_route_with_params("/items/42", "GET")
+    assert m3b.matched, "pattern matched"
+    var r3 = run_handler(m3b.handler, m3b.params, ParsedParams(), ParsedParams(), info)
+    assert r3[1]["item_id"] == "42", "echo path param"
+
+    print("Framework tests passed!")
+
+
 def main() raises:
     print("Running all tests...")
     test_json()
@@ -238,5 +284,8 @@ def main() raises:
     test_string_builder()
     print("")
     test_span_to_str()
+
+    test_framework()
+
 
     print("All tests passed!")

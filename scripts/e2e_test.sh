@@ -178,6 +178,16 @@ expect_code "GET /items/42 -> 200" 200 "$BASE/items/42"
 expect_body_contains "GET /items/42 body" '42' "$BASE/items/42"
 expect_code "DELETE /items/42 -> 200" 200 "$BASE/items/42" DELETE
 
+# /echo (ADR-0004 验收路由): 回显全部参数, 注册=数据, 核心零改动
+expect_code "GET /echo -> 200" 200 "$BASE/echo?a=1&b=two"
+expect_body_contains "GET /echo echoes query" '"query_a": "1"' "$BASE/echo?a=1&b=two"
+expect_body_contains "GET /echo echoes query2" '"query_b": "two"' "$BASE/echo?a=1&b=two"
+expect_code "POST /echo -> 200" 200 "$BASE/echo" POST '{"x":"9","y":"z"}'
+expect_body_contains "POST /echo echoes body" '"x": "9"' "$BASE/echo" POST '{"x":"9","y":"z"}'
+ECHO_PATH_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$BASE/items/42")
+expect_code "GET /items/42 path-echo (ECHO kind) -> 200" 200 "$BASE/items/42"
+expect_body_contains "GET /items/42 echoes path param" '"item_id": "42"' "$BASE/items/42"
+
 # --- error paths -------------------------------------------------------------
 
 echo "== error paths =="
