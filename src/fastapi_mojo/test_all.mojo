@@ -5,7 +5,8 @@
 from json import json_serialize, json_serialize_dict, json_escape
 from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE
-from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams, url_decode
+from params_query import parse_path_params, parse_query_params, ParsedParams, url_decode
+from params_json import parse_body_json
 from string_builder import decode_utf8_bytes, StringBuilder, span_to_str
 
 
@@ -146,6 +147,21 @@ def test_params() raises:
     # 无效 JSON
     var b3 = parse_body_json("not json")
     assert b3.has_error, "Invalid JSON should have error"
+
+    # P4.4 类型化: 值带类型标记
+    var bt = parse_body_json('{"i":42,"f":3.14,"s":"hi","b":true,"n":null,"o":{"a":1},"arr":[1,2]}')
+    assert bt.type_of("i") == "int" and bt.values["i"] == "42", "type int"
+    assert bt.type_of("f") == "float" and bt.values["f"] == "3.14", "type float"
+    assert bt.type_of("s") == "string", "type string"
+    assert bt.type_of("b") == "bool" and bt.values["b"] == "true", "type bool"
+    assert bt.type_of("n") == "null" and bt.values["n"] == "null", "type null"
+    assert bt.type_of("o") == "object" and bt.values["o"] == '{"a":1}', "type object raw"
+    assert bt.type_of("arr") == "array" and bt.values["arr"] == "[1,2]", "type array raw"
+    # query/path 参数隐式为 string
+    var qt = parse_query_params("a=1")
+    assert qt.type_of("a") == "string", "query type string"
+    var pt = parse_path_params("/x/42", "/x/{id}")
+    assert pt.type_of("id") == "string", "path type string"
 
     # UTF-8 percent decode
     var q3 = parse_query_params("msg=%C3%A9%20ok")

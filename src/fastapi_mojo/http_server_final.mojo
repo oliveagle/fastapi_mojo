@@ -9,7 +9,8 @@ from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE
-from params import parse_path_params, parse_query_params, parse_body_json, ParsedParams
+from params_query import parse_path_params, parse_query_params, ParsedParams
+from params_json import parse_body_json
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 

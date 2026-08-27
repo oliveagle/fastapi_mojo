@@ -41,7 +41,8 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │   ├── http_bridge_final.c        # C FFI 桥接：socket I/O + CORS + 静态文件 + 限流 + 信号
 │   ├── runtime_shim.c             # 单一二进制：运行时嵌入/暂存/dlopen/符号转发
 │   ├── router.mojo                # 模式匹配路由（{param} segment）
-│   ├── params.mojo                # Path/Query/Body 参数解析（UTF-8 安全 JSON parser）
+│   ├── params_query.mojo          # Path/Query 参数解析 + ParsedParams (values + types)
+│   ├── params_json.mojo           # Body JSON parser（UTF-8 安全 + 类型标记）
 │   ├── json.mojo                  # 线性时间 JSON 序列化
 │   ├── string_builder.mojo        # 线性字符串构建 + UTF-8 字节解码
 │   ├── middleware.mojo            # 中间件定义

@@ -12,7 +12,7 @@
 # 设计: 新增"路由" = 纯数据 (register_routes, 核心零改动);
 #       新增"处理器行为" = 1 个 kind 常量 + run_handler 1 个 elif (唯一扩展点).
 
-from params import ParsedParams
+from params_query import ParsedParams
 
 
 # ---------- 处理器行为常量 (零参 def) ----------
