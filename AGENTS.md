@@ -54,7 +54,7 @@
 
 - 每个 `.mojo` 文件 < 500 行（God package 阈值）
 - `src/fastapi_mojo/` 只做 FastAPI 域，不混杂其他主题
-- `wrapper.mojo` 是当前唯一 bridge，未来每个替换点都需要显式 bridge/adapter
+- 当前唯一的运行期桥接是 `http_bridge_final.c`（C FFI：socket I/O / CORS / 静态 / 限流 / 信号） 与 `runtime_shim.c`（单 binary：运行时嵌入/暂存/dlopen 转发）；Phase 0 的 `wrapper.mojo` 已拆除，未来每个新替换点都需显式 bridge/adapter
 - 测试文件与生产代码同目录
 
 ### 3.3 依赖方向
@@ -80,10 +80,13 @@
 
 | 风险 | 影响 | 当前状态 |
 |------|------|---------|
-| Mojo 1.0.0 无 `std.http`/`std.socket`/`std.net` | 无法原生实现 HTTP server | 🚧 C5 阻塞 |
-| Mojo 无成熟 JSON 库 | 需自研或 FFI | 📋 待评估 |
-| Mojo 异步/并发模型不稳定 | 高并发 HTTP server 实现难度 | 📋 待验证 |
-| 静态链接可行性未验证 | `mojo build` 是否真能产出无依赖 binary | 📋 待验证 |
+| Mojo 1.0.0 无 `std.http`/`std.socket`/`std.net` | 无法原生实现 HTTP server | ✅ 已解除：C FFI socket 桥接 + Mojo 原生协议层（C5，ADR-0001 决策-9） |
+| Mojo 无成熟 JSON 库 | 需自研或 FFI | ✅ 已解决：`json.mojo` 原生线性时间序列化，orjson 路径已删除（决策-10） |
+| Mojo 异步/并发模型不稳定 | 高并发 HTTP server 实现难度 | ✅ 已解决：多进程 worker + SO_REUSEPORT（nginx pre-fork，ADR-0005） |
+| 静态链接可行性未验证 | `mojo build` 是否真能产出无依赖 binary | ✅ 已验证：运行时嵌入 + 启动暂存 + dlopen 符号转发（ADR-0003，决策-14） |
+
+> 注：以上四项风险均已解除。Mojo 1.0.0 标准库无网络模块的约束经 C 桥接绕过，
+> 单 Binary 零依赖本标已达成（§2 Phase 3）。后续风险以新 ADR 跟踪。
 
 ---
 
@@ -103,4 +106,4 @@
 
 ---
 
-*最后更新：2026-08-26*
+*最后更新：2026-08-29（§5 风险表对齐已达成状态；C5/JSON/并发/静态链接均解除）*
