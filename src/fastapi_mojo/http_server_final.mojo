@@ -13,7 +13,7 @@ from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
-from ws_session import run_ws_session
+from ws_session import run_ws_upgrade, handle_ws_data
 
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
@@ -144,6 +144,9 @@ def main() raises:
     var start_time = external_call["gettimeofday_ms", Int]()
     var req_num = 0
 
+    # 连接级 WS 状态 (ADR-0008): fd -> 状态值 (如计数器累计); 会话结束事件清理
+    var ws_state = Dict[Int, Int]()
+
     for _ in range(2000000000):
         if not external_call["is_running", Int]():
             print("\nShutdown signal received...")
@@ -158,6 +161,28 @@ def main() raises:
         # idle timeout, Slowloris 408, or an error response) — loop again.
         var cfd = external_call["recv_and_parse", Int]()
         if cfd <= 0:
+            continue
+
+        # --- WS 事件 (ADR-0008): bridge poll 循环驱动会话, Mojo 逐条处理 ---
+        var ws_ev = external_call["ws_event_type", Int]()
+        if ws_ev == 1:
+            # 数据帧就绪 (text/binary): 按连接 path 查 WS 路由并分派
+            var ws_path = span_to_str(
+                external_call["get_ws_path_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+            var ws_match = router.match_ws_route(ws_path)
+            if ws_match.matched:
+                var ws_op = external_call["ws_last_opcode", Int]()
+                var ws_st = 0
+                if cfd in ws_state:
+                    ws_st = ws_state[cfd]
+                ws_st = handle_ws_data(cfd, ws_match.handler, ws_op, ws_st)
+                ws_state[cfd] = ws_st
+            external_call["ws_message_done", NoneType](cfd)
+            continue
+        if ws_ev == 2:
+            # WS 会话结束 (close/EOF/保活耗尽): 清理连接级状态
+            if cfd in ws_state:
+                _ = ws_state.pop(cfd)
             continue
 
         req_num += 1
@@ -179,27 +204,32 @@ def main() raises:
             mw_logging(mw_chain, req_id, method, path, query, "204 No Content", duration_ms)
             external_call["conn_done", NoneType](cfd, False)  # preflight response announces Connection: close
         elif external_call["is_ws_upgrade", Int]() == 1:
-            # WebSocket upgrade (RFC 6455, ADR-0006/0007): WS route lookup +
-            # Mojo-driven session (subprotocol / keepalive ping / close code /
-            # UTF-8 validation / handler dispatch). The session always ends the
-            # connection (no keep-alive reuse).
+            # WebSocket upgrade (RFC 6455, ADR-0006/0007/0008): WS route lookup +
+            # 101 handshake + hand the connection to the bridge poll loop
+            # (control frames / keepalive / UTF-8 handled in C; data frames are
+            # dispatched one at a time via the ws_event_type branch above —
+            # sessions no longer block dispatch, ADR-0008).
             var ws_match = router.match_ws_route(path)
-            var ws_sl = "404 Not Found"
             if ws_match.matched:
-                var ws_status = run_ws_session(cfd, ws_match.handler)
-                ws_sl = "101 Switching Protocols"
-                if ws_status == 400:
-                    ws_sl = "400 Bad Request"
-                elif ws_status == 500:
+                var ws_status = run_ws_upgrade(cfd, ws_match.handler)
+                var duration_ms = mw_timing(mw_chain, start_ms)
+                if ws_status == 101:
+                    ws_state[cfd] = 0  # 移交成功: 连接现为 WS 会话 (不 conn_done)
+                    mw_logging(mw_chain, req_id, method, path, query, "101 Switching Protocols", duration_ms)
+                    continue
+                var ws_sl = "400 Bad Request"
+                if ws_status == 500:
                     ws_sl = "500 Internal Server Error"
+                mw_logging(mw_chain, req_id, method, path, query, ws_sl, duration_ms)
+                external_call["conn_done", NoneType](cfd, False)
             else:
                 var ws_resp = build_error_response("404", "Route not found")
                 var ws_body = json_serialize_dict(ws_resp)
                 _ = external_call["send_simple_response", Int](
                     cfd, "404 Not Found".as_c_string_slice(), ws_body.as_c_string_slice())
-            var duration_ms = mw_timing(mw_chain, start_ms)
-            mw_logging(mw_chain, req_id, method, path, query, ws_sl, duration_ms)
-            external_call["conn_done", NoneType](cfd, False)
+                var duration_ms = mw_timing(mw_chain, start_ms)
+                mw_logging(mw_chain, req_id, method, path, query, "404 Not Found", duration_ms)
+                external_call["conn_done", NoneType](cfd, False)
         else:
             # Handle HEAD method (same as GET but no body)
             var is_head = method == "HEAD"
