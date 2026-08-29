@@ -102,7 +102,7 @@ ssh user@host '/opt/fastapi_mojo'
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，56 项检查，CI 可重复，见 .github/workflows/ci.yml）
+# 集成测试（单一 binary 端到端，71 项检查含 WebSocket 增强，CI 可重复，见 .github/workflows/ci.yml）
 ./scripts/e2e_test.sh
 ```
 

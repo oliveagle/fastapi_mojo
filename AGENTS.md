@@ -74,7 +74,7 @@
 - ADR 在 `docs/adr/`，每个 ADR 必须包含 **6 条架构隔离约束声明**
 - Benchmark 统一走 `./benchmark.sh`，禁止手写压测脚本
 - **CI** (`.github/workflows/ci.yml`) 在每次 push/PR 到 main 时守护本标：
-  单一 binary 构建 + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试 + e2e (56 项)
+  单一 binary 构建 + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试 + e2e (71 项，含 WebSocket 增强)
 
 ---
 
