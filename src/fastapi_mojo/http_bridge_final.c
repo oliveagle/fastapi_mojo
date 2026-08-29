@@ -112,7 +112,8 @@ typedef struct {
 } ws_parser_t;
 extern void ws_parser_init(ws_parser_t *p);
 extern int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
-                          int *opcode, size_t *melen, unsigned char *reasm);
+                          int *opcode, size_t *melen, unsigned char *reasm,
+                          size_t reasm_cap, size_t *consumed);
 extern int ws_handshake(int fd, const char *key, const char *subprotocol);
 extern int ws_write_message(int fd, int opcode, const unsigned char *payload, size_t plen);
 extern int ws_validate_utf8(const unsigned char *p, size_t n);
@@ -411,12 +412,17 @@ struct conn {
     long last_data_ms;   // last byte of the current request (0 = none)
     // WebSocket session (ADR-0008): per-conn 帧解析状态 + 待处理消息
     char ws_path[MAX_PATH];        // upgrade 时的 path (Mojo 逐消息查 WS 路由)
-    unsigned char *ws_reasm;       // 惰性 malloc(WS_MAX_MSG+1); 消息载荷 (NUL 结尾)
+    unsigned char *ws_reasm;       // 惰性 malloc, 按需增长 4KB -> 1MB+1; 消息载荷 (NUL 结尾)
+    size_t ws_reasm_cap;           // ws_reasm 当前容量
+    unsigned char *ws_tail;        // 惰性 malloc(WS_TAIL_MAX); recv 块 + 尾块重放缓冲
+    size_t ws_tail_len;            // 已消费消息后剩余、待重放的字节数 (ADR-0009)
     ws_parser_t ws_par;            // 状态化帧解析器 (ws.c)
     int ws_opcode;                 // 待处理数据帧的 opcode (1/2)
     size_t ws_mlen;                // 待处理数据帧的长度
     int ws_strikes;                // 保活: 自上次客户端数据以来的超时计数
 };
+#define WS_TAIL_MAX 8192
+#define WS_REASM_INIT (4096 + 1)   // 重组缓冲初始容量 (按需翻倍, 上限 WS_MAX_MSG+1)
 
 static struct conn g_conns[MAX_CONNS];
 static struct conn *g_active_conn = NULL;
@@ -454,6 +460,8 @@ static void close_conn(struct conn *c) {
     if (!c->in_use) return;
     if (c->body) { free(c->body); c->body = NULL; }
     if (c->ws_reasm) { free(c->ws_reasm); c->ws_reasm = NULL; }
+    if (c->ws_tail) { free(c->ws_tail); c->ws_tail = NULL; }
+    c->ws_tail_len = 0;
     if (c->fd >= 0) close(c->fd);
     if (g_active_conn == c) g_active_conn = NULL;
     c->in_use = 0;
@@ -815,18 +823,24 @@ static int finish_header(struct conn *c) {
 // ---------- WebSocket 事件队列 (ADR-0008) ----------
 // poll 循环在 WS 连接上发现"数据帧完成"或"会话结束"时入队; Mojo 在
 // recv_and_parse 返回处取队首 (FIFO, 天然处理 fd 复用的时序)。
-#define WS_EV_MAX 1024
+// 容量 = 2*MAX_CONNS+64: 每个存活连接至多 1 条待处理事件 (消息事件 =>
+// phase 4 暂停该连接 pump; 结束事件 => 连接已死), 结构上不会溢出。
+// 溢出仍按防御路径处理 (ADR-0009): 消息事件溢出 -> close 1008 结束会话,
+// 绝不静默丢弃 (丢消息事件 = 连接 phase 4 永久僵死)。
+#define WS_EV_MAX (2 * MAX_CONNS + 64)
 static int g_ws_ev_fd[WS_EV_MAX];
 static int g_ws_ev_type[WS_EV_MAX];  // 1 = 数据消息就绪, 2 = 会话结束
 static int g_ws_ev_head = 0, g_ws_ev_count = 0;
 static int g_ws_event_type = 0;     // 最近一次 recv_and_parse 返回的事件类型
 
-static void ws_event_push(int fd, int type) {
-    if (g_ws_ev_count >= WS_EV_MAX) return;  // 溢出丢弃 (连接保持, 极罕见)
+// 0 = 入队成功; 1 = 溢出 (调用方必须结束该会话, 不得继续 phase 4)
+static int ws_event_push(int fd, int type) {
+    if (g_ws_ev_count >= WS_EV_MAX) return 1;
     int tail = (g_ws_ev_head + g_ws_ev_count) % WS_EV_MAX;
     g_ws_ev_fd[tail] = fd;
     g_ws_ev_type[tail] = type;
     g_ws_ev_count++;
+    return 0;
 }
 
 static int ws_event_pop(int *type) {
@@ -840,42 +854,74 @@ static int ws_event_pop(int *type) {
 
 // WS 连接 pump (phase 3): 非阻塞读 -> 帧解析器 -> 控制帧自动处理 (纯协议),
 // 数据帧入事件队列并置 phase 4 (Mojo 处理中, 本连接暂停 pump)。
+static int ws_pump_close(struct conn *c, int code) {
+    // 结束 WS 会话: (尽力)发 close 帧 + 结束事件 + 关连接
+    (void)ws_send_close(c->fd, code);
+    ws_event_push(c->fd, 2);
+    close_conn(c);
+    return -1;
+}
+
 static int pump_ws_conn(struct conn *c) {
+    if (!c->ws_tail) {
+        c->ws_tail = (unsigned char *)malloc(WS_TAIL_MAX);
+        if (!c->ws_tail) return ws_pump_close(c, 1001);
+        c->ws_tail_len = 0;
+    }
     if (!c->ws_reasm) {
-        c->ws_reasm = (unsigned char *)malloc(WS_MAX_MSG + 1);
-        if (!c->ws_reasm) {
-            ws_event_push(c->fd, 2);
-            close_conn(c);
-            return -1;
-        }
+        c->ws_reasm = (unsigned char *)malloc(WS_REASM_INIT);
+        if (!c->ws_reasm) return ws_pump_close(c, 1001);
+        c->ws_reasm_cap = WS_REASM_INIT;
     }
     for (;;) {
-        unsigned char buf[8192];
-        ssize_t n = recv(c->fd, buf, sizeof buf, MSG_DONTWAIT);
-        if (n <= 0) {
-            if (n == 0) {  // EOF
-                ws_event_push(c->fd, 2);
-                close_conn(c);
-                return -1;
+        // 数据源: 尾块重放 (上一块消费的剩余) 优先, 否则新 recv
+        const unsigned char *chunk;
+        size_t chunk_len;
+        if (c->ws_tail_len > 0) {
+            chunk = c->ws_tail;
+            chunk_len = c->ws_tail_len;
+            c->ws_tail_len = 0;
+        } else {
+            ssize_t n = recv(c->fd, c->ws_tail, WS_TAIL_MAX, MSG_DONTWAIT);
+            if (n <= 0) {
+                if (n == 0) return ws_pump_close(c, 1001);  // EOF (客户端未走 close 握手)
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                return ws_pump_close(c, 1001);
             }
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            ws_event_push(c->fd, 2);
-            close_conn(c);
-            return -1;
+            c->last_data_ms = now_ms();
+            c->ws_strikes = 0;  // 任何客户端数据 (含 pong) 都是活性证明
+            chunk = c->ws_tail;
+            chunk_len = (size_t)n;
         }
-        c->last_data_ms = now_ms();
-        c->ws_strikes = 0;  // 任何客户端数据 (含 pong) 都是活性证明
+
         int opcode = 0;
         size_t mlen = 0;
-        int r = ws_parser_feed(&c->ws_par, buf, (size_t)n, &opcode, &mlen, c->ws_reasm);
+        size_t consumed = 0;
+        int r = ws_parser_feed(&c->ws_par, chunk, chunk_len, &opcode, &mlen,
+                               c->ws_reasm, c->ws_reasm_cap, &consumed);
+
+        // 尾块保留: 本块内完整消息之后的剩余字节, 下轮重放 (ADR-0009:
+        // 丢弃 = 丢消息)
+        if (consumed < chunk_len) {
+            memmove(c->ws_tail, chunk + consumed, chunk_len - consumed);
+            c->ws_tail_len = chunk_len - consumed;
+        }
+
+        if (r == -2) {  // 重组缓冲不足: 按需翻倍 (上限 1MB+1) 后重放尾块
+            size_t ncap = c->ws_reasm_cap * 2;
+            if (ncap > WS_MAX_MSG + 1) ncap = WS_MAX_MSG + 1;
+            if (ncap <= c->ws_reasm_cap) return ws_pump_close(c, 1009);  // 超 1MB 上限
+            unsigned char *nr = (unsigned char *)realloc(c->ws_reasm, ncap);
+            if (!nr) return ws_pump_close(c, 1001);
+            c->ws_reasm = nr;
+            c->ws_reasm_cap = ncap;
+            continue;
+        }
         if (r == -1) {  // 协议错误 -> close 1002
             cdebug("ws parser ERROR fd=%d", c->fd);
-            ws_send_close(c->fd, 1002);
-            ws_event_push(c->fd, 2);
-            close_conn(c);
-            return -1;
+            return ws_pump_close(c, 1002);
         }
-        if (r == 2) {  // 控制帧: 协议层自动处理
+        if (r == 2) {  // 控制帧: 协议层自动处理 (纯协议, 无业务)
             if (opcode == 9) {  // ping -> pong (同载荷)
                 (void)ws_write_message(c->fd, 10, c->ws_reasm, mlen);
             } else if (opcode == 8) {  // close -> 码校验回复, 结束会话
@@ -884,23 +930,31 @@ static int pump_ws_conn(struct conn *c) {
                 close_conn(c);
                 return -1;
             }
-            // opcode 10 (pong): 活性已计入 (last_data_ms), 无动作
-        } else if (r == 1) {  // 数据消息 (text/binary)
-            if (opcode == 1 && !ws_validate_utf8(c->ws_reasm, mlen)) {
-                ws_send_close(c->fd, 1007);  // text 非法 UTF-8 (RFC 6455 §5.6)
-                ws_event_push(c->fd, 2);
-                close_conn(c);
-                return -1;
-            }
+            // opcode 10 (pong): 活性已计入 (last_data_ms), 无动作; 继续循环
+            continue;
+        }
+        if (r == 1) {  // 数据消息 (text/binary) -> 交给 Mojo 逐条处理
+            if (opcode == 1 && !ws_validate_utf8(c->ws_reasm, mlen))
+                return ws_pump_close(c, 1007);  // text 非法 UTF-8 (RFC 6455 §5.6)
             c->ws_opcode = opcode;
             c->ws_mlen = mlen;
-            c->phase = 4;  // Mojo 逐条处理; 暂停本连接 pump
+            if (ws_event_push(c->fd, 1) != 0)
+                return ws_pump_close(c, 1008);  // 背压: 事件队列溢出 (防御路径)
+            c->phase = 4;  // Mojo 处理中; 暂停本连接 pump (尾块已在 c->ws_tail)
             cdebug("ws msg fd=%d op=%d len=%zu", c->fd, opcode, mlen);
-            ws_event_push(c->fd, 1);
             return 0;
         }
+        // r == 0: 块全部消耗、无完整消息 (部分帧状态在解析器内) -> 收下一块
     }
     return 0;
+}
+
+// Mojo 处理完一条消息后立即重 pump 本连接 (ws_message_done 之后调用):
+// 尾块缓冲 (c->ws_tail) 中的数据**不产生 socket 事件**, 等下一次 poll 唤醒
+// (1s tick 或无关数据) 才会被处理 — 延迟不可接受 (ADR-0009)。
+void ws_pump_now(int fd) {
+    struct conn *c = find_conn(fd);
+    if (c && c->phase == 3) (void)pump_ws_conn(c);
 }
 
 static int pump_conn(struct conn *c) {
@@ -1228,6 +1282,7 @@ int ws_conn_upgrade(int fd) {
     c->ws_opcode = 0;
     c->ws_mlen = 0;
     c->ws_strikes = 0;
+    c->ws_tail_len = 0;
     c->last_data_ms = now_ms();
     c->last_active_ms = now_ms();
     size_t pl = strlen(g_path);
@@ -1289,6 +1344,9 @@ void ws_message_done(int fd) {
     struct conn *c = find_conn(fd);
     if (c && c->phase == 4) c->phase = 3;
 }
+
+// 紧随 ws_message_done: 立即重 pump (尾块数据不产生 socket 事件, 见函数注释)。
+extern void ws_pump_now(int fd);
 
 // Mojo 发起结束会话 (如发完 close 1003): 关连接 + 入队"结束"事件
 // (Mojo 据此清理连接级状态)。

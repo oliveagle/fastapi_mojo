@@ -207,8 +207,14 @@ static int ws_parser_frame_done(ws_parser_t *p, int *opcode, size_t *melen,
     return 0;
 }
 
+// consumed: 已消费字节 (调用方必须保留 buf[consumed..n) 重放 — 一个 recv 块
+// 可含多条完整帧, 丢尾块 = 丢消息, ADR-0009 修复)。
+// reasm_cap: 重组缓冲容量 (按需增长); 不足 -> -2 (未越界写入, 扩容后重放)。
+// 返回: 0 = 暂无完整消息 (consumed == n); 1 = 数据消息完成; 2 = 控制帧完成;
+//       -1 = 协议错误; -2 = 需要扩容
 int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
-                   int *opcode, size_t *melen, unsigned char *reasm) {
+                   int *opcode, size_t *melen, unsigned char *reasm,
+                   size_t reasm_cap, size_t *consumed) {
     size_t off = 0;
     while (off < n) {
         if (p->stage == 4) {
@@ -220,6 +226,10 @@ int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
             // 帧内偏移 = 本帧已收字节 (pgot); 数据帧再加消息级偏移 (reasm_len)。
             // 漏掉 pgot 会让分块帧的所有块都从 0 覆盖 (大消息损坏)。
             size_t dst = (p->opcode >= 8) ? p->pgot : p->reasm_len + p->pgot;
+            if (dst + take > reasm_cap) {
+                *consumed = off;  // 未越界写入; 调用方扩容后重放本块剩余部分
+                return -2;
+            }
             for (size_t i = 0; i < take; i++)
                 reasm[dst + i] = buf[off + i] ^ p->mask[(p->pgot + i) % 4];
             off += take;
@@ -229,7 +239,7 @@ int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
             // 注意: 不清 p->fin/p->masked — frame_done 需要本帧的 fin 判定
             // 消息完成; 下一帧在 stage 0/1 覆盖它们
             int r = ws_parser_frame_done(p, opcode, melen, reasm);
-            if (r != 0) return r;  // 1/2 = 完整消息/控制帧; -1 = 协议错误
+            if (r != 0) { *consumed = off; return r; }
             continue;  // 同块内可能还有下一帧
         }
         unsigned char b = buf[off++];
@@ -237,13 +247,13 @@ int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
         case 0:  // 字节 0: FIN + opcode
             p->fin = (b & 0x80) != 0;
             p->opcode = b & 0x0F;
-            if (p->opcode >= 3 && p->opcode <= 7) return -1;  // 保留 opcode
-            if (p->opcode == 0 && !p->in_msg) return -1;      // 孤立的延续帧
+            if (p->opcode >= 3 && p->opcode <= 7) { *consumed = off; return -1; }
+            if (p->opcode == 0 && !p->in_msg) { *consumed = off; return -1; }
             p->stage = 1;
             break;
         case 1:  // 字节 1: MASK + 7-bit 长度
             p->masked = (b & 0x80) != 0;
-            if (!p->masked) return -1;  // RFC 6455 §5.1: 客户端帧必须掩码
+            if (!p->masked) { *consumed = off; return -1; }  // 客户端帧必须掩码
             {
                 uint64_t l7 = b & 0x7F;
                 if (l7 < 126) {
@@ -262,9 +272,11 @@ int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
             if (p->ext_got < p->ext_need) break;
             p->flen = 0;
             for (int i = 0; i < p->ext_need; i++) p->flen = (p->flen << 8) | p->ext[i];
-            if (p->flen > WS_MAX_MSG) return -1;
+            if (p->flen > WS_MAX_MSG) { *consumed = off; return -1; }
             // 重组越界预检 (数据帧; 控制帧在 frame_done 再查 ≤125)
-            if (p->opcode == 0 && p->reasm_len + p->flen > WS_MAX_MSG) return -1;
+            if (p->opcode == 0 && p->reasm_len + p->flen > WS_MAX_MSG) {
+                *consumed = off; return -1;
+            }
             p->mask_got = 0;  // 逐帧重置
             p->stage = 3;
             break;
@@ -275,9 +287,11 @@ int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
             p->stage = 4;
             break;
         default:
+            *consumed = off;
             return -1;
         }
     }
+    *consumed = n;
     return 0;
 }
 
