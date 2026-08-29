@@ -54,7 +54,7 @@
 
 - 每个 `.mojo` 文件 < 500 行（God package 阈值）
 - `src/fastapi_mojo/` 只做 FastAPI 域，不混杂其他主题
-- 当前唯一的运行期桥接是 `http_bridge_final.c`（C FFI：socket I/O / CORS / 静态 / 限流 / 信号） 与 `runtime_shim.c`（单 binary：运行时嵌入/暂存/dlopen 转发）；Phase 0 的 `wrapper.mojo` 已拆除，未来每个新替换点都需显式 bridge/adapter
+- 当前运行期桥接是 `http_bridge_final.c`（C FFI：socket I/O / CORS / 静态 / 限流 / 信号 / WS 会话状态） 与 `ws.c`（WebSocket RFC 6455 协议原语，ADR-0006/0007） 与 `runtime_shim.c`（单 binary：运行时嵌入/暂存/dlopen 转发）；Phase 0 的 `wrapper.mojo` 已拆除，未来每个新替换点都需显式 bridge/adapter
 - 测试文件与生产代码同目录
 
 ### 3.3 依赖方向
@@ -106,7 +106,8 @@
 - **已决策-13**：**项目本标 = Mojo 单 Binary 零依赖部署**（本文件 §1）
 - **已决策-14**：单一二进制实现机制 = 运行时嵌入 + 启动暂存 + dlopen 符号转发（见 ADR-0003）；构建入口 `./build_single.sh`，部署 `./deploy.sh`
 - **已决策-15**：WebSocket (RFC 6455) = C FFI 协议层 `ws.c` + `/ws` echo 端点（见 ADR-0006）；不等待 Mojo 原生网络模块，与 C5 同一 C 桥接绕过模式
+- **已决策-16**：WebSocket 增强 = Mojo 驱动会话循环 + WS 路由注册（`/ws` echo / `/ws/counter` 有状态 / `/ws/chat` 必需子协议）+ 子协议协商 + 服务端保活 ping（`FASTAPI_MOJO_WS_PING_MAX`）+ close 码校验（1002）/ text UTF-8 校验（1007）（见 ADR-0007）；C 内 echo 循环（`ws_upgrade_and_echo`）移除，业务分派归 `run_ws_message` 单点 dispatch
 
 ---
 
-*最后更新：2026-08-29（§5 风险表对齐已达成状态；§4 登记 CI 门禁；决策-15 WebSocket RFC 6455，ADR-0006）*
+*最后更新：2026-08-30（决策-16 WebSocket 增强：多端点/子协议/保活/close 校验，ADR-0007；§3.2 桥接清单纳入 ws.c）*

@@ -40,7 +40,8 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │   ├── http_server_final.mojo     # HTTP 服务器主程序（路由/handler/日志）
 │   ├── http_bridge_final.c        # C FFI 桥接：socket I/O + CORS + 静态文件 + 限流 + 信号
 │   ├── runtime_shim.c             # 单一二进制：运行时嵌入/暂存/dlopen/符号转发
-│   ├── ws.c                     # WebSocket (RFC 6455) 协议层：SHA-1/base64/帧编解码/echo (ADR-0006)
+│   ├── ws.c                     # WebSocket (RFC 6455) 协议原语：SHA-1/base64/帧编解码/close 码/UTF-8 (ADR-0006/0007)
+│   ├── ws_session.mojo          # WebSocket 会话循环：子协议/保活 ping/控制帧/handler 分派 (ADR-0007)
 │   ├── router.mojo                # 模式匹配路由（{param} segment）
 │   ├── params_query.mojo          # Path/Query 参数解析 + ParsedParams (values + types)
 │   ├── params_json.mojo           # Body JSON parser（UTF-8 安全 + 类型标记）
@@ -119,9 +120,13 @@ for f in json params_query params_json router string_builder test_all; do mojo r
 | GET | `/items/{item_id}` | 获取单个项目 |
 | DELETE | `/items/{item_id}` | 删除项目 |
 | GET | `/ws` | WebSocket (RFC 6455) 升级 → echo（text/binary/ping/pong/close） |
+| GET | `/ws/counter` | WebSocket → 有状态计数器（连接级累加和，回复 `sum=<n>`） |
+| GET | `/ws/chat` | WebSocket → echo，**必需子协议** `Sec-WebSocket-Protocol: chat`（缺失 → 400） |
 
 其他能力：CORS（含 OPTIONS 预检）、HEAD（无 body）、静态文件（含目录穿越 403 防护）、
-body 限流（默认 1MB，超限 413）、非法 UTF-8 请求 400、请求 ID 追踪、优雅关闭（SIGINT/SIGTERM）。
+body 限流（默认 1MB，超限 413）、非法 UTF-8 请求 400、请求 ID 追踪、优雅关闭（SIGINT/SIGTERM）、
+WS 服务端保活 ping（`FASTAPI_MOJO_WS_PING_MAX`，默认 3 次空闲超时后 close 1000）、
+WS text UTF-8 校验（非法 → close 1007）、WS close 码校验（非法 → 1002）。
 
 ### 示例
 
@@ -192,10 +197,12 @@ curl http://127.0.0.1:8000/test.json
 │  ├── Content-Length 限流（413，先检查后截断）          │
 │  └── 信号处理（SIGINT/SIGTERM 优雅关闭）               │
 ├────────────────────────────────────────────────────────┤
-│  ws.c（WebSocket RFC 6455 协议层）                     │
+│  ws.c（WebSocket RFC 6455 协议原语）                   │
 │  ├── 握手 (SHA-1 + base64 Sec-WebSocket-Accept)        │
-│  ├── 帧编解码 (掩码/7|16|64-bit 长度/分片重组)         │
-│  └── /ws echo 会话 (text/binary/ping/pong/close)       │
+│  │        + subprotocol 回显 (RFC 6455 §4.1)           │
+│  ├── 帧编解码 (掩码/7|16|64-bit 长度/分片重组/超时细分) │
+│  ├── close 码校验 (§7.4.1) + text UTF-8 校验 (§5.6)    │
+│  └── 会话编排: ws_session.mojo (Mojo 驱动, ADR-0007)   │
 ├────────────────────────────────────────────────────────┤
 │  runtime_shim.c（单一二进制机制）                        │
 │  ├── 嵌入 3 个 Mojo 运行时 .so（objcopy binary 数据）  │
@@ -211,6 +218,10 @@ curl http://127.0.0.1:8000/test.json
 - **ADR-0001**：Mojo 替换 Python 策略（C1~C4 已落地，C5 经 C FFI 达成）
 - **ADR-0002**：项目本标 = 单一二进制零依赖部署
 - **ADR-0003**：单一二进制实现机制（运行时嵌入 + 暂存 + dlopen shim）
+- **ADR-0004**：用户路由注册机制（Handler 类型 + 单点 dispatch，user code = data）
+- **ADR-0005**：并发模型（多进程 worker + SO_REUSEPORT，nginx pre-fork）
+- **ADR-0006**：WebSocket (RFC 6455) 支持（C FFI 协议层 + /ws echo 端点）
+- **ADR-0007**：WebSocket 增强（多端点路由 + 子协议协商 + 服务端保活 ping + close/UTF-8 校验）
 
 决策链：已决策-5~13 见 `docs/adr/0001-mojo-replacement-strategy/` 与 `AGENTS.md` §6。
 
@@ -227,3 +238,4 @@ curl http://127.0.0.1:8000/test.json
 - [x] 中间件（request_id / logging / timing）
 - [x] **单一二进制打包（Phase 3，本标达成）**
 - [x] WebSocket 支持（RFC 6455，C FFI 协议层 ws.c + /ws echo 端点，ADR-0006）
+- [x] WebSocket 增强（多端点路由 /ws /ws/counter /ws/chat + 子协议协商 + 服务端保活 ping + close 码/UTF-8 校验，ADR-0007）
