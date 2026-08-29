@@ -173,7 +173,7 @@ else:
 | 1. 无循环依赖 | ✅ 遵守 | 依赖方向单向：`http_server_final` → `handler` → (`router`, `params`)；`handler` 不反向 import 服务器；`router`/`params` 不 import `handler` |
 | 2. 分层向下依赖 | ✅ 遵守 | 业务层（handler 逻辑）→ 路由层（router）→ 参数层（params）；`run_handler` 只依赖下层类型，不依赖 C 桥接/网络 |
 | 3. God package 阈值 | ✅ 遵守 | 新增 `handler.mojo` 预计 < 200 行；`http_server_final.mojo` 因 dispatch 收敛反而减少 ~60 行；各 .mojo 均 < 500 行 |
-| 4. 主题域边界清晰 | ✅ 遵守 | `handler.mojo` 只含"处理器行为"主题（kind + run_handler + 内置处理器实现），不含路由匹配（router.mojo）/参数解析（params.mojo）/网络（C 桥接） |
+| 4. 主题域边界清晰 | ✅ 遵守 | `handler.mojo` 只含"处理器行为"主题（kind + run_handler + 内置处理器实现），不含路由匹配（router.mojo）/参数解析（params_query.mojo / params_json.mojo）/网络（C 桥接） |
 | 5. bridge/adapter 显式化 | ✅ 遵守 | `run_handler` 是唯一的"处理器行为分派"扩展点，显式命名、有 ADR 记录、有测试；不引入隐式回调或字符串魔法（kind 是显式 Int 常量） |
 | 6. 测试文件跟随 | ✅ 遵守 | `handler.mojo` 自带 `main()` 自检（各 kind）；`test_all.mojo` 集成 `run_handler` 用例；`/echo` 端到端进 e2e_test.sh（P4.5） |
 

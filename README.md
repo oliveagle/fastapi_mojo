@@ -96,8 +96,12 @@ ssh user@host '/opt/fastapi_mojo'
 ### 测试
 
 ```bash
+# 单元测试（各模块自检）
 cd src/fastapi_mojo
-for f in json params router string_builder test_all; do mojo run $f.mojo; done
+for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
+
+# 集成测试（单一 binary 端到端，56 项检查，CI 可重复，见 .github/workflows/ci.yml）
+./scripts/e2e_test.sh
 ```
 
 ## API 路由
@@ -175,10 +179,10 @@ curl http://127.0.0.1:8000/test.json
 ├────────────────────────────────────────────────────────┤
 │  http_server_final.mojo                                │
 │  ├── 路由匹配 (router.mojo)                            │
-│  ├── 参数解析 (params.mojo, UTF-8 安全 JSON parser)    │
+│  ├── 参数解析 (params_query/params_json, UTF-8 安全)   │
 │  ├── JSON 序列化 (json.mojo, 线性时间)                 │
 │  ├── 字符串构建 (string_builder.mojo, 线性时间)        │
-│  └── 静态文件 / CORS / 限流 / 日志                      │
+│  └── 静态文件 / CORS / 限流 / 日志                     │
 ├────────────────────────────────────────────────────────┤
 │  http_bridge_final.c（C FFI，随 binary 静态打包）        │
 │  ├── Socket I/O（read/parse 完整 body）                │
@@ -187,7 +191,7 @@ curl http://127.0.0.1:8000/test.json
 │  └── 信号处理（SIGINT/SIGTERM 优雅关闭）               │
 ├────────────────────────────────────────────────────────┤
 │  runtime_shim.c（单一二进制机制）                        │
-│  ├── 嵌入 3 个 Mojo 运行时 .so（objcopy binary 数据）   │
+│  ├── 嵌入 3 个 Mojo 运行时 .so（objcopy binary 数据）  │
 │  ├── constructor：暂存到 /dev/shm|/tmp + dlopen        │
 │  ├── 11 个 KGEN_CompilerRT_* 符号转发                  │
 │  └── atexit：清理临时目录                              │
