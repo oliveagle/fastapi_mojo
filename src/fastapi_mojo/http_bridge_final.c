@@ -1023,6 +1023,165 @@ fmc_slice get_ws_key_slice(void) {
     return (fmc_slice){ g_ws_key, (long)strlen(g_ws_key) };
 }
 
+// ---------- WebSocket session state + primitive wrappers (ADR-0007) ----------
+// The session loop (when to read/write, keepalive pings, termination) is
+// driven by Mojo (ws_session.mojo). These wrappers store the last message
+// payload read (the process is single-threaded and the bridge poll loop is
+// suspended for the duration of a WS session, so globals are safe) and
+// expose it via the same slice convention as get_body_slice().
+// ws.c protocol primitives (explicit bridge, ADR-0006/0007):
+extern int ws_handshake(int fd, const char *key, const char *subprotocol);
+extern int ws_read_message(int fd, int *opcode, unsigned char **payload, size_t *plen);
+extern int ws_write_message(int fd, int opcode, const unsigned char *payload, size_t plen);
+extern int ws_parse_close_code(const unsigned char *payload, size_t plen, int *code);
+extern int ws_validate_utf8(const unsigned char *p, size_t n);
+
+static unsigned char *g_ws_cur_payload;   // malloc'd by ws.c; released by ws_session_end
+static size_t g_ws_cur_payload_len;
+static int g_ws_cur_opcode;
+static char g_ws_protocol[256];
+
+// Raw client Sec-WebSocket-Protocol offer (empty when absent). Call after
+// is_ws_upgrade() succeeded (reads the active connection's parsed headers).
+fmc_slice get_ws_protocol_slice(void) {
+    struct conn *c = g_active_conn;
+    g_ws_protocol[0] = '\0';
+    if (c && c->in_use) {
+        int hdr_end = find_header_end(c->hdr, c->hdr_total);
+        if (hdr_end >= 0)
+            get_header_value_ci(c->hdr, (size_t)hdr_end, "Sec-WebSocket-Protocol",
+                                g_ws_protocol, sizeof g_ws_protocol);
+    }
+    return (fmc_slice){ g_ws_protocol, (long)strlen(g_ws_protocol) };
+}
+
+// 101 handshake on the active connection; key = g_ws_key (set by is_ws_upgrade).
+// subprotocol: Mojo-selected (empty slice = omit the header). 0 = ok.
+int ws_session_begin(const char *subprotocol) {
+    struct conn *c = g_active_conn;
+    if (!c || !c->in_use) return -1;
+    int r = ws_handshake(c->fd, g_ws_key, subprotocol ? subprotocol : "");
+    if (r == 0) {
+        g_ws_cur_payload = NULL;
+        g_ws_cur_payload_len = 0;
+        g_ws_cur_opcode = -1;
+        return 0;
+    }
+    return 1;  // unsigned error status (see ws_session_read)
+}
+
+// Read one message into the session store.
+// MOJO-FACING STATUS (unsigned — C `int` return values are zero-extended
+// into Mojo's i64, so negative codes would look like huge positives):
+//   0 = ok; 1 = error/EOF/limit (end session);
+//   2 = idle timeout with no bytes consumed (safe to ping + retry).
+int ws_session_read(int fd) {
+    int op;
+    unsigned char *p;
+    size_t n;
+    int r = ws_read_message(fd, &op, &p, &n);
+    if (r != 0) return (r == -2) ? 2 : 1;
+    // CRITICAL (Mojo 1.0.0 FFI, 实测): a returned CStringSlice is consumed by
+    // Mojo as a NUL-terminated C string (only the pointer register is read;
+    // the length half is ignored — cf. get_body_slice & co). The ws.c payload
+    // is not NUL-terminated, so copy it into a (n+1) buffer here.
+    if (g_ws_cur_payload) free(g_ws_cur_payload);
+    unsigned char *q = (unsigned char *)malloc(n + 1);
+    if (!q) { free(p); return 1; }
+    if (n > 0) memcpy(q, p, n);
+    q[n] = '\0';
+    free(p);
+    g_ws_cur_payload = q;
+    g_ws_cur_payload_len = n;
+    g_ws_cur_opcode = op;
+    return 0;
+}
+
+// 0 = no message yet; otherwise the opcode of the stored message.
+int ws_last_opcode(void) { return g_ws_cur_opcode < 0 ? 0 : g_ws_cur_opcode; }
+
+fmc_slice ws_payload_slice(void) {
+    return (fmc_slice){ (const char *)g_ws_cur_payload, (long)g_ws_cur_payload_len };
+}
+
+// Reply to the stored close frame (RFC 6455 7.4.1): valid code -> echo the
+// received payload (code + reason, capped at 125 bytes per 5.5); empty
+// payload -> reply 1000; invalid code (reserved/out of range) -> 1002.
+int ws_reply_close(int fd) {
+    int code = 0;
+    int r = ws_parse_close_code(g_ws_cur_payload, g_ws_cur_payload_len, &code);
+    if (r == -1) {
+        unsigned char p[2] = { 0x03, 0xEA };  // 1002 Protocol error
+        return ws_write_message(fd, 8, p, 2);
+    }
+    if (r == 0) {
+        unsigned char p[2] = { 0x03, 0xE8 };  // 1000 Normal closure
+        return ws_write_message(fd, 8, p, 2);
+    }
+    size_t n = g_ws_cur_payload_len;
+    if (n > 125) n = 125;
+    return ws_write_message(fd, 8, g_ws_cur_payload, n);
+}
+
+// 1 = stored text payload is valid UTF-8 (RFC 6455 5.6); 0 = invalid (reply 1007).
+int ws_payload_valid_utf8(void) {
+    if (!g_ws_cur_payload) return 1;
+    return ws_validate_utf8(g_ws_cur_payload, g_ws_cur_payload_len);
+}
+
+// NOTE (Mojo 1.0.0 FFI ABI, 实测): a CStringSlice argument is only passed
+// reliably when it comes FIRST or directly after the leading scalar group
+// ((int, slice), (int, slice, slice) — cf. send_static_file /
+// send_simple_response); a scalar AFTER a slice (int, slice, int) traps
+// (SIGILL) and (int, int, slice) silently delivers garbage registers.
+// So text replies (opcode fixed = 1) use (int, slice) and read the NUL-
+// terminated pointer half; empty frames use (int, int). Constraint: WS text
+// replies must not contain NUL bytes (documented in ADR-0007).
+int ws_write_text(int fd, const char *data) {
+    return ws_write_message(fd, 1, (const unsigned char *)data, strlen(data));
+}
+
+// Empty single frame (opcode 9 = keepalive ping; no payload).
+int ws_write_empty(int fd, int opcode) {
+    return ws_write_message(fd, opcode, (const unsigned char *)"", 0);
+}
+
+// Zero-copy: send the currently stored payload back (raw binary echo).
+int ws_write_current(int fd, int opcode) {
+    return ws_write_message(fd, opcode, g_ws_cur_payload, g_ws_cur_payload_len);
+}
+
+// Server-initiated close frame (2-byte code payload).
+int ws_send_close(int fd, int code) {
+    unsigned char p[2] = { (unsigned char)(code >> 8), (unsigned char)(code & 0xFF) };
+    return ws_write_message(fd, 8, p, 2);
+}
+
+// Release the stored payload (call when the session ends).
+void ws_session_end(void) {
+    if (g_ws_cur_payload) { free(g_ws_cur_payload); g_ws_cur_payload = NULL; }
+    g_ws_cur_payload_len = 0;
+    g_ws_cur_opcode = -1;
+}
+
+// FASTAPI_MOJO_WS_PING_MAX (default 3): consecutive keepalive pings with no
+// client data before the server closes with 1000. 0 = no pings (idle timeout
+// ends the session immediately, the ADR-0006 behavior).
+int get_ws_ping_max(void) {
+    static int v = -1;
+    if (v == -1) {
+        const char *e = getenv("FASTAPI_MOJO_WS_PING_MAX");
+        int n = 3;
+        if (e) {
+            int p = atoi(e);
+            if (p < 0) p = 0;
+            n = p;
+        }
+        v = n;
+    }
+    return v;
+}
+
 
 // Exit the process with a failure code (used when bind fails — a server
 // that cannot listen must not report success to the operator/CI).
