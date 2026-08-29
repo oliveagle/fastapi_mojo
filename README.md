@@ -101,7 +101,7 @@ ssh user@host '/opt/fastapi_mojo'
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，74 项检查含 WebSocket 增强/并发，CI 可重复，见 .github/workflows/ci.yml）
+# 集成测试（单一 binary 端到端，79 项检查含 WebSocket 增强/并发/精化，CI 可重复，见 .github/workflows/ci.yml）
 ./scripts/e2e_test.sh
 ```
 
@@ -125,7 +125,8 @@ for f in json params_query params_json router string_builder test_all; do mojo r
 其他能力：CORS（含 OPTIONS 预检）、HEAD（无 body）、静态文件（含目录穿越 403 防护）、
 body 限流（默认 1MB，超限 413）、非法 UTF-8 请求 400、请求 ID 追踪、优雅关闭（SIGINT/SIGTERM）、
 WS 服务端保活 ping（`FASTAPI_MOJO_WS_PING_MAX`，默认 3 次空闲超时后 close 1000）、
-WS text UTF-8 校验（非法 → close 1007）、WS close 码校验（非法 → 1002）。
+WS text UTF-8 校验（非法 → close 1007）、WS close 码校验（非法 → 1002）、
+WS `{param}` 路由（`/ws/greet/{name}` 等）、WS token 鉴权（`/ws/private`，403）。
 
 ### 示例
 
@@ -222,6 +223,7 @@ curl http://127.0.0.1:8000/test.json
 - **ADR-0006**：WebSocket (RFC 6455) 支持（C FFI 协议层 + /ws echo 端点）
 - **ADR-0007**：WebSocket 增强（多端点路由 + 子协议协商 + 服务端保活 ping + close/UTF-8 校验）
 - **ADR-0008**：高并发 WebSocket（poll 循环驱动 + FIFO 事件队列 + 控制帧/保活 C 层自动处理）
+- **ADR-0009**：WebSocket 精化（合并帧丢失修复 + `{param}` 路由 + 鉴权 + 内存/背压加固）
 
 决策链：已决策-5~13 见 `docs/adr/0001-mojo-replacement-strategy/` 与 `AGENTS.md` §6。
 
@@ -240,3 +242,4 @@ curl http://127.0.0.1:8000/test.json
 - [x] WebSocket 支持（RFC 6455，C FFI 协议层 ws.c + /ws echo 端点，ADR-0006）
 - [x] WebSocket 增强（多端点路由 /ws /ws/counter /ws/chat + 子协议协商 + 服务端保活 ping + close 码/UTF-8 校验，ADR-0007）
 - [x] 高并发 WebSocket（多 WS 会话与 HTTP 并发、空闲不阻塞 dispatch，ADR-0008）
+- [x] WebSocket 精化（合并帧不丢失、`{param}` 路由、token 鉴权、内存/背压加固，ADR-0009）

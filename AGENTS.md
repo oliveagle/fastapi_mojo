@@ -74,7 +74,7 @@
 - ADR 在 `docs/adr/`，每个 ADR 必须包含 **6 条架构隔离约束声明**
 - Benchmark 统一走 `./benchmark.sh`，禁止手写压测脚本
 - **CI** (`.github/workflows/ci.yml`) 在每次 push/PR 到 main 时守护本标：
-  单一 binary 构建 + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试 + e2e (74 项，含 WebSocket 增强/并发)
+  单一 binary 构建 + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试 + e2e (79 项，含 WebSocket 增强/并发/精化)
 
 ---
 
@@ -108,7 +108,8 @@
 - **已决策-15**：WebSocket (RFC 6455) = C FFI 协议层 `ws.c` + `/ws` echo 端点（见 ADR-0006）；不等待 Mojo 原生网络模块，与 C5 同一 C 桥接绕过模式
 - **已决策-16**：WebSocket 增强 = Mojo 驱动会话循环 + WS 路由注册（`/ws` echo / `/ws/counter` 有状态 / `/ws/chat` 必需子协议）+ 子协议协商 + 服务端保活 ping（`FASTAPI_MOJO_WS_PING_MAX`）+ close 码校验（1002）/ text UTF-8 校验（1007）（见 ADR-0007）；C 内 echo 循环（`ws_upgrade_and_echo`）移除，业务分派归 `run_ws_message` 单点 dispatch
 - **已决策-17**：高并发 WebSocket = bridge poll 循环驱动 WS 会话（conn 阶段 3/4）+ FIFO 事件队列（数据帧逐条交 Mojo 分派）+ 控制帧/保活/UTF-8 校验 C 层自动处理（见 ADR-0008）；WS 会话不再阻塞 dispatch，多 WS 会话与 HTTP 并发（e2e：10 并发 + 空闲 WS 下探针 <1s）
+- **已决策-18**：WebSocket 精化 = 合并帧尾块丢失 P0 修复（feed consumed 语义 + 每连接尾块重放 + `ws_pump_now` 立即重 pump）+ WS `{param}` 路由/参数分派 + 升级 token 鉴权（403）+ 重组缓冲按需增长（4KB→1MB）+ 事件队列结构上不可溢出（1008 防御）（见 ADR-0009）
 
 ---
 
-*最后更新：2026-08-30（决策-17 高并发 WebSocket：poll 驱动 + 事件队列，ADR-0008；决策-16 WebSocket 增强，ADR-0007；§3.2 桥接清单纳入 ws.c）*
+*最后更新：2026-08-30（决策-18 WebSocket 精化：合并帧修复/{param} 路由/鉴权/内存背压，ADR-0009；决策-17 高并发 WebSocket，ADR-0008；决策-16 WebSocket 增强，ADR-0007）*
