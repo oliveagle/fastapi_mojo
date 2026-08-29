@@ -758,6 +758,141 @@ check_ws3() { # marker name
 check_ws3 M14 "WS 10 并发会话 (各自 echo 往返成功)"
 check_ws3 M15 "WS 空闲会话下 HTTP 探针 <1s (不阻塞 dispatch)"
 check_ws3 M16 "WS 每连接 state 隔离 (两 counter 交替)"
+
+# ADR-0009: 尾块重放 (P0 消息丢失修复) / NUL 回显 / {param} 路由 / 鉴权
+WS4_OUT="$(python3 - "$PORT" 2>&1 <<'PY4'
+import os, socket, struct, sys
+port = int(sys.argv[1])
+KEY = "dGhlIHNhbXBsZSBub25jZQ=="
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        c = s.recv(n - len(buf))
+        if not c: raise ConnectionError("EOF")
+        buf += c
+    return buf
+
+def make_frame(op, payload, fin=True):
+    h = bytearray([(0x80 if fin else 0) | op])
+    m = os.urandom(4)
+    n = len(payload)
+    if n < 126: h.append(0x80 | n)
+    elif n <= 0xFFFF: h += bytes([0x80 | 126]) + struct.pack(">H", n)
+    else: h += bytes([0x80 | 127]) + struct.pack(">Q", n)
+    h += m
+    return bytes(h) + bytes(b ^ m[i % 4] for i, b in enumerate(payload))
+
+def send_frame(s, op, payload, fin=True):
+    s.sendall(make_frame(op, payload, fin))
+
+def recv_frame(s):
+    h = recv_exact(s, 2)
+    fin, op, n = (h[0] & 0x80) != 0, h[0] & 0x0F, h[1] & 0x7F
+    if n == 126: n = struct.unpack(">H", recv_exact(s, 2))[0]
+    elif n == 127: n = struct.unpack(">Q", recv_exact(s, 8))[0]
+    m = recv_exact(s, 4) if h[1] & 0x80 else None
+    p = recv_exact(s, n) if n else b""
+    if m: p = bytes(b ^ m[i % 4] for i, b in enumerate(p))
+    return fin, op, p
+
+def connect(path):
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    s.sendall((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+               f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+               f"Sec-WebSocket-Key: {KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        c = s.recv(4096)
+        if not c: raise ConnectionError("EOF")
+        resp += c
+    return s, resp.split(b"\r\n")[0].decode()
+
+def close_ws(s):
+    try:
+        send_frame(s, 0x8, struct.pack(">H", 1000))
+        recv_frame(s)
+    except Exception:
+        pass
+    s.close()
+
+# M17: 一个 sendall 内含两条完整帧 (TCP 合并) -> 两条回复都不许丢
+#      (ADR-0009 P0 修复: feed 尾块重放; 旧实现第二条帧被静默丢弃)
+s, status = connect("/ws")
+assert status.startswith("HTTP/1.1 101"), status
+s.sendall(make_frame(0x1, b"first") + make_frame(0x1, b"second"))
+f, o, p = recv_frame(s)
+assert o == 0x1 and p == b"first", (o, p)
+f, o, p = recv_frame(s)
+assert o == 0x1 and p == b"second", (o, p)
+# 3 条合并 + 1 条 ping 混合 (控制帧与数据帧同块)
+s.sendall(make_frame(0x1, b"a") + make_frame(0x9, b"pp") + make_frame(0x1, b"c"))
+f, o, p = recv_frame(s)
+assert o == 0x1 and p == b"a", (o, p)
+f, o, p = recv_frame(s)
+assert o == 0xA and p == b"pp", (o, p)          # ping -> pong (协议层自动)
+f, o, p = recv_frame(s)
+assert o == 0x1 and p == b"c", (o, p)
+close_ws(s)
+print("M17")
+
+# M18: text 帧含 NUL 字节 (合法 UTF-8) -> 回显逐字节一致 (零拷贝路径 NUL 安全)
+s, status = connect("/ws")
+assert status.startswith("HTTP/1.1 101"), status
+send_frame(s, 0x1, b"a\x00b")
+f, o, p = recv_frame(s)
+assert o == 0x1 and p == b"a\x00b", (o, p)
+close_ws(s)
+print("M18")
+
+# M19: {param} 路由 — /ws/greet/{name} (KIND_WS_GREET 用路由参数)
+s, status = connect("/ws/greet/Alice")
+assert status.startswith("HTTP/1.1 101"), status
+send_frame(s, 0x1, b"hi")
+f, o, p = recv_frame(s)
+assert p == b"hello Alice: hi", p
+send_frame(s, 0x1, b"again")
+f, o, p = recv_frame(s)
+assert p == b"hello Alice: again", p
+close_ws(s)
+print("M19")
+
+# M20: 鉴权 — /ws/private 要求升级 query token=secret
+s, status = connect("/ws/private?token=secret")
+assert status.startswith("HTTP/1.1 101"), status
+send_frame(s, 0x1, b"ok")
+f, o, p = recv_frame(s)
+assert p == b"ok", p
+close_ws(s)
+s2, status2 = connect("/ws/private")
+assert status2 == "HTTP/1.1 403 Forbidden", status2
+s2.close()
+s3, status3 = connect("/ws/private?token=wrong")
+assert status3 == "HTTP/1.1 403 Forbidden", status3
+s3.close()
+print("M20")
+
+# M21: {param} 路由 + echo handler — /ws/room/{room}
+s, status = connect("/ws/room/abc123")
+assert status.startswith("HTTP/1.1 101"), status
+send_frame(s, 0x1, b"ping")
+f, o, p = recv_frame(s)
+assert p == b"ping", p
+close_ws(s)
+print("M21")
+PY4
+)"
+
+check_ws4() { # marker name
+    local m=$1 name=$2
+    if echo "$WS4_OUT" | grep -q "$m"; then pass "$name"
+    else fail "$name" "$(echo "$WS4_OUT" | tail -2 | tr '\n' ' ')"; fi
+}
+check_ws4 M17 "WS 合并帧不丢失 (2 帧同块 + 数据/控制帧混合, ADR-0009 P0)"
+check_ws4 M18 "WS text 帧含 NUL 回显逐字节一致 (零拷贝)"
+check_ws4 M19 "WS {param} 路由 /ws/greet/{name} (参数化 handler)"
+check_ws4 M20 "WS 鉴权 (token=secret -> 101; 缺失/错误 -> 403)"
+check_ws4 M21 "WS {param} 路由 /ws/room/{room} (echo)"
 expect_code "GET /ws without Upgrade header -> 404" 404 "$BASE/ws"
 expect_code "WS upgrade to non-WS path -> 404" 404 "$BASE/nowhere"
 

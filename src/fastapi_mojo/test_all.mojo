@@ -4,11 +4,11 @@
 
 from json import json_serialize, json_serialize_dict, json_escape
 from router import Router, RouteMatch
-from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER, run_ws_message
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET, run_ws_message
 from params_query import parse_path_params, parse_query_params, ParsedParams, url_decode
 from params_json import parse_body_json
 from string_builder import decode_utf8_bytes, StringBuilder, span_to_str, trim_spaces
-from ws_session import ws_select_subprotocol
+from ws_session import ws_select_subprotocol, ws_check_token
 
 
 def test_json() raises:
@@ -319,25 +319,25 @@ def test_ws() raises:
 
     # run_ws_message: echo
     var he = Handler(KIND_WS_ECHO(), "ws_echo")
-    var e1 = run_ws_message(he, 1, "hello", 0)
+    var e1 = run_ws_message(he, 1, "hello", 0, Dict[String, String]())
     assert e1[0] == 1 and e1[1] == "hello" and e1[2] == 0, "echo reply"
 
     # run_ws_message: counter (stateful)
     var hc = Handler(KIND_WS_COUNTER(), "ws_counter")
-    var c1 = run_ws_message(hc, 1, "5", 0)
+    var c1 = run_ws_message(hc, 1, "5", 0, Dict[String, String]())
     assert c1[0] == 1 and c1[1] == "sum=5" and c1[2] == 5, "counter 5"
-    var c2 = run_ws_message(hc, 1, "3", c1[2])
+    var c2 = run_ws_message(hc, 1, "3", c1[2], Dict[String, String]())
     assert c2[1] == "sum=8" and c2[2] == 8, "counter cumulative"
-    var c3 = run_ws_message(hc, 1, "abc", 8)
+    var c3 = run_ws_message(hc, 1, "abc", 8, Dict[String, String]())
     assert c3[1] == "error: expected an integer" and c3[2] == 8, "counter invalid"
-    var c4 = run_ws_message(hc, 1, "123456789012345678901", 0)
+    var c4 = run_ws_message(hc, 1, "123456789012345678901", 0, Dict[String, String]())
     assert c4[1] == "error: expected an integer", "counter overflow"
-    var c5 = run_ws_message(hc, 1, "", 8)
+    var c5 = run_ws_message(hc, 1, "", 8, Dict[String, String]())
     assert c5[1] == "sum=8" and c5[2] == 8, "counter empty = 0"
 
     # 未知 WS kind -> 不回复
     var hq = Handler(999, "bogus")
-    var q1 = run_ws_message(hq, 1, "x", 0)
+    var q1 = run_ws_message(hq, 1, "x", 0, Dict[String, String]())
     assert q1[0] == 0 and q1[1] == "", "unknown kind no reply"
 
     # WS 路由 (精确匹配)
@@ -354,6 +354,33 @@ def test_ws() raises:
     assert m2.matched and m2.handler.data["ws_sp"] == "chat", "ws chat match"
     var m3 = router.match_ws_route("/ws/")
     assert not m3.matched, "ws no trailing slash match"
+
+    # ADR-0009: {param} 路由 (WsRouteMatch.params)
+    var rws = Router()
+    rws.add_ws_route("/ws/greet/{name}", Handler(KIND_WS_GREET(), "greet"))
+    var wp1 = rws.match_ws_route("/ws/greet/Alice")
+    assert wp1.matched and wp1.params["name"] == "Alice", "ws pattern params"
+    assert not rws.match_ws_route("/ws/greet").matched, "ws pattern count"
+    assert not rws.match_ws_route("/ws/greet/a/b").matched, "ws pattern deep"
+
+    # ADR-0009: KIND_WS_GREET (参数化问候)
+    var hg = Handler(KIND_WS_GREET(), "greet")
+    var gp = Dict[String, String]()
+    gp["name"] = "Bob"
+    var g1 = run_ws_message(hg, 1, "hi", 0, gp)
+    assert g1[1] == "hello Bob: hi", "greet with param"
+    var g2 = run_ws_message(hg, 1, "hi", 0, Dict[String, String]())
+    assert g2[1] == "hello world: hi", "greet default name"
+
+    # ADR-0009: ws_check_token (鉴权)
+    var hn = Handler(KIND_WS_ECHO(), "open")
+    assert ws_check_token(hn, ""), "no ws_token -> always pass"
+    var hs = Handler(KIND_WS_ECHO(), "secure")
+    hs.set_data("ws_token", "secret")
+    assert ws_check_token(hs, "token=secret"), "correct token"
+    assert ws_check_token(hs, "a=1&token=secret&b=2"), "token among params"
+    assert not ws_check_token(hs, ""), "missing token"
+    assert not ws_check_token(hs, "token=wrong"), "wrong token"
 
     print("WS tests passed!")
 
