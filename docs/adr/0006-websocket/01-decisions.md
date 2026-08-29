@@ -1,7 +1,7 @@
 # ADR-0006: WebSocket (RFC 6455) 支持 — C FFI 协议层 + /ws echo 端点
 
 - **日期**：2026-08-29
-- **状态**：✅ 已接受
+- **状态**：✅ 已接受（部分被 **ADR-0007** 取代：单一端点/无保活/无 subprotocol 限制已解除，见 §4 注）
 - **决策者**：oliveagle（agent 执行）
 - **关联**：ADR-0001（C5 经 C FFI 绕过 Mojo 无网络模块）、ADR-0003（单 binary 机制）、
   `ws.c`（RFC 6455 协议层）、`http_bridge_final.c`（升级头检测）、
@@ -47,7 +47,8 @@ README 路线图中唯一未勾选的项是「WebSocket 支持（待 Mojo 网络
 ## 4. 后果与限制（文档化）
 
 - **单一端点**：仅 `/ws`，且为 echo（回显）。不是通用 WS 路由注册；后续扩展
-  （多端点 / 业务消息）需新增 ADR。
+  （多端点 / 业务消息）需新增 ADR。~~（已由 ADR-0007 落地：多端点 + 子协议 + 保活，
+  C 内 `ws_upgrade_and_echo` 循环已移除，会话改由 Mojo 驱动）~~
 - **消息上限 1 MB**：与 HTTP body 上限一致（`WS_MAX_MSG`）。超限帧丢弃连接。
 - **空闲断开**：WS 连接受 socket `SO_RCVTIMEO`（`FASTAPI_MOJO_RECV_TIMEOUT`，默认 5s）
   约束——帧间隔超过该值即断开。客户端可用 **ping 帧保活**（服务端回 pong）。
@@ -57,6 +58,7 @@ README 路线图中唯一未勾选的项是「WebSocket 支持（待 Mojo 网络
   分派"限制）；其他连接的 I/O 在会话内不被 poll 服务，可能触发其超时。对 echo
   端点与 e2e 可接受；高并发 WS 需后续 ADR（worker 级 WS 或 C 层独立 poll）。
 - **无 subprotocol / 无鉴权**：最小实现，未处理 `Sec-WebSocket-Protocol` 与认证。
+  ~~（subprotocol 已由 ADR-0007 落地；鉴权仍待新 ADR）~~
 - **正向影响**：路线图最后一项关闭；WebSocket 与 HTTP 共享同一 C FFI 桥接哲学，
   架构一致性增强。
 
