@@ -395,6 +395,113 @@ if [[ "$TRAVERSAL_CODE" == "403" ]]; then pass "../ traversal -> 403"
 else fail "../ traversal -> 403" "got $TRAVERSAL_CODE"; fi
 unlink "$SRC/secret_e2e.html"
 
+# --- WebSocket (RFC 6455, ADR-0006) -------------------------------------------
+
+echo "== websocket (RFC 6455) =="
+# One Python session (stdlib only) exercises: handshake (RFC 6455 vector),
+# text echo, fragmented reassembly, large (64-bit length) binary echo,
+# ping/pong, close. Markers M1..M6 print in order; a missing marker = that
+# stage failed (the traceback is captured in the failure message).
+WS_OUT="$(python3 - "$PORT" 2>&1 <<'PY'
+import base64, hashlib, os, socket, struct, sys
+port = int(sys.argv[1])
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+KEY = "dGhlIHNhbXBsZSBub25jZQ=="          # RFC 6455 1.3 example
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        c = s.recv(n - len(buf))
+        if not c: raise ConnectionError("EOF")
+        buf += c
+    return buf
+
+def send_frame(s, op, payload, fin=True):
+    h = bytearray([(0x80 if fin else 0) | op])
+    m = os.urandom(4)
+    n = len(payload)
+    if n < 126: h.append(0x80 | n)
+    elif n <= 0xFFFF: h += bytes([0x80 | 126]) + struct.pack(">H", n)
+    else: h += bytes([0x80 | 127]) + struct.pack(">Q", n)
+    h += m
+    s.sendall(bytes(h) + bytes(b ^ m[i % 4] for i, b in enumerate(payload)))
+
+def recv_frame(s):
+    h = recv_exact(s, 2)
+    fin, op, n = (h[0] & 0x80) != 0, h[0] & 0x0F, h[1] & 0x7F
+    if n == 126: n = struct.unpack(">H", recv_exact(s, 2))[0]
+    elif n == 127: n = struct.unpack(">Q", recv_exact(s, 8))[0]
+    m = recv_exact(s, 4) if h[1] & 0x80 else None
+    p = recv_exact(s, n) if n else b""
+    if m: p = bytes(b ^ m[i % 4] for i, b in enumerate(p))
+    return fin, op, p
+
+s = socket.create_connection(("127.0.0.1", port), timeout=8)
+s.sendall((f"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+           f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+           f"Sec-WebSocket-Key: {KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+resp = b""
+while b"\r\n\r\n" not in resp:
+    c = s.recv(4096)
+    if not c: break
+    resp += c
+status = resp.split(b"\r\n")[0].decode()
+assert status == "HTTP/1.1 101 Switching Protocols", status
+hdrs = {}
+for line in resp.decode(errors="replace").split("\r\n")[1:]:
+    if ": " in line:
+        k, v = line.split(": ", 1); hdrs[k.lower()] = v
+accept = base64.b64encode(hashlib.sha1((KEY + GUID).encode()).digest()).decode()
+assert hdrs.get("sec-websocket-accept") == accept, hdrs.get("sec-websocket-accept")
+print("M1")
+
+send_frame(s, 0x1, b"hello mojo")
+f, o, p = recv_frame(s)
+assert f and o == 0x1 and p == b"hello mojo", (o, p)
+print("M2")
+
+send_frame(s, 0x1, b"part1", fin=False)
+send_frame(s, 0x0, b" part2", fin=True)
+f, o, p = recv_frame(s)
+assert f and o == 0x1 and p == b"part1 part2", (o, p)
+print("M3")
+
+big = bytes(range(256)) * 300            # 76800 B -> 64-bit length path
+send_frame(s, 0x2, big)
+f, o, p = recv_frame(s)
+assert f and o == 0x2 and p == big, (o, len(p))
+print("M4")
+
+send_frame(s, 0x9, b"keepalive")
+f, o, p = recv_frame(s)
+assert o == 0xA and p == b"keepalive", (o, p)
+print("M5")
+
+send_frame(s, 0x8, struct.pack(">H", 1000))
+try:
+    f, o, p = recv_frame(s)
+    assert o == 0x8, o
+except ConnectionError:
+    pass
+print("M6")
+s.close()
+PY
+)"
+
+check_ws() { # marker name
+    local m=$1 name=$2
+    if echo "$WS_OUT" | grep -q "$m"; then pass "$name"
+    else fail "$name" "$(echo "$WS_OUT" | tail -2 | tr '\n' ' ')"; fi
+}
+check_ws M1 "WS handshake: 101 + Sec-WebSocket-Accept (RFC 6455 vector)"
+check_ws M2 "WS text frame echo"
+check_ws M3 "WS fragmented message reassembly"
+check_ws M4 "WS large binary echo (76800B, 64-bit length)"
+check_ws M5 "WS ping -> pong"
+check_ws M6 "WS close frame echo"
+expect_code "GET /ws without Upgrade header -> 404" 404 "$BASE/ws"
+
+
 # --- Slowloris guard -----------------------------------------------------------
 
 echo "== slowloris guard =="

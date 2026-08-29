@@ -125,8 +125,9 @@ if [[ -d "$SRC/static" ]]; then
 fi
 STATIC_DEFS+=(-DN_EMBED_STATIC=$n_static)
 
-echo "[3/5] Compiling C bridge + runtime shim..."
+echo "[3/5] Compiling C bridge + WebSocket protocol + runtime shim..."
 gcc -fPIC -O2 -Wall -c "$SRC/http_bridge_final.c" -o "$BUILD/bridge.o"
+gcc -fPIC -O2 -Wall -c "$SRC/ws.c" -o "$BUILD/ws.o"
 gcc -fPIC -O2 -Wall -c "$SRC/runtime_shim.c" -o "$BUILD/shim.o" \
     -DKGEN_PAYLOAD_START="${SYM_START[payload_kgen]}"   -DKGEN_PAYLOAD_END="${SYM_END[payload_kgen]}" \
     -DMSUPP_PAYLOAD_START="${SYM_START[payload_msupp]}" -DMSUPP_PAYLOAD_END="${SYM_END[payload_msupp]}" \
@@ -139,6 +140,7 @@ gcc -fPIE -pie -O2 \
     "$BUILD/shim.o" \
     "$BUILD/server.o" \
     "$BUILD/bridge.o" \
+    "$BUILD/ws.o" \
     "$BUILD/payload_kgen.o" \
     "$BUILD/payload_msupp.o" \
     "$BUILD/payload_asyncrt.o" \

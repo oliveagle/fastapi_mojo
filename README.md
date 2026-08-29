@@ -40,6 +40,7 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │   ├── http_server_final.mojo     # HTTP 服务器主程序（路由/handler/日志）
 │   ├── http_bridge_final.c        # C FFI 桥接：socket I/O + CORS + 静态文件 + 限流 + 信号
 │   ├── runtime_shim.c             # 单一二进制：运行时嵌入/暂存/dlopen/符号转发
+│   ├── ws.c                     # WebSocket (RFC 6455) 协议层：SHA-1/base64/帧编解码/echo (ADR-0006)
 │   ├── router.mojo                # 模式匹配路由（{param} segment）
 │   ├── params_query.mojo          # Path/Query 参数解析 + ParsedParams (values + types)
 │   ├── params_json.mojo           # Body JSON parser（UTF-8 安全 + 类型标记）
@@ -117,6 +118,7 @@ for f in json params_query params_json router string_builder test_all; do mojo r
 | POST | `/items` | 创建项目（JSON body，UTF-8 安全） |
 | GET | `/items/{item_id}` | 获取单个项目 |
 | DELETE | `/items/{item_id}` | 删除项目 |
+| GET | `/ws` | WebSocket (RFC 6455) 升级 → echo（text/binary/ping/pong/close） |
 
 其他能力：CORS（含 OPTIONS 预检）、HEAD（无 body）、静态文件（含目录穿越 403 防护）、
 body 限流（默认 1MB，超限 413）、非法 UTF-8 请求 400、请求 ID 追踪、优雅关闭（SIGINT/SIGTERM）。
@@ -190,6 +192,11 @@ curl http://127.0.0.1:8000/test.json
 │  ├── Content-Length 限流（413，先检查后截断）          │
 │  └── 信号处理（SIGINT/SIGTERM 优雅关闭）               │
 ├────────────────────────────────────────────────────────┤
+│  ws.c（WebSocket RFC 6455 协议层）                     │
+│  ├── 握手 (SHA-1 + base64 Sec-WebSocket-Accept)        │
+│  ├── 帧编解码 (掩码/7|16|64-bit 长度/分片重组)         │
+│  └── /ws echo 会话 (text/binary/ping/pong/close)       │
+├────────────────────────────────────────────────────────┤
 │  runtime_shim.c（单一二进制机制）                        │
 │  ├── 嵌入 3 个 Mojo 运行时 .so（objcopy binary 数据）  │
 │  ├── constructor：暂存到 /dev/shm|/tmp + dlopen        │
@@ -213,10 +220,10 @@ curl http://127.0.0.1:8000/test.json
 - [x] JSON 序列化（线性时间）
 - [x] 模式匹配路由
 - [x] 参数解析（UTF-8 安全）
-- [x] REST API（9 个路由 + HEAD/OPTIONS/静态文件）
+- [x] REST API（11 个路由 + HEAD/OPTIONS/静态文件）
 - [x] CORS 支持
 - [x] 优雅关闭（SIGINT/SIGTERM）
 - [x] 请求 ID 追踪
 - [x] 中间件（request_id / logging / timing）
 - [x] **单一二进制打包（Phase 3，本标达成）**
-- [ ] WebSocket 支持（待 Mojo 网络生态成熟）
+- [x] WebSocket 支持（RFC 6455，C FFI 协议层 ws.c + /ws echo 端点，ADR-0006）

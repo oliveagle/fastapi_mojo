@@ -166,6 +166,17 @@ def main() raises:
             _ = external_call["send_preflight_response", Int](cfd)
             mw_logging(mw_chain, req_id, method, path, query, "204 No Content", duration_ms)
             external_call["conn_done", NoneType](cfd, False)  # preflight response announces Connection: close
+        elif path == "/ws" and external_call["is_ws_upgrade", Int]() == 1:
+            # WebSocket upgrade (RFC 6455, ADR-0006): the C protocol layer (ws.c)
+            # does the 101 handshake + a minimal echo frame loop (text/binary
+            # echo, ping->pong, close->close). The session owns the connection
+            # until it ends; it is always closed afterwards (no keep-alive).
+            var ws_key = span_to_str(
+                external_call["get_ws_key_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+            _ = external_call["ws_upgrade_and_echo", Int](cfd, ws_key.as_c_string_slice())
+            var duration_ms = mw_timing(mw_chain, start_ms)
+            mw_logging(mw_chain, req_id, method, path, query, "101 Switching Protocols", duration_ms)
+            external_call["conn_done", NoneType](cfd, False)
         else:
             # Handle HEAD method (same as GET but no body)
             var is_head = method == "HEAD"

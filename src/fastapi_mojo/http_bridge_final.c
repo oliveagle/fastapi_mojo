@@ -533,6 +533,31 @@ static int has_header_name_ci(const char *hdr, size_t hlen, const char *name) {
     return 0;
 }
 
+// Case-insensitive header value extraction: copies the trimmed value of the
+// first `name: value` line into out (NUL-terminated). Returns 1 if found.
+static int get_header_value_ci(const char *hdr, size_t hlen, const char *name,
+                               char *out, size_t outsz) {
+    size_t nlen = strlen(name);
+    if (nlen == 0 || nlen > hlen || outsz == 0) return 0;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        if (i > 0 && hdr[i - 1] != '\n') continue;
+        if (strncasecmp(hdr + i, name, nlen) != 0) continue;
+        size_t j = i + nlen;
+        while (j < hlen && (hdr[j] == ' ' || hdr[j] == '\t')) j++;
+        if (j >= hlen || hdr[j] != ':') continue;
+        j++;
+        while (j < hlen && (hdr[j] == ' ' || hdr[j] == '\t')) j++;
+        size_t k = j;
+        while (k < hlen && hdr[k] != '\r' && hdr[k] != '\n') k++;
+        size_t vlen = k - j;
+        if (vlen >= outsz) vlen = outsz - 1;
+        memcpy(out, hdr + j, vlen);
+        out[vlen] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
 // Directive scan of the Connection header value:
 // returns 1 if "close" is present, 2 if "keep-alive" is present (close wins),
 // 0 if the header is absent or carries other directives only.
@@ -963,6 +988,39 @@ fmc_slice get_body_slice(void) {
     struct conn *c = g_active_conn;
     if (!c || !c->body) return (fmc_slice){ "", 0 };
     return (fmc_slice){ c->body, (long)c->body_got };
+}
+
+// ---------- WebSocket upgrade detection (ADR-0006) ----------
+// The protocol (handshake + frame loop) lives in ws.c; this file only
+// inspects the already-parsed request headers of the active connection.
+static char g_ws_key[256];
+
+// 1 if the active request is a valid RFC 6455 upgrade: GET method +
+// `Upgrade: websocket` + Connection value contains "upgrade" + a non-empty
+// `Sec-WebSocket-Key`. (Sec-WebSocket-Version not enforced: minimal endpoint.)
+int is_ws_upgrade(void) {
+    struct conn *c = g_active_conn;
+    if (!c || !c->in_use) return 0;
+    if (strcmp(g_method, "GET") != 0) return 0;
+    int hdr_end = find_header_end(c->hdr, c->hdr_total);
+    if (hdr_end < 0) return 0;
+    char val[256];
+    if (!get_header_value_ci(c->hdr, (size_t)hdr_end, "Upgrade", val, sizeof val)) return 0;
+    if (strcasecmp(val, "websocket") != 0) return 0;
+    if (!get_header_value_ci(c->hdr, (size_t)hdr_end, "Connection", val, sizeof val)) return 0;
+    size_t vlen = strlen(val);
+    int has_upgrade = 0;
+    for (size_t i = 0; i + 7 <= vlen; i++)
+        if (strncasecmp(val + i, "upgrade", 7) == 0) { has_upgrade = 1; break; }
+    if (!has_upgrade) return 0;
+    if (!get_header_value_ci(c->hdr, (size_t)hdr_end, "Sec-WebSocket-Key", g_ws_key, sizeof g_ws_key))
+        return 0;
+    if (g_ws_key[0] == '\0') return 0;
+    return 1;
+}
+
+fmc_slice get_ws_key_slice(void) {
+    return (fmc_slice){ g_ws_key, (long)strlen(g_ws_key) };
 }
 
 
