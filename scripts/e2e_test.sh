@@ -499,7 +499,150 @@ check_ws M3 "WS fragmented message reassembly"
 check_ws M4 "WS large binary echo (76800B, 64-bit length)"
 check_ws M5 "WS ping -> pong"
 check_ws M6 "WS close frame echo"
+
+# ADR-0007 enhancements: multiple endpoints, subprotocol negotiation,
+# server keepalive pings, close-code validation (1002/1007). One connection
+# at a time (single-threaded dispatch, ADR-0006 known limitation).
+WS2_OUT="$(python3 - "$PORT" 2>&1 <<'PY2'
+import os, socket, struct, sys, time
+port = int(sys.argv[1])
+KEY = "dGhlIHNhbXBsZSBub25jZQ=="
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        c = s.recv(n - len(buf))
+        if not c: raise ConnectionError("EOF")
+        buf += c
+    return buf
+
+def send_frame(s, op, payload, fin=True):
+    h = bytearray([(0x80 if fin else 0) | op])
+    m = os.urandom(4)
+    n = len(payload)
+    if n < 126: h.append(0x80 | n)
+    elif n <= 0xFFFF: h += bytes([0x80 | 126]) + struct.pack(">H", n)
+    else: h += bytes([0x80 | 127]) + struct.pack(">Q", n)
+    h += m
+    s.sendall(bytes(h) + bytes(b ^ m[i % 4] for i, b in enumerate(payload)))
+
+def recv_frame(s):
+    h = recv_exact(s, 2)
+    fin, op, n = (h[0] & 0x80) != 0, h[0] & 0x0F, h[1] & 0x7F
+    if n == 126: n = struct.unpack(">H", recv_exact(s, 2))[0]
+    elif n == 127: n = struct.unpack(">Q", recv_exact(s, 8))[0]
+    m = recv_exact(s, 4) if h[1] & 0x80 else None
+    p = recv_exact(s, n) if n else b""
+    if m: p = bytes(b ^ m[i % 4] for i, b in enumerate(p))
+    return fin, op, p
+
+def connect(path, extra=""):
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    s.sendall((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+               f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+               f"Sec-WebSocket-Key: {KEY}\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n").encode())
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        c = s.recv(4096)
+        if not c: raise ConnectionError("EOF")
+        resp += c
+    status = resp.split(b"\r\n")[0].decode()
+    hdrs = {}
+    for line in resp.decode(errors="replace").split("\r\n")[1:]:
+        if ": " in line:
+            k, v = line.split(": ", 1); hdrs[k.lower()] = v
+    return s, status, hdrs
+
+def close_ws(s):
+    try:
+        send_frame(s, 0x8, struct.pack(">H", 1000))
+        recv_frame(s)
+    except Exception:
+        pass
+    s.close()
+
+# M7: subprotocol negotiation — /ws/chat requires "chat"
+s, status, hdrs = connect("/ws/chat", "Sec-WebSocket-Protocol: chat\r\n")
+assert status == "HTTP/1.1 101 Switching Protocols", status
+assert hdrs.get("sec-websocket-protocol") == "chat", hdrs
+send_frame(s, 0x1, b"hi chat")
+f, o, p = recv_frame(s)
+assert f and o == 0x1 and p == b"hi chat", (o, p)
+close_ws(s)
+print("M7")
+
+# M8: /ws/chat without the required subprotocol -> 400 (not 101)
+s, status, _ = connect("/ws/chat")
+assert status == "HTTP/1.1 400 Bad Request", status
+s.close()
+print("M8")
+
+# M9: stateful endpoint /ws/counter (running sum per connection)
+s, status, _ = connect("/ws/counter")
+assert status == "HTTP/1.1 101 Switching Protocols", status
+for num, expected in (("1", "sum=1"), ("2", "sum=3"), ("3", "sum=6")):
+    send_frame(s, 0x1, num.encode())
+    f, o, p = recv_frame(s)
+    assert f and o == 0x1 and p == expected.encode(), (num, o, p)
+close_ws(s)
+print("M9")
+
+# M10: server keepalive ping on idle (e2e server runs RECV_TIMEOUT=2s)
+s, status, _ = connect("/ws")
+assert status.startswith("HTTP/1.1 101"), status
+t0 = time.time()
+f, o, p = recv_frame(s)
+assert o == 0x9 and p == b"", (o, p)          # server ping, empty payload
+assert time.time() - t0 >= 1.5, "ping too early"
+send_frame(s, 0xA, b"")                       # pong proves liveness, resets counter
+t0 = time.time()
+f, o, p = recv_frame(s)
+assert o == 0x9, o                            # 2nd ping after another idle window
+close_ws(s)
+print("M10")
+
+# M11: invalid close code (1005 is reserved, must not be in a payload) -> 1002
+s, status, _ = connect("/ws")
+send_frame(s, 0x8, struct.pack(">H", 1005))
+f, o, p = recv_frame(s)
+assert o == 0x8 and len(p) >= 2, (o, p)
+assert struct.unpack(">H", p[:2])[0] == 1002, p[:2]
+s.close()
+print("M11")
+
+# M12: invalid UTF-8 in a text frame -> close 1007 (RFC 6455 5.6)
+s, status, _ = connect("/ws")
+send_frame(s, 0x1, b"\xff\xfe")
+f, o, p = recv_frame(s)
+assert o == 0x8 and len(p) >= 2, (o, p)
+assert struct.unpack(">H", p[:2])[0] == 1007, p[:2]
+s.close()
+print("M12")
+
+# M13: valid close code + reason is echoed back (4000 "bye")
+s, status, _ = connect("/ws")
+send_frame(s, 0x8, struct.pack(">H", 4000) + b"bye")
+f, o, p = recv_frame(s)
+assert o == 0x8 and p[:5] == struct.pack(">H", 4000) + b"bye", p
+s.close()
+print("M13")
+PY2
+)"
+
+check_ws2() { # marker name
+    local m=$1 name=$2
+    if echo "$WS2_OUT" | grep -q "$m"; then pass "$name"
+    else fail "$name" "$(echo "$WS2_OUT" | tail -2 | tr '\n' ' ')"; fi
+}
+check_ws2 M7 "WS subprotocol negotiation (101 + Sec-WebSocket-Protocol: chat)"
+check_ws2 M8 "WS missing required subprotocol -> 400"
+check_ws2 M9 "WS stateful endpoint /ws/counter (running sum)"
+check_ws2 M10 "WS server keepalive ping on idle (+ pong reset)"
+check_ws2 M11 "WS invalid close code -> 1002"
+check_ws2 M12 "WS invalid UTF-8 text -> close 1007"
+check_ws2 M13 "WS close code + reason echo"
 expect_code "GET /ws without Upgrade header -> 404" 404 "$BASE/ws"
+expect_code "WS upgrade to non-WS path -> 404" 404 "$BASE/nowhere"
 
 
 # --- Slowloris guard -----------------------------------------------------------

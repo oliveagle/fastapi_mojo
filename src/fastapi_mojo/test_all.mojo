@@ -4,10 +4,11 @@
 
 from json import json_serialize, json_serialize_dict, json_escape
 from router import Router, RouteMatch
-from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER, run_ws_message
 from params_query import parse_path_params, parse_query_params, ParsedParams, url_decode
 from params_json import parse_body_json
-from string_builder import decode_utf8_bytes, StringBuilder, span_to_str
+from string_builder import decode_utf8_bytes, StringBuilder, span_to_str, trim_spaces
+from ws_session import ws_select_subprotocol
 
 
 def test_json() raises:
@@ -292,6 +293,71 @@ def test_framework() raises:
     print("Framework tests passed!")
 
 
+def test_ws() raises:
+    """WebSocket 增强 (ADR-0007): 子协议协商 / WS 消息分派 / WS 路由."""
+    print("=== WS Tests ===")
+
+    # trim_spaces
+    assert trim_spaces("  a  ") == "a", "trim both"
+    assert trim_spaces("a") == "a", "trim none"
+    assert trim_spaces("   ") == "", "trim all"
+    assert trim_spaces("") == "", "trim empty"
+
+    # 子协议协商
+    var s1 = ws_select_subprotocol("", "anything")
+    assert s1[0] and s1[1] == "", "no required -> ok, empty"
+    var s2 = ws_select_subprotocol("chat", "chat")
+    assert s2[0] and s2[1] == "chat", "exact offer"
+    var s3 = ws_select_subprotocol("chat", "other, chat ,x")
+    assert s3[0] and s3[1] == "chat", "offer list with spaces"
+    var s4 = ws_select_subprotocol("chat", "")
+    assert not s4[0], "required but no offer"
+    var s5 = ws_select_subprotocol("chat", "other")
+    assert not s5[0], "required not in offer"
+    var s6 = ws_select_subprotocol("chat", "chatchat")
+    assert not s6[0], "substring is not a match"
+
+    # run_ws_message: echo
+    var he = Handler(KIND_WS_ECHO(), "ws_echo")
+    var e1 = run_ws_message(he, 1, "hello", 0)
+    assert e1[0] == 1 and e1[1] == "hello" and e1[2] == 0, "echo reply"
+
+    # run_ws_message: counter (stateful)
+    var hc = Handler(KIND_WS_COUNTER(), "ws_counter")
+    var c1 = run_ws_message(hc, 1, "5", 0)
+    assert c1[0] == 1 and c1[1] == "sum=5" and c1[2] == 5, "counter 5"
+    var c2 = run_ws_message(hc, 1, "3", c1[2])
+    assert c2[1] == "sum=8" and c2[2] == 8, "counter cumulative"
+    var c3 = run_ws_message(hc, 1, "abc", 8)
+    assert c3[1] == "error: expected an integer" and c3[2] == 8, "counter invalid"
+    var c4 = run_ws_message(hc, 1, "123456789012345678901", 0)
+    assert c4[1] == "error: expected an integer", "counter overflow"
+    var c5 = run_ws_message(hc, 1, "", 8)
+    assert c5[1] == "sum=8" and c5[2] == 8, "counter empty = 0"
+
+    # 未知 WS kind -> 不回复
+    var hq = Handler(999, "bogus")
+    var q1 = run_ws_message(hq, 1, "x", 0)
+    assert q1[0] == 0 and q1[1] == "", "unknown kind no reply"
+
+    # WS 路由 (精确匹配)
+    var router = Router()
+    var hws = Handler(KIND_WS_ECHO(), "ws_echo")
+    var hchat = Handler(KIND_WS_ECHO(), "ws_chat")
+    hchat.set_data("ws_sp", "chat")
+    router.add_ws_route("/ws", hws)
+    router.add_ws_route("/ws/chat", hchat)
+    assert router.ws_route_count() == 2, "ws count"
+    var m1 = router.match_ws_route("/ws")
+    assert m1.matched and m1.handler.name == "ws_echo", "ws match"
+    var m2 = router.match_ws_route("/ws/chat")
+    assert m2.matched and m2.handler.data["ws_sp"] == "chat", "ws chat match"
+    var m3 = router.match_ws_route("/ws/")
+    assert not m3.matched, "ws no trailing slash match"
+
+    print("WS tests passed!")
+
+
 def main() raises:
     print("Running all tests...")
     test_json()
@@ -300,7 +366,7 @@ def main() raises:
     test_string_builder()
     print("")
     test_span_to_str()
-
+    test_ws()
     test_framework()
 
 
