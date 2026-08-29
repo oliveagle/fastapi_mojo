@@ -91,22 +91,25 @@ struct Route:
 
 
 struct WsRouteMatch:
-    """WS 路由匹配结果 (ADR-0007)."""
+    """WS 路由匹配结果 (ADR-0007; {param} 参数 ADR-0009)."""
     var matched: Bool
+    var params: Dict[String, String]
     var handler: Handler
 
-    def __init__(out self, matched: Bool, handler: Handler):
+    def __init__(out self, matched: Bool, params: Dict[String, String], handler: Handler):
         self.matched = matched
+        self.params = params.copy()
         self.handler = handler.copy()
 
     def __init__(out self):
         self.matched = False
+        self.params = Dict[String, String]()
         self.handler = Handler(KIND_ECHO(), "")
 
 
 struct WsRoute:
     """WS 端点 (path + Handler, ADR-0007: user code = data, 同 HTTP 路由模式).
-    v1: 精确 path 匹配 (WS 不支持 {param} pattern, 需新 ADR)."""
+    ADR-0009: 支持 {param} segment pattern (与 HTTP Route 同语义)."""
     var path: String
     var handler: Handler
 
@@ -114,8 +117,24 @@ struct WsRoute:
         self.path = path
         self.handler = handler.copy()
 
+    def match_with_params(self, path: String) -> WsRouteMatch:
+        """segment pattern 匹配 + 参数提取 ({param} 段, 与 HTTP Route 同语义)."""
+        var path_parts = path.split("/")
+        var pattern_parts = self.path.split("/")
+        if len(path_parts) != len(pattern_parts):
+            return WsRouteMatch()
+        var params = Dict[String, String]()
+        for i in range(len(pattern_parts)):
+            var pp = pattern_parts[i]
+            var ap = String(path_parts[i])
+            if pp.startswith("{") and pp.endswith("}"):
+                params[String(pp[byte=1 : pp.byte_length() - 1])] = ap
+            elif pp != ap:
+                return WsRouteMatch()
+        return WsRouteMatch(True, params, self.handler)
+
     def match(self, path: String) -> Bool:
-        return self.path == path
+        return self.match_with_params(path).matched
 
 
 struct Router:
@@ -165,10 +184,11 @@ struct Router:
         self.ws_routes.append(WsRoute(path, handler))
 
     def match_ws_route(self, path: String) -> WsRouteMatch:
-        """按精确 path 匹配 WS 端点."""
+        """匹配 WS 端点 (精确 + {param} pattern, ADR-0009)."""
         for i in range(len(self.ws_routes)):
-            if self.ws_routes[i].match(path):
-                return WsRouteMatch(True, self.ws_routes[i].handler)
+            var m = self.ws_routes[i].match_with_params(path)
+            if m.matched:
+                return m^
         return WsRouteMatch()
 
     def ws_route_count(self) -> Int:
@@ -255,5 +275,17 @@ def main() raises:
     assert not wm3.matched, "ws no match"
     if wm.matched and wm2.matched and not wm3.matched:
         print("OK: ws routes (exact match + handler data)")
+
+    # WS {param} pattern (ADR-0009): 与 HTTP Route 同 segment 语义
+    var ws_g = Handler(KIND_WS_ECHO(), "ws_greet")
+    router.add_ws_route("/ws/greet/{name}", ws_g)
+    var wp = router.match_ws_route("/ws/greet/Alice")
+    assert wp.matched and wp.params["name"] == "Alice", "ws pattern params"
+    var wp2 = router.match_ws_route("/ws/greet")
+    assert not wp2.matched, "ws pattern segment count"
+    var wp3 = router.match_ws_route("/ws/greet/a/b")
+    assert not wp3.matched, "ws pattern too deep"
+    if wp.matched and not wp2.matched and not wp3.matched:
+        print("OK: ws routes (pattern + params)")
 
     print("Mojo router pattern matching test completed!")

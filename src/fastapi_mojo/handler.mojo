@@ -56,6 +56,12 @@ def KIND_WS_COUNTER() -> Int:
     return 101
 
 
+def KIND_WS_GREET() -> Int:
+    """WS 问候 (ADR-0009 {param} 路由演示): 回复 "hello {name}: {msg}",
+    name 来自路由 {name} 参数 (缺失 -> world)."""
+    return 102
+
+
 # ---------- Handler 类型 ----------
 
 struct Handler:
@@ -207,11 +213,13 @@ def run_handler(handler: Handler,
 
 # ---------- WS 单点 dispatch 扩展点 (ADR-0007, 镜像 run_handler) ----------
 
-def run_ws_message(handler: Handler, opcode: Int, msg: String, state: Int) -> Tuple[Int, String, Int]:
+def run_ws_message(handler: Handler, opcode: Int, msg: String, state: Int,
+                   params: Dict[String, String]) raises -> Tuple[Int, String, Int]:
     """WS 消息分派 — 全项目唯一"认识 WS kind"的地方.
     返回 (reply_opcode, reply_text, new_state); reply_opcode 0 = 不回复.
     opcode: 1 = text (binary 帧由会话层在到达本函数前处理).
     state: 连接级整型状态 (如计数器累计值), 会话循环持有.
+    params: 路由 {param} 参数 (ADR-0009; 无参数路由传空 Dict).
     新增 WS 行为 = 加一个 KIND_WS_x() 常量 + 这里加一个 elif (显式扩展点).
     """
     if handler.kind == KIND_WS_ECHO():
@@ -235,6 +243,12 @@ def run_ws_message(handler: Handler, opcode: Int, msg: String, state: Int) -> Tu
         if not ok:
             return (1, "error: expected an integer", state)
         return (1, "sum=" + String(state + v), state + v)
+
+    elif handler.kind == KIND_WS_GREET():
+        var name = "world"
+        if "name" in params:
+            name = params["name"]
+        return (1, "hello " + name + ": " + msg, state)
 
     else:
         return (0, "", state)

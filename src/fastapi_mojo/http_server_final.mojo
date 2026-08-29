@@ -8,7 +8,7 @@
 from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
-from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET
 from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
@@ -107,6 +107,14 @@ def register_routes(mut router: Router) raises:
     ws_chat_h.set_data("ws_sp", "chat")  # 客户端必须提供 Sec-WebSocket-Protocol: chat
     router.add_ws_route("/ws/chat", ws_chat_h)
 
+    # ADR-0009: {param} 路由 + 鉴权 (升级 query token)
+    router.add_ws_route("/ws/greet/{name}", Handler(KIND_WS_GREET(), "ws_greet"))
+    router.add_ws_route("/ws/room/{room}", Handler(KIND_WS_ECHO(), "ws_room"))
+
+    var ws_private_h = Handler(KIND_WS_ECHO(), "ws_private")
+    ws_private_h.set_data("ws_token", "secret")  # 升级 query 必须带 token=secret
+    router.add_ws_route("/ws/private", ws_private_h)
+
 
 def main() raises:
     print("=== Mojo HTTP Server v1.8 ===")
@@ -175,9 +183,10 @@ def main() raises:
                 var ws_st = 0
                 if cfd in ws_state:
                     ws_st = ws_state[cfd]
-                ws_st = handle_ws_data(cfd, ws_match.handler, ws_op, ws_st)
+                ws_st = handle_ws_data(cfd, ws_match.handler, ws_match.params, ws_op, ws_st)
                 ws_state[cfd] = ws_st
             external_call["ws_message_done", NoneType](cfd)
+            external_call["ws_pump_now", NoneType](cfd)  # 尾块/新帧立即处理 (不等 poll)
             continue
         if ws_ev == 2:
             # WS 会话结束 (close/EOF/保活耗尽): 清理连接级状态
@@ -218,7 +227,9 @@ def main() raises:
                     mw_logging(mw_chain, req_id, method, path, query, "101 Switching Protocols", duration_ms)
                     continue
                 var ws_sl = "400 Bad Request"
-                if ws_status == 500:
+                if ws_status == 403:
+                    ws_sl = "403 Forbidden"
+                elif ws_status == 500:
                     ws_sl = "500 Internal Server Error"
                 mw_logging(mw_chain, req_id, method, path, query, ws_sl, duration_ms)
                 external_call["conn_done", NoneType](cfd, False)
