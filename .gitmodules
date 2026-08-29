@@ -1,3 +1,0 @@
-[submodule "fastapi"]
-	path = fastapi
-	url = https://github.com/fastapi/fastapi.git
