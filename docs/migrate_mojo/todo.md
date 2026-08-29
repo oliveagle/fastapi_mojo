@@ -1,5 +1,8 @@
 # Mojo 替换 Python — 决策与任务清单
 
+> ⚠️ **历史文档（bootstrap 时代）**：本文档记录 Phase 0（Mojo wrapper 调 Python FastAPI）的迁移过程，其中 orjson / .venv / C5 阻塞等结论已被后续 ADR 推翻并替换。
+> **权威现状以 `AGENTS.md`（§2 阶段定位 / §6 决议链）与 `docs/adr/`（ADR-0001~0005）为准**；本文仅作为迁移过程的历史参考，请勿据此判断当前实现。
+
 > 权威决议链：本文档（完整内容）← `docs/adr/`（ADR 文件）← `docs/migrate_mojo/architecture.md` §10 决策表（索引）。
 > 分类：✅ 已决策 / 🚧 改造 / 📋 待开发 / 💬 待讨论
 
