@@ -1,0 +1,120 @@
+# fastapi_mojo — CI：守护 North Star（单一 Binary 零依赖）
+#
+# 本工作流是「单一 binary 零运行期依赖」这一项目本标的自动化门禁：
+#   1. 构建单一 binary（./build_single.sh）
+#   2. ldd 断言：仅 libc + 内核组件（禁 libstdc++/libgcc_s/libm/Python/运行时 .so）
+#   3. 干净环境（env -i）启动断言：无 Python / 无 LD_LIBRARY_PATH 即可服务
+#   4. 单元测试（各 .mojo 自检）
+#   5. e2e 集成测试（scripts/e2e_test.sh，56 项检查，CI 可重复）
+#
+# 依赖：mojo 1.0.0（pip install modular）、gcc、binutils、curl
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支只保留最新一次 CI；取消被取代的运行
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  single-binary:
+    name: Build single binary + verify deps + unit + e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # fastapi/ 是 bootstrap 时代的源码参考 submodule，非运行期依赖，不检出
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ binutils curl
+
+      - name: Install Mojo (modular)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install modular
+
+      - name: Verify toolchain
+        run: |
+          set -e
+          mojo --version
+          gcc --version | head -1
+          objcopy --version | head -1
+          curl --version | head -1
+          python -c "import modular, os; print('modular lib:', os.path.join(os.path.dirname(modular.__file__), 'lib'))"
+
+      # 确定性地导出 MODULAR_LIB，供 build_single.sh 使用（其自动定位的兜底之外的首选）
+      - name: Export MODULAR_LIB
+        run: |
+          MODLIB="$(python -c 'import modular, os; print(os.path.join(os.path.dirname(modular.__file__), "lib"))')"
+          echo "MODULAR_LIB=$MODLIB" >> "$GITHUB_ENV"
+          ls -1 "$MODLIB"
+
+      - name: Build single binary
+        run: ./build_single.sh
+
+      # North Star 门禁：单一 binary 仅依赖 libc + 内核组件
+      - name: Verify North Star — no forbidden runtime deps (ldd)
+        run: |
+          set -e
+          out="$(ldd build/fastapi_mojo)"
+          echo "$out"
+          if echo "$out" | grep -Eiq 'libstdc\+\+|libgcc_s|libm\.so|python|KGEN|MSupport|AsyncRT|modular'; then
+            echo "FAIL: 检测到禁止的运行期依赖（违反 AGENTS.md §1 零依赖本标）"
+            exit 1
+          fi
+          echo "$out" | grep -q 'libc\.so' || { echo "FAIL: libc 缺失（异常）"; exit 1; }
+          echo "PASS: 单一 binary 仅依赖 libc + 内核组件（vdso/ld-linux）"
+
+      # North Star 门禁：干净环境（env -i）直接起服务 — 无 Python、无 LD_LIBRARY_PATH
+      - name: Verify clean-env startup (env -i)
+        run: |
+          set -e
+          BIN="$(pwd)/build/fastapi_mojo"
+          PORT=8765
+          env -i "$BIN" --port "$PORT" > /tmp/clean_env.log 2>&1 &
+          PID=$!
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -s -m 2 "http://127.0.0.1:$PORT/health" | grep -q '"status": "healthy"'; then
+              ok=1; break
+            fi
+            sleep 0.5
+          done
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          if [[ "$ok" != "1" ]]; then
+            echo "FAIL: 干净环境（env -i）启动未响应"
+            cat /tmp/clean_env.log
+            exit 1
+          fi
+          echo "PASS: env -i 干净环境直接起服务（零 Python / 零 LD_LIBRARY_PATH）"
+
+      - name: Run unit tests
+        run: |
+          set -e
+          cd src/fastapi_mojo
+          for f in json params_query params_json router string_builder test_all; do
+            echo "=== mojo run $f.mojo ==="
+            mojo run "$f.mojo"
+          done
+          echo "PASS: all unit tests"
+
+      - name: Run e2e suite (56 checks, CI-repeatable)
+        run: ./scripts/e2e_test.sh
