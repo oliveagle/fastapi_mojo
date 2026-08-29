@@ -641,6 +641,123 @@ check_ws2 M10 "WS server keepalive ping on idle (+ pong reset)"
 check_ws2 M11 "WS invalid close code -> 1002"
 check_ws2 M12 "WS invalid UTF-8 text -> close 1007"
 check_ws2 M13 "WS close code + reason echo"
+
+# ADR-0008: 高并发 WS — poll 循环驱动, 会话不再阻塞 dispatch。
+WS3_OUT="$(python3 - "$PORT" 2>&1 <<'PY3'
+import socket, struct, sys, threading, time
+port = int(sys.argv[1])
+KEY = "dGhlIHNhbXBsZSBub25jZQ=="
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        c = s.recv(n - len(buf))
+        if not c: raise ConnectionError("EOF")
+        buf += c
+    return buf
+
+def send_frame(s, op, payload, fin=True):
+    h = bytearray([(0x80 if fin else 0) | op])
+    m = __import__("os").urandom(4)
+    n = len(payload)
+    if n < 126: h.append(0x80 | n)
+    elif n <= 0xFFFF: h += bytes([0x80 | 126]) + struct.pack(">H", n)
+    else: h += bytes([0x80 | 127]) + struct.pack(">Q", n)
+    h += m
+    s.sendall(bytes(h) + bytes(b ^ m[i % 4] for i, b in enumerate(payload)))
+
+def recv_frame(s):
+    h = recv_exact(s, 2)
+    fin, op, n = (h[0] & 0x80) != 0, h[0] & 0x0F, h[1] & 0x7F
+    if n == 126: n = struct.unpack(">H", recv_exact(s, 2))[0]
+    elif n == 127: n = struct.unpack(">Q", recv_exact(s, 8))[0]
+    m = recv_exact(s, 4) if h[1] & 0x80 else None
+    p = recv_exact(s, n) if n else b""
+    if m: p = bytes(b ^ m[i % 4] for i, b in enumerate(p))
+    return fin, op, p
+
+def connect(path):
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    s.sendall((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+               f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+               f"Sec-WebSocket-Key: {KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        c = s.recv(4096)
+        if not c: raise ConnectionError("EOF")
+        resp += c
+    return s, resp.split(b"\r\n")[0].decode()
+
+def close_ws(s):
+    try:
+        send_frame(s, 0x8, struct.pack(">H", 1000))
+        recv_frame(s)
+    except Exception:
+        pass
+    s.close()
+
+# M14: 10 个并发 WS 会话 (线程), 各自完成 echo 往返
+results = []
+def worker(i):
+    try:
+        s, status = connect("/ws")
+        assert status.startswith("HTTP/1.1 101"), status
+        send_frame(s, 0x1, ("msg-%d" % i).encode())
+        f, o, p = recv_frame(s)
+        assert o == 0x1 and p == ("msg-%d" % i).encode(), (o, p)
+        close_ws(s)
+        results.append(1)
+    except Exception:
+        results.append(0)
+threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+t0 = time.time()
+for t in threads: t.start()
+for t in threads: t.join(timeout=30)
+assert len([x for x in results if x == 1]) == 10, results
+print("M14")
+
+# M15: 3 个 WS 会话空闲时, HTTP 探针必须 <1s 完成 (ADR-0008 核心回归:
+# 旧设计中 WS 会话阻塞 dispatch, 探针要等 2s 级空闲超时)
+idle = []
+for i in range(3):
+    s, status = connect("/ws")
+    assert status.startswith("HTTP/1.1 101"), status
+    idle.append(s)
+t0 = time.time()
+probe = socket.create_connection(("127.0.0.1", port), timeout=8)
+probe.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+resp = b""
+while b"\r\n\r\n" not in resp:
+    c = probe.recv(4096)
+    if not c: break
+    resp += c
+dt = time.time() - t0
+assert resp.startswith(b"HTTP/1.1 200"), resp[:40]
+assert dt < 1.0, f"probe took {dt:.2f}s"
+probe.close()
+for s in idle: close_ws(s)
+print("M15")
+
+# M16: 每连接 state 隔离 — 两个 counter 会话交替消息, 累计互不干扰
+sa, _ = connect("/ws/counter")
+sb, _ = connect("/ws/counter")
+send_frame(sa, 0x1, b"1"); f, o, p = recv_frame(sa); assert p == b"sum=1", p
+send_frame(sb, 0x1, b"5"); f, o, p = recv_frame(sb); assert p == b"sum=5", p
+send_frame(sa, 0x1, b"2"); f, o, p = recv_frame(sa); assert p == b"sum=3", p
+send_frame(sb, 0x1, b"7"); f, o, p = recv_frame(sb); assert p == b"sum=12", p
+close_ws(sa); close_ws(sb)
+print("M16")
+PY3
+)"
+
+check_ws3() { # marker name
+    local m=$1 name=$2
+    if echo "$WS3_OUT" | grep -q "$m"; then pass "$name"
+    else fail "$name" "$(echo "$WS3_OUT" | tail -2 | tr '\n' ' ')"; fi
+}
+check_ws3 M14 "WS 10 并发会话 (各自 echo 往返成功)"
+check_ws3 M15 "WS 空闲会话下 HTTP 探针 <1s (不阻塞 dispatch)"
+check_ws3 M16 "WS 每连接 state 隔离 (两 counter 交替)"
 expect_code "GET /ws without Upgrade header -> 404" 404 "$BASE/ws"
 expect_code "WS upgrade to non-WS path -> 404" 404 "$BASE/nowhere"
 
