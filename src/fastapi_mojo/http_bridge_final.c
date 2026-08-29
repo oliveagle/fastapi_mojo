@@ -90,8 +90,35 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <ctype.h>
+
+// ws.c 协议原语 (显式 bridge, ADR-0006/0007/0008)
+#define WS_MAX_MSG (1024 * 1024)
+// NOTE: 布局必须与 ws.c 的 ws_parser_t 完全一致 (逐字段镜像)
+typedef struct {
+    int stage;
+    int fin, opcode, masked;
+    unsigned char ext[8];
+    int ext_need, ext_got;
+    uint64_t flen;
+    unsigned char mask[4];
+    int mask_got;
+    uint64_t pgot;
+    int in_msg;
+    int msg_opcode;
+    size_t reasm_len;
+} ws_parser_t;
+extern void ws_parser_init(ws_parser_t *p);
+extern int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
+                          int *opcode, size_t *melen, unsigned char *reasm);
+extern int ws_handshake(int fd, const char *key, const char *subprotocol);
+extern int ws_write_message(int fd, int opcode, const unsigned char *payload, size_t plen);
+extern int ws_validate_utf8(const unsigned char *p, size_t n);
+extern int ws_reply_close_buf(int fd, const unsigned char *payload, size_t n);
+extern int ws_send_close(int fd, int code);
+extern int get_ws_ping_max(void);
 
 #define HDR_BUF_SIZE 16384      // request header buffer (first line + headers)
 #define MAX_METHOD 16
@@ -371,7 +398,8 @@ long create_bound_socket(int port) {
 struct conn {
     int in_use;
     int fd;
-    int phase;
+    int phase;  // 0=header 1=body 2=HTTP dispatch(Mojo busy)
+               // 3=WS session(poll 可驱动) 4=WS dispatch(Mojo 处理一条消息)
     char hdr[HDR_BUF_SIZE];
     int hdr_total;
     int cl;             // parsed Content-Length
@@ -381,6 +409,13 @@ struct conn {
     long last_active_ms; // last completed response (or accept time)
     long first_data_ms;  // first byte of the current request (0 = none)
     long last_data_ms;   // last byte of the current request (0 = none)
+    // WebSocket session (ADR-0008): per-conn 帧解析状态 + 待处理消息
+    char ws_path[MAX_PATH];        // upgrade 时的 path (Mojo 逐消息查 WS 路由)
+    unsigned char *ws_reasm;       // 惰性 malloc(WS_MAX_MSG+1); 消息载荷 (NUL 结尾)
+    ws_parser_t ws_par;            // 状态化帧解析器 (ws.c)
+    int ws_opcode;                 // 待处理数据帧的 opcode (1/2)
+    size_t ws_mlen;                // 待处理数据帧的长度
+    int ws_strikes;                // 保活: 自上次客户端数据以来的超时计数
 };
 
 static struct conn g_conns[MAX_CONNS];
@@ -418,6 +453,7 @@ static struct conn *alloc_conn(int fd) {
 static void close_conn(struct conn *c) {
     if (!c->in_use) return;
     if (c->body) { free(c->body); c->body = NULL; }
+    if (c->ws_reasm) { free(c->ws_reasm); c->ws_reasm = NULL; }
     if (c->fd >= 0) close(c->fd);
     if (g_active_conn == c) g_active_conn = NULL;
     c->in_use = 0;
@@ -776,7 +812,100 @@ static int finish_header(struct conn *c) {
 // Read available data from a connection and advance its state machine.
 // Returns 1 = a request is complete, 0 = still waiting, -1 = the connection
 // was closed (an error response was sent where appropriate).
+// ---------- WebSocket 事件队列 (ADR-0008) ----------
+// poll 循环在 WS 连接上发现"数据帧完成"或"会话结束"时入队; Mojo 在
+// recv_and_parse 返回处取队首 (FIFO, 天然处理 fd 复用的时序)。
+#define WS_EV_MAX 1024
+static int g_ws_ev_fd[WS_EV_MAX];
+static int g_ws_ev_type[WS_EV_MAX];  // 1 = 数据消息就绪, 2 = 会话结束
+static int g_ws_ev_head = 0, g_ws_ev_count = 0;
+static int g_ws_event_type = 0;     // 最近一次 recv_and_parse 返回的事件类型
+
+static void ws_event_push(int fd, int type) {
+    if (g_ws_ev_count >= WS_EV_MAX) return;  // 溢出丢弃 (连接保持, 极罕见)
+    int tail = (g_ws_ev_head + g_ws_ev_count) % WS_EV_MAX;
+    g_ws_ev_fd[tail] = fd;
+    g_ws_ev_type[tail] = type;
+    g_ws_ev_count++;
+}
+
+static int ws_event_pop(int *type) {
+    if (g_ws_ev_count == 0) return -1;
+    int fd = g_ws_ev_fd[g_ws_ev_head];
+    *type = g_ws_ev_type[g_ws_ev_head];
+    g_ws_ev_head = (g_ws_ev_head + 1) % WS_EV_MAX;
+    g_ws_ev_count--;
+    return fd;
+}
+
+// WS 连接 pump (phase 3): 非阻塞读 -> 帧解析器 -> 控制帧自动处理 (纯协议),
+// 数据帧入事件队列并置 phase 4 (Mojo 处理中, 本连接暂停 pump)。
+static int pump_ws_conn(struct conn *c) {
+    if (!c->ws_reasm) {
+        c->ws_reasm = (unsigned char *)malloc(WS_MAX_MSG + 1);
+        if (!c->ws_reasm) {
+            ws_event_push(c->fd, 2);
+            close_conn(c);
+            return -1;
+        }
+    }
+    for (;;) {
+        unsigned char buf[8192];
+        ssize_t n = recv(c->fd, buf, sizeof buf, MSG_DONTWAIT);
+        if (n <= 0) {
+            if (n == 0) {  // EOF
+                ws_event_push(c->fd, 2);
+                close_conn(c);
+                return -1;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            ws_event_push(c->fd, 2);
+            close_conn(c);
+            return -1;
+        }
+        c->last_data_ms = now_ms();
+        c->ws_strikes = 0;  // 任何客户端数据 (含 pong) 都是活性证明
+        int opcode = 0;
+        size_t mlen = 0;
+        int r = ws_parser_feed(&c->ws_par, buf, (size_t)n, &opcode, &mlen, c->ws_reasm);
+        if (r == -1) {  // 协议错误 -> close 1002
+            cdebug("ws parser ERROR fd=%d", c->fd);
+            ws_send_close(c->fd, 1002);
+            ws_event_push(c->fd, 2);
+            close_conn(c);
+            return -1;
+        }
+        if (r == 2) {  // 控制帧: 协议层自动处理
+            if (opcode == 9) {  // ping -> pong (同载荷)
+                (void)ws_write_message(c->fd, 10, c->ws_reasm, mlen);
+            } else if (opcode == 8) {  // close -> 码校验回复, 结束会话
+                (void)ws_reply_close_buf(c->fd, c->ws_reasm, mlen);
+                ws_event_push(c->fd, 2);
+                close_conn(c);
+                return -1;
+            }
+            // opcode 10 (pong): 活性已计入 (last_data_ms), 无动作
+        } else if (r == 1) {  // 数据消息 (text/binary)
+            if (opcode == 1 && !ws_validate_utf8(c->ws_reasm, mlen)) {
+                ws_send_close(c->fd, 1007);  // text 非法 UTF-8 (RFC 6455 §5.6)
+                ws_event_push(c->fd, 2);
+                close_conn(c);
+                return -1;
+            }
+            c->ws_opcode = opcode;
+            c->ws_mlen = mlen;
+            c->phase = 4;  // Mojo 逐条处理; 暂停本连接 pump
+            cdebug("ws msg fd=%d op=%d len=%zu", c->fd, opcode, mlen);
+            ws_event_push(c->fd, 1);
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static int pump_conn(struct conn *c) {
+    if (c->phase == 2 || c->phase == 4) return 0;  // Mojo 分派中: 不做 I/O
+    if (c->phase == 3) return pump_ws_conn(c);
     if (c->phase == 0) {
         // Header already complete (accumulated earlier, e.g. carried over)?
         if (find_header_end(c->hdr, c->hdr_total) >= 0)
@@ -844,7 +973,25 @@ static void check_deadlines(void) {
     long now = now_ms();
     for (int i = 0; i < MAX_CONNS; i++) {
         struct conn *c = &g_conns[i];
-        if (!c->in_use || c->phase == 2) continue;
+        if (!c->in_use) continue;
+        if (c->phase == 2 || c->phase == 4) continue;  // Mojo 分派中
+        if (c->phase == 3) {
+            // WS 保活 (ADR-0008): 空闲超 recv_timeout -> ping; 连续 ping_max
+            // 次无客户端数据 -> close 1000 + 结束会话 (ping_max=0 禁用保活,
+            // 首次空闲超时即 close)
+            if (c->last_data_ms != 0 && now - c->last_data_ms >= g_recv_timeout_ms) {
+                c->ws_strikes++;
+                cdebug("ws keepalive fd=%d strike=%d idle=%ldms", c->fd, c->ws_strikes, now - c->last_data_ms);
+                if (c->ws_strikes > get_ws_ping_max()) {
+                    ws_send_close(c->fd, 1000);
+                    ws_event_push(c->fd, 2);
+                    close_conn(c);
+                } else {
+                    (void)ws_write_message(c->fd, 9, (const unsigned char *)"", 0);
+                }
+            }
+            continue;
+        }
         if (c->first_data_ms != 0) {
             if (now - c->last_data_ms >= g_recv_timeout_ms ||
                 now - c->first_data_ms >= g_max_request_ms) {
@@ -867,6 +1014,20 @@ long recv_and_parse(void) {
 
     for (;;) {
         if (!g_running) return 0;
+
+        // WS 事件优先 (ADR-0008): FIFO 队首 = 最早就绪的消息/会话结束
+        int ev_type;
+        int ev_fd = ws_event_pop(&ev_type);
+        if (ev_fd >= 0) {
+            struct conn *c = find_conn(ev_fd);
+            g_ws_event_type = ev_type;
+            if (c) {
+                g_active_conn = c;  // payload/path 等 getter 按 active conn 读取
+                c->last_active_ms = now_ms();
+            }
+            cdebug("ws event fd=%d type=%d", ev_fd, ev_type);
+            return (long)ev_fd;
+        }
 
         int nfd = 0;
         pf[nfd].fd = (int)g_listen_fd;
@@ -912,6 +1073,7 @@ long recv_and_parse(void) {
                     if (r == 1) {
                         g_active_conn = c;
                         c->last_active_ms = now_ms();
+                        g_ws_event_type = 0;
                         cdebug("request ready fd=%d (first poll)", c->fd);
                         return c->fd;
                     }
@@ -933,6 +1095,7 @@ long recv_and_parse(void) {
                 if (r == 1) {
                     g_active_conn = c;
                     c->last_active_ms = now_ms();
+                    g_ws_event_type = 0;
                     cdebug("request ready fd=%d method_len=%d path_len=%d query_len=%d body_len=%d",
                            c->fd, g_method_len, g_path_len, g_query_len, c->body_got);
                     return c->fd;
@@ -951,6 +1114,7 @@ long recv_and_parse(void) {
 void conn_done(int fd, int reuse) {
     struct conn *c = find_conn(fd);
     if (!c) return;
+    if (c->phase == 3 || c->phase == 4) return;  // WS 会话: 生命周期归 poll 循环 (ADR-0008)
     if (c->body) { free(c->body); c->body = NULL; }
     c->body_got = 0;
     c->phase = 0;
@@ -1023,150 +1187,120 @@ fmc_slice get_ws_key_slice(void) {
     return (fmc_slice){ g_ws_key, (long)strlen(g_ws_key) };
 }
 
-// ---------- WebSocket session state + primitive wrappers (ADR-0007) ----------
-// The session loop (when to read/write, keepalive pings, termination) is
-// driven by Mojo (ws_session.mojo). These wrappers store the last message
-// payload read (the process is single-threaded and the bridge poll loop is
-// suspended for the duration of a WS session, so globals are safe) and
-// expose it via the same slice convention as get_body_slice().
-// ws.c protocol primitives (explicit bridge, ADR-0006/0007):
-extern int ws_handshake(int fd, const char *key, const char *subprotocol);
-extern int ws_read_message(int fd, int *opcode, unsigned char **payload, size_t *plen);
-extern int ws_write_message(int fd, int opcode, const unsigned char *payload, size_t plen);
-extern int ws_parse_close_code(const unsigned char *payload, size_t plen, int *code);
-extern int ws_validate_utf8(const unsigned char *p, size_t n);
+// ---------- WebSocket session (ADR-0008: poll 循环驱动) ----------
+// 会话生命周期归 bridge poll 循环: WS 连接 (phase 3) 与 HTTP 并发 pump;
+// 控制帧/保活/UTF-8 校验在 C 自动处理 (纯协议); 数据帧入事件队列, 由
+// Mojo 逐条分派 (phase 4, 单连接暂停 pump)。以下均为 Mojo 面向的显式入口。
 
-static unsigned char *g_ws_cur_payload;   // malloc'd by ws.c; released by ws_session_end
-static size_t g_ws_cur_payload_len;
-static int g_ws_cur_opcode;
-static char g_ws_protocol[256];
-
-// Raw client Sec-WebSocket-Protocol offer (empty when absent). Call after
-// is_ws_upgrade() succeeded (reads the active connection's parsed headers).
+// 客户端 Sec-WebSocket-Protocol 原始 offer (无则空)。在 is_ws_upgrade()
+// 之后调用 (读 active 连接已解析的头部)。
 fmc_slice get_ws_protocol_slice(void) {
     struct conn *c = g_active_conn;
-    g_ws_protocol[0] = '\0';
+    static char proto[256];
+    proto[0] = '\0';
     if (c && c->in_use) {
         int hdr_end = find_header_end(c->hdr, c->hdr_total);
         if (hdr_end >= 0)
             get_header_value_ci(c->hdr, (size_t)hdr_end, "Sec-WebSocket-Protocol",
-                                g_ws_protocol, sizeof g_ws_protocol);
+                                proto, sizeof proto);
     }
-    return (fmc_slice){ g_ws_protocol, (long)strlen(g_ws_protocol) };
+    return (fmc_slice){ proto, (long)strlen(proto) };
 }
 
-// 101 handshake on the active connection; key = g_ws_key (set by is_ws_upgrade).
-// subprotocol: Mojo-selected (empty slice = omit the header). 0 = ok.
+// active 连接上的 101 握手; key = g_ws_key (is_ws_upgrade 提取)。
+// subprotocol: Mojo 选中值 (空 = 省略头)。0 = ok, 1 = 失败 (无符号状态)。
 int ws_session_begin(const char *subprotocol) {
     struct conn *c = g_active_conn;
-    if (!c || !c->in_use) return -1;
-    int r = ws_handshake(c->fd, g_ws_key, subprotocol ? subprotocol : "");
-    if (r == 0) {
-        g_ws_cur_payload = NULL;
-        g_ws_cur_payload_len = 0;
-        g_ws_cur_opcode = -1;
-        return 0;
-    }
-    return 1;  // unsigned error status (see ws_session_read)
+    if (!c || !c->in_use) return 1;
+    return ws_handshake(c->fd, g_ws_key, subprotocol ? subprotocol : "") == 0 ? 0 : 1;
 }
 
-// Read one message into the session store.
-// MOJO-FACING STATUS (unsigned — C `int` return values are zero-extended
-// into Mojo's i64, so negative codes would look like huge positives):
-//   0 = ok; 1 = error/EOF/limit (end session);
-//   2 = idle timeout with no bytes consumed (safe to ping + retry).
-int ws_session_read(int fd) {
-    int op;
-    unsigned char *p;
-    size_t n;
-    int r = ws_read_message(fd, &op, &p, &n);
-    if (r != 0) return (r == -2) ? 2 : 1;
-    // CRITICAL (Mojo 1.0.0 FFI, 实测): a returned CStringSlice is consumed by
-    // Mojo as a NUL-terminated C string (only the pointer register is read;
-    // the length half is ignored — cf. get_body_slice & co). The ws.c payload
-    // is not NUL-terminated, so copy it into a (n+1) buffer here.
-    if (g_ws_cur_payload) free(g_ws_cur_payload);
-    unsigned char *q = (unsigned char *)malloc(n + 1);
-    if (!q) { free(p); return 1; }
-    if (n > 0) memcpy(q, p, n);
-    q[n] = '\0';
-    free(p);
-    g_ws_cur_payload = q;
-    g_ws_cur_payload_len = n;
-    g_ws_cur_opcode = op;
+// 移交: active 连接 (HTTP 请求已完整、101 已发) -> WS 会话 (phase 0 -> 3)。
+// 保存请求 path 供 Mojo 逐消息查 WS 路由。0 = ok。
+int ws_conn_upgrade(int fd) {
+    struct conn *c = find_conn(fd);
+    if (!c) return 1;
+    if (c->body) { free(c->body); c->body = NULL; }
+    c->body_got = 0;
+    c->hdr_total = 0;
+    c->first_data_ms = 0;
+    ws_parser_init(&c->ws_par);
+    c->ws_opcode = 0;
+    c->ws_mlen = 0;
+    c->ws_strikes = 0;
+    c->last_data_ms = now_ms();
+    c->last_active_ms = now_ms();
+    size_t pl = strlen(g_path);
+    if (pl > sizeof c->ws_path - 1) pl = sizeof c->ws_path - 1;
+    memcpy(c->ws_path, g_path, pl);
+    c->ws_path[pl] = 0;
+    c->phase = 3;
+    g_ws_event_type = 0;
     return 0;
 }
 
-// 0 = no message yet; otherwise the opcode of the stored message.
-int ws_last_opcode(void) { return g_ws_cur_opcode < 0 ? 0 : g_ws_cur_opcode; }
+// 最近一次 recv_and_parse 返回 fd 的事件类型:
+//   0 = HTTP 请求 (原语义); 1 = WS 数据消息 (opcode/payload 见下);
+//   2 = WS 会话结束 (Mojo 清理该 fd 的连接级状态)
+int ws_event_type(void) { return g_ws_event_type; }
 
+// WS 连接 upgrade 时的 path (消息事件时查 WS 路由用; NUL 结尾, FFI 约定)。
+fmc_slice get_ws_path_slice(void) {
+    struct conn *c = g_active_conn;
+    if (!c) return (fmc_slice){ "", 0 };
+    return (fmc_slice){ c->ws_path, (long)strlen(c->ws_path) };
+}
+
+// 待处理 WS 消息的 opcode (1=text 2=binary; 控制帧不经过 Mojo)。
+int ws_last_opcode(void) {
+    struct conn *c = g_active_conn;
+    return (c && c->phase == 4) ? c->ws_opcode : 0;
+}
+
+// 待处理 WS 消息载荷 (NUL 结尾, ADR-0007 §5 FFI 约定; phase 4 期间稳定)。
 fmc_slice ws_payload_slice(void) {
-    return (fmc_slice){ (const char *)g_ws_cur_payload, (long)g_ws_cur_payload_len };
+    struct conn *c = g_active_conn;
+    if (!c || c->phase != 4) return (fmc_slice){ "", 0 };
+    return (fmc_slice){ (const char *)c->ws_reasm, (long)c->ws_mlen };
 }
 
-// Reply to the stored close frame (RFC 6455 7.4.1): valid code -> echo the
-// received payload (code + reason, capped at 125 bytes per 5.5); empty
-// payload -> reply 1000; invalid code (reserved/out of range) -> 1002.
-int ws_reply_close(int fd) {
-    int code = 0;
-    int r = ws_parse_close_code(g_ws_cur_payload, g_ws_cur_payload_len, &code);
-    if (r == -1) {
-        unsigned char p[2] = { 0x03, 0xEA };  // 1002 Protocol error
-        return ws_write_message(fd, 8, p, 2);
-    }
-    if (r == 0) {
-        unsigned char p[2] = { 0x03, 0xE8 };  // 1000 Normal closure
-        return ws_write_message(fd, 8, p, 2);
-    }
-    size_t n = g_ws_cur_payload_len;
-    if (n > 125) n = 125;
-    return ws_write_message(fd, 8, g_ws_cur_payload, n);
+// 零拷贝: 把待处理消息载荷原样发回 (text/binary echo)。
+int ws_write_current(int fd, int opcode) {
+    struct conn *c = find_conn(fd);
+    if (!c || !c->ws_reasm) return 1;
+    return ws_write_message(fd, opcode, c->ws_reasm, c->ws_mlen);
 }
 
-// 1 = stored text payload is valid UTF-8 (RFC 6455 5.6); 0 = invalid (reply 1007).
-int ws_payload_valid_utf8(void) {
-    if (!g_ws_cur_payload) return 1;
-    return ws_validate_utf8(g_ws_cur_payload, g_ws_cur_payload_len);
-}
-
-// NOTE (Mojo 1.0.0 FFI ABI, 实测): a CStringSlice argument is only passed
-// reliably when it comes FIRST or directly after the leading scalar group
-// ((int, slice), (int, slice, slice) — cf. send_static_file /
-// send_simple_response); a scalar AFTER a slice (int, slice, int) traps
-// (SIGILL) and (int, int, slice) silently delivers garbage registers.
-// So text replies (opcode fixed = 1) use (int, slice) and read the NUL-
-// terminated pointer half; empty frames use (int, int). Constraint: WS text
-// replies must not contain NUL bytes (documented in ADR-0007).
+// NOTE (Mojo 1.0.0 FFI ABI, 实测): 传入的 CStringSlice 参数 C 端声明为
+// const char* (只消费指针半 + strlen); 结构参数位置敏感 — 详见 ADR-0007 §5。
+// 约束: WS text 回复不可含 NUL 字节 (需 NUL 的载荷走 binary 帧零拷贝路径)。
 int ws_write_text(int fd, const char *data) {
     return ws_write_message(fd, 1, (const unsigned char *)data, strlen(data));
 }
 
-// Empty single frame (opcode 9 = keepalive ping; no payload).
-int ws_write_empty(int fd, int opcode) {
-    return ws_write_message(fd, opcode, (const unsigned char *)"", 0);
-}
-
-// Zero-copy: send the currently stored payload back (raw binary echo).
-int ws_write_current(int fd, int opcode) {
-    return ws_write_message(fd, opcode, g_ws_cur_payload, g_ws_cur_payload_len);
-}
-
-// Server-initiated close frame (2-byte code payload).
+// 服务端发起的 close 帧 (2 字节 code 载荷)。
 int ws_send_close(int fd, int code) {
     unsigned char p[2] = { (unsigned char)(code >> 8), (unsigned char)(code & 0xFF) };
     return ws_write_message(fd, 8, p, 2);
 }
 
-// Release the stored payload (call when the session ends).
-void ws_session_end(void) {
-    if (g_ws_cur_payload) { free(g_ws_cur_payload); g_ws_cur_payload = NULL; }
-    g_ws_cur_payload_len = 0;
-    g_ws_cur_opcode = -1;
+// Mojo 处理完一条 WS 消息 (active 连接 phase 4 -> 3, 恢复 pump)。
+void ws_message_done(int fd) {
+    struct conn *c = find_conn(fd);
+    if (c && c->phase == 4) c->phase = 3;
 }
 
-// FASTAPI_MOJO_WS_PING_MAX (default 3): consecutive keepalive pings with no
-// client data before the server closes with 1000. 0 = no pings (idle timeout
-// ends the session immediately, the ADR-0006 behavior).
+// Mojo 发起结束会话 (如发完 close 1003): 关连接 + 入队"结束"事件
+// (Mojo 据此清理连接级状态)。
+void ws_conn_close(int fd) {
+    struct conn *c = find_conn(fd);
+    if (!c) return;
+    ws_event_push(c->fd, 2);
+    close_conn(c);
+}
+
+// FASTAPI_MOJO_WS_PING_MAX (默认 3): 连续保活 ping 无客户端数据的次数上限,
+// 超过 -> close 1000 结束会话。0 = 禁用保活 (首次空闲超时即 close)。
 int get_ws_ping_max(void) {
     static int v = -1;
     if (v == -1) {

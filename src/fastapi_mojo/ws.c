@@ -6,19 +6,21 @@
 // 纯 C、零依赖: SHA-1 + base64 (握手 Sec-WebSocket-Accept)、帧编解码
 // (掩码 / 7|16|64-bit 长度 / 分片重组)、close 码校验、text UTF-8 校验。
 //
-// 边界 (与 ADR-0006/0007 一致):
-//   - 本文件只做 RFC 6455 协议原语; 对给定 fd 的原始 I/O 由本文件完成,
-//     但**会话循环 (何时读/写/保活/结束) 由 Mojo 驱动** (http_server_final.mojo
-//     -> ws_session.mojo), 经 http_bridge_final.c 的显式包装函数调用。
-//     ADR-0006 的 C 内 echo 循环 (ws_upgrade_and_echo) 已移除: 多端点路由要求
-//     消息分派在 Mojo 层 (user code = data, ADR-0004 模式)。
+// 边界 (与 ADR-0006/0007/0008 一致):
+//   - 本文件只做 RFC 6455 协议原语: 握手、**状态化帧解析器** (非阻塞 feed,
+//     partial frame 安全)、帧写、close 码校验、text UTF-8 校验。
+//   - **会话由 bridge poll 循环驱动 (ADR-0008)**: 每个 WS 连接有自己的
+//     ws_parser_t + 重组缓冲 (bridge 的 conn 字段); 控制帧 (ping/pong/close)
+//     与保活、UTF-8 校验由 bridge 在 poll 循环内自动处理 (纯协议);
+//     数据帧 (text/binary) 经 FIFO 事件队列逐条交给 Mojo 分派 —
+//     Mojo 不再阻塞在 recv 上, 多 WS 会话与 HTTP 并发不互相阻塞。
 //   - 连接生命周期 (accept/超时/conn_done/worker) 归 http_bridge_final.c;
 //     路由决策 (哪个 path 是 WS 端点) 归 router.mojo。
 //
-// 已知限制 (文档化, ADR-0006/0007):
+// 已知限制 (文档化, ADR-0006/0007/0008):
 //   - 单条消息上限 1 MB (与 HTTP body 上限一致, WS_MAX_MSG)
-//   - 帧读取区分超时 (-2) 与错误/EOF (-1): -2 仅在本次调用未消耗任何字节时
-//     返回 (流位置不变, Mojo 可安全发保活 ping 后重试); 帧中途超时 -> -1 结束会话
+//   - 客户端必须掩码 (RFC 6455 §5.1); 未掩码帧 = 协议错误
+//   - 保活/空闲超时由 bridge 的 poll 周期 (1s tick) 粒度执行
 
 #include <errno.h>
 #include <stdint.h>
@@ -108,19 +110,6 @@ int ws_compute_accept(const char *key, char *out, size_t outsz) {
     return 0;
 }
 
-// ---------- 原始 I/O (fd 上的精确读写) ----------
-// 0 = ok; -1 = EOF/真实错误; -2 = SO_RCVTIMEO 超时 (流未消耗, 可安全重试)
-static int ws_read_exact(int fd, unsigned char *buf, size_t n) {
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = recv(fd, buf + got, n - got, 0);
-        if (r > 0) { got += (size_t)r; continue; }
-        if (r == 0) return -1;  // EOF
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return -2;  // 超时
-        return -1;              // 真实错误
-    }
-    return 0;
-}
 
 static int ws_send_all(int fd, const unsigned char *buf, size_t n) {
     size_t sent = 0;
@@ -162,84 +151,136 @@ int ws_handshake(int fd, const char *key, const char *subprotocol) {
     return ws_send_all(fd, (const unsigned char *)resp, (size_t)n);
 }
 
-// ---------- 帧读取: 一条完整消息 (分片重组; 控制帧原样返回) ----------
-// *opcode: 1=text 2=binary 8=close 9=ping 10=pong
-// *payload: malloc 分配, 用 ws_free_payload 释放
-// 返回 0 成功; -1 错误/EOF/超限/帧中途超时 (流已消耗, 不可重试);
-//       -2 空闲超时 (本次调用未消耗任何字节, Mojo 可发 ping 后安全重试)
-int ws_read_message(int fd, int *opcode, unsigned char **payload, size_t *plen) {
-    static unsigned char reasm[WS_MAX_MSG];
-    size_t reasm_len = 0;
-    size_t consumed = 0;  // 本次调用从流中消耗的字节 (超时可重试判定)
-    int msg_opcode = -1;
-    for (;;) {
-        unsigned char h[2];
-        int r = ws_read_exact(fd, h, 2);
-        if (r != 0) return (r == -2 && consumed == 0) ? -2 : -1;
-        consumed += 2;
-        int fin = (h[0] & 0x80) != 0;
-        int op = h[0] & 0x0F;
-        int masked = (h[1] & 0x80) != 0;
-        uint64_t len = h[1] & 0x7F;
-        if (len == 126) {
-            unsigned char e2[2];
-            r = ws_read_exact(fd, e2, 2);
-            if (r != 0) return (r == -2 && consumed == 0) ? -2 : -1;
-            consumed += 2;
-            len = ((uint64_t)e2[0] << 8) | e2[1];
-        } else if (len == 127) {
-            unsigned char e8[8];
-            r = ws_read_exact(fd, e8, 8);
-            if (r != 0) return (r == -2 && consumed == 0) ? -2 : -1;
-            consumed += 8;
-            len = 0;
-            for (int i = 0; i < 8; i++) len = (len << 8) | e8[i];
-        }
-        if (len > WS_MAX_MSG) return -1;
-        unsigned char mask[4] = {0, 0, 0, 0};
-        if (masked) {
-            r = ws_read_exact(fd, mask, 4);
-            if (r != 0) return (r == -2 && consumed == 0) ? -2 : -1;
-            consumed += 4;
-        }
-        unsigned char *p = (unsigned char *)malloc(len ? len : 1);
-        if (!p) return -1;
-        if (len > 0) {
-            r = ws_read_exact(fd, p, (size_t)len);
-            if (r != 0) { free(p); return (r == -2 && consumed == 0) ? -2 : -1; }
-            consumed += (size_t)len;
-        }
-        if (masked)
-            for (uint64_t i = 0; i < len; i++) p[i] ^= mask[i % 4];
+// ---------- 状态化帧解析器 (非阻塞 feed, ADR-0008) ----------
+// 每个 WS 连接一个 ws_parser_t (bridge conn 字段)。feed 任意长度的原始
+// 字节块 (poll 循环的 MSG_DONTWAIT recv 结果), partial frame 安全。
+//
+// 数据消息重组在 reasm (WS_MAX_MSG+1, 调用方持有; 消息完成时 NUL 结尾)。
+// 控制帧载荷也写入 reasm[0..mlen) (≤125B, 处理后立即可被下一条消息覆盖 —
+// bridge 在返回前同步处理完控制帧)。
+//
+// 返回: 0 = 暂无完整消息; 1 = 数据消息完成 (*opcode/*melen, reasm);
+//       2 = 控制帧完成 (*opcode/*melen, reasm); -1 = 协议错误 (应 close 1002)
+typedef struct {
+    int stage;          // 0=hdr0 1=hdr1 2=extlen 3=mask 4=payload
+    int fin, opcode, masked;
+    unsigned char ext[8];
+    int ext_need, ext_got;
+    uint64_t flen;
+    unsigned char mask[4];
+    int mask_got;
+    uint64_t pgot;
+    int in_msg;         // 数据消息分片进行中
+    int msg_opcode;
+    size_t reasm_len;
+} ws_parser_t;
 
-        // 控制帧 (close/ping/pong) 不可分片 (RFC 6455 §5.5): 原样返回
-        if (op >= 8) {
-            *opcode = op;
-            *payload = p;
-            *plen = (size_t)len;
-            return 0;
-        }
-        // 数据帧: op!=0 = 消息首帧; op==0 = 延续帧
-        if (op != 0) {
-            msg_opcode = op;
-            reasm_len = 0;
-        }
-        if (reasm_len + (size_t)len > WS_MAX_MSG) { free(p); return -1; }
-        memcpy(reasm + reasm_len, p, (size_t)len);
-        reasm_len += (size_t)len;
-        free(p);
-        if (fin) {
-            *opcode = msg_opcode;
-            *payload = (unsigned char *)malloc(reasm_len ? reasm_len : 1);
-            if (!*payload) return -1;
-            memcpy(*payload, reasm, reasm_len);
-            *plen = reasm_len;
-            return 0;
-        }
+void ws_parser_init(ws_parser_t *p) { memset(p, 0, sizeof(*p)); }
+
+static int ws_parser_frame_done(ws_parser_t *p, int *opcode, size_t *melen,
+                                unsigned char *reasm) {
+    // 一帧 payload 收齐: 控制帧立即返回; 数据帧做分片重组
+    if (p->opcode >= 8) {
+        if (!p->fin || p->flen > 125) return -1;  // 控制帧必须 fin=1 且 ≤125B
+        *opcode = p->opcode;
+        *melen = (size_t)p->flen;
+        reasm[*melen] = 0;
+        return 2;
     }
+    if (p->opcode == 0) {
+        if (!p->in_msg) return -1;  // 无消息起始的延续帧
+    } else {
+        if (p->in_msg) return -1;   // 消息未结束时又来新数据帧
+        p->msg_opcode = p->opcode;
+        p->reasm_len = 0;
+    }
+    p->reasm_len += (size_t)p->flen;
+    if (p->fin) {
+        reasm[p->reasm_len] = 0;    // NUL 结尾 (Mojo FFI 约定, ADR-0007 §5)
+        *opcode = p->msg_opcode;
+        *melen = p->reasm_len;
+        p->in_msg = 0;
+        p->reasm_len = 0;
+        return 1;
+    }
+    p->in_msg = 1;
+    return 0;
 }
 
-void ws_free_payload(unsigned char *p) { free(p); }
+int ws_parser_feed(ws_parser_t *p, const unsigned char *buf, size_t n,
+                   int *opcode, size_t *melen, unsigned char *reasm) {
+    size_t off = 0;
+    while (off < n) {
+        if (p->stage == 4) {
+            // payload: 批量拷贝 (不逐字节消耗 — 逐字节会在进入本阶段的首次迭代
+            // 丢失 1 个字节; 头部 stage 0-3 才按字节推进)
+            uint64_t need = p->flen - p->pgot;
+            size_t avail = n - off;
+            size_t take = avail < need ? avail : (size_t)need;
+            // 帧内偏移 = 本帧已收字节 (pgot); 数据帧再加消息级偏移 (reasm_len)。
+            // 漏掉 pgot 会让分块帧的所有块都从 0 覆盖 (大消息损坏)。
+            size_t dst = (p->opcode >= 8) ? p->pgot : p->reasm_len + p->pgot;
+            for (size_t i = 0; i < take; i++)
+                reasm[dst + i] = buf[off + i] ^ p->mask[(p->pgot + i) % 4];
+            off += take;
+            p->pgot += take;
+            if (p->pgot < p->flen) break;  // 帧未完, 等下一块
+            p->stage = 0;
+            // 注意: 不清 p->fin/p->masked — frame_done 需要本帧的 fin 判定
+            // 消息完成; 下一帧在 stage 0/1 覆盖它们
+            int r = ws_parser_frame_done(p, opcode, melen, reasm);
+            if (r != 0) return r;  // 1/2 = 完整消息/控制帧; -1 = 协议错误
+            continue;  // 同块内可能还有下一帧
+        }
+        unsigned char b = buf[off++];
+        switch (p->stage) {
+        case 0:  // 字节 0: FIN + opcode
+            p->fin = (b & 0x80) != 0;
+            p->opcode = b & 0x0F;
+            if (p->opcode >= 3 && p->opcode <= 7) return -1;  // 保留 opcode
+            if (p->opcode == 0 && !p->in_msg) return -1;      // 孤立的延续帧
+            p->stage = 1;
+            break;
+        case 1:  // 字节 1: MASK + 7-bit 长度
+            p->masked = (b & 0x80) != 0;
+            if (!p->masked) return -1;  // RFC 6455 §5.1: 客户端帧必须掩码
+            {
+                uint64_t l7 = b & 0x7F;
+                if (l7 < 126) {
+                    p->flen = l7;
+                    p->mask_got = 0;  // 逐帧重置 (否则跨帧残留 -> 越界写 mask[])
+                    p->stage = 3;  // 直接进 mask
+                } else {
+                    p->ext_need = (l7 == 126) ? 2 : 8;
+                    p->ext_got = 0;
+                    p->stage = 2;
+                }
+            }
+            break;
+        case 2:  // 扩展长度 (2 或 8 字节, 大端)
+            p->ext[p->ext_got++] = b;
+            if (p->ext_got < p->ext_need) break;
+            p->flen = 0;
+            for (int i = 0; i < p->ext_need; i++) p->flen = (p->flen << 8) | p->ext[i];
+            if (p->flen > WS_MAX_MSG) return -1;
+            // 重组越界预检 (数据帧; 控制帧在 frame_done 再查 ≤125)
+            if (p->opcode == 0 && p->reasm_len + p->flen > WS_MAX_MSG) return -1;
+            p->mask_got = 0;  // 逐帧重置
+            p->stage = 3;
+            break;
+        case 3:  // 掩码键 (4 字节)
+            p->mask[p->mask_got++] = b;
+            if (p->mask_got < 4) break;
+            p->pgot = 0;
+            p->stage = 4;
+            break;
+        default:
+            return -1;
+        }
+    }
+    return 0;
+}
+
 
 // ---------- 帧写入: 单帧, 未掩码 (server -> client, RFC 6455 §5.1) ----------
 int ws_write_message(int fd, int opcode, const unsigned char *payload, size_t plen) {
@@ -277,6 +318,23 @@ int ws_parse_close_code(const unsigned char *payload, size_t plen, int *code) {
     *code = c;
     if (c == 1000 || c == 1001 || (c >= 3000 && c <= 4999)) return 1;
     return -1;
+}
+
+// 对收到的 close 帧载荷回复 (RFC 6455 §7.4.1): 合法码 -> 回显 (code+reason,
+// 上限 125B, §5.5); 空载荷 -> 1000; 非法码 -> 1002。
+int ws_reply_close_buf(int fd, const unsigned char *payload, size_t n) {
+    int code = 0;
+    int r = ws_parse_close_code(payload, n, &code);
+    if (r == -1) {
+        unsigned char p2[2] = { 0x03, 0xEA };  // 1002 Protocol error
+        return ws_write_message(fd, 8, p2, 2);
+    }
+    if (r == 0) {
+        unsigned char p2[2] = { 0x03, 0xE8 };  // 1000 Normal closure
+        return ws_write_message(fd, 8, p2, 2);
+    }
+    size_t cap = (n > 125) ? 125 : n;
+    return ws_write_message(fd, 8, payload, cap);
 }
 
 // ---------- text 帧 UTF-8 校验 (RFC 6455 §5.6: text 必须是合法 UTF-8) ----------
