@@ -53,7 +53,6 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │       ├── index.html
 │       └── test.json
 ├── docs/adr/                      # 架构决策记录（含 6 条架构隔离约束声明）
-├── fastapi/                       # git submodule：bootstrap 时代参考（FastAPI 0.141.1 源码），非运行期依赖
 └── .beads/                        # beads-rust 任务管理
 ```
 
@@ -102,7 +101,7 @@ ssh user@host '/opt/fastapi_mojo'
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，71 项检查含 WebSocket 增强，CI 可重复，见 .github/workflows/ci.yml）
+# 集成测试（单一 binary 端到端，74 项检查含 WebSocket 增强/并发，CI 可重复，见 .github/workflows/ci.yml）
 ./scripts/e2e_test.sh
 ```
 
@@ -200,9 +199,9 @@ curl http://127.0.0.1:8000/test.json
 │  ws.c（WebSocket RFC 6455 协议原语）                   │
 │  ├── 握手 (SHA-1 + base64 Sec-WebSocket-Accept)        │
 │  │        + subprotocol 回显 (RFC 6455 §4.1)           │
-│  ├── 帧编解码 (掩码/7|16|64-bit 长度/分片重组/超时细分) │
+│  ├── 状态化帧解析 (掩码/7|16|64-bit/分片重组, 非阻塞)  │
 │  ├── close 码校验 (§7.4.1) + text UTF-8 校验 (§5.6)    │
-│  └── 会话编排: ws_session.mojo (Mojo 驱动, ADR-0007)   │
+│  └── 会话: bridge poll 驱动 + 事件队列 (ADR-0008)      │
 ├────────────────────────────────────────────────────────┤
 │  runtime_shim.c（单一二进制机制）                        │
 │  ├── 嵌入 3 个 Mojo 运行时 .so（objcopy binary 数据）  │
@@ -222,6 +221,7 @@ curl http://127.0.0.1:8000/test.json
 - **ADR-0005**：并发模型（多进程 worker + SO_REUSEPORT，nginx pre-fork）
 - **ADR-0006**：WebSocket (RFC 6455) 支持（C FFI 协议层 + /ws echo 端点）
 - **ADR-0007**：WebSocket 增强（多端点路由 + 子协议协商 + 服务端保活 ping + close/UTF-8 校验）
+- **ADR-0008**：高并发 WebSocket（poll 循环驱动 + FIFO 事件队列 + 控制帧/保活 C 层自动处理）
 
 决策链：已决策-5~13 见 `docs/adr/0001-mojo-replacement-strategy/` 与 `AGENTS.md` §6。
 
@@ -239,3 +239,4 @@ curl http://127.0.0.1:8000/test.json
 - [x] **单一二进制打包（Phase 3，本标达成）**
 - [x] WebSocket 支持（RFC 6455，C FFI 协议层 ws.c + /ws echo 端点，ADR-0006）
 - [x] WebSocket 增强（多端点路由 /ws /ws/counter /ws/chat + 子协议协商 + 服务端保活 ping + close 码/UTF-8 校验，ADR-0007）
+- [x] 高并发 WebSocket（多 WS 会话与 HTTP 并发、空闲不阻塞 dispatch，ADR-0008）

@@ -3,7 +3,7 @@
 bench.py — 统一的 FastAPI-Mojo benchmark runner（唯一入口，禁止手写压测）。
 
 职责：
-  1. 启动被测服务器（mojo run hello.mojo，可指定端口）
+  1. 启动被测服务器（默认 build/fastapi_mojo，--server-cmd 可覆盖，--port 可指定端口）
   2. 预热
   3. 按场景配置跑 hey 压测（csv 逐请求输出）
   4. 解析 csv，计算统一统计量（吞吐、延迟分位、错误数等）

@@ -15,7 +15,7 @@
 ## 后续（不在本 ADR 范围，需新 ADR）
 
 - ~~多 WS 端点 / 业务消息路由~~ → ✅ **已由 ADR-0007 落地**（WS 路由注册 + run_ws_message 分派，/ws /ws/counter /ws/chat）
-- 高并发 WS（当前 WS 会话占用 Mojo 单线程 dispatch；见 §4 并发模型限制）→ 仍待新 ADR（ADR-0007 §后续）
+- 高并发 WS（当前 WS 会话占用 Mojo 单线程 dispatch；见 §4 并发模型限制）→ ~~仍待新 ADR~~ ✅ **已由 ADR-0008 落地**（poll 循环驱动 + 事件队列）
 - ~~subprotocol（`Sec-WebSocket-Protocol`）~~ → ✅ **已由 ADR-0007 落地**（协商 + 必需未提供 400）；**鉴权**仍待新 ADR
 - ~~空闲保活策略~~ → ✅ **已由 ADR-0007 落地**（服务端保活 ping，FASTAPI_MOJO_WS_PING_MAX）
 - （ADR-0007 另新增：close 码校验 1002 / text UTF-8 校验 1007 / binary 1003）

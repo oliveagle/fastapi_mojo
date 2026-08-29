@@ -5,7 +5,7 @@
 #   2. ldd 断言：仅 libc + 内核组件（禁 libstdc++/libgcc_s/libm/Python/运行时 .so）
 #   3. 干净环境（env -i）启动断言：无 Python / 无 LD_LIBRARY_PATH 即可服务
 #   4. 单元测试（各 .mojo 自检）
-#   5. e2e 集成测试（scripts/e2e_test.sh，71 项检查含 WebSocket（含 ADR-0007 增强），CI 可重复）
+#   5. e2e 集成测试（scripts/e2e_test.sh，74 项检查含 WebSocket（含 ADR-0007 增强 / ADR-0008 并发），CI 可重复）
 #
 # 依赖：mojo 1.0.0（pip install modular）、gcc、binutils、curl
 name: CI
@@ -116,5 +116,5 @@ jobs:
           done
           echo "PASS: all unit tests"
 
-      - name: Run e2e suite (71 checks incl. WebSocket enhancements, CI-repeatable)
+      - name: Run e2e suite (74 checks incl. WebSocket enhancements/concurrency, CI-repeatable)
         run: ./scripts/e2e_test.sh

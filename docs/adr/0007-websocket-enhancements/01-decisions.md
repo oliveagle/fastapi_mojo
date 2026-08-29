@@ -20,7 +20,8 @@ ADR-0006 交付了最小可用 WS（`/ws` echo，会话循环在 C 内阻塞执�
 
 本 ADR 落地其中 1/3/4 及 close 帧合规性（原 C 循环对 close 码不做校验）。
 **第 2 项（高并发 WS）明确不在本 ADR 范围**：它要求 worker 级 WS 或 C 层独立
-poll + 回调，是对 ADR-0005 并发模型的结构改动，需要独立评估（见 §6）。
+poll，是对 ADR-0005 并发模型的结构改动，需要独立评估。~~已由 **ADR-0008**
+落地~~（poll 循环驱动 + FIFO 事件队列，无隐式回调）。
 
 关键架构问题：ADR-0006 把会话循环放在 C（`ws_upgrade_and_echo`），多端点业务路由
 要求"消息 → handler"的分派发生在 Mojo 层（user code = data，ADR-0004 模式），
@@ -92,9 +93,9 @@ poll + 回调，是对 ADR-0005 并发模型的结构改动，需要独立评估
 
 ## 4. 后果与限制（文档化）
 
-- **单一会话串行**：不变（ADR-0006 已知限制）——WS 会话期间 Mojo dispatch 被占用，
-  新连接的 upgrade 需等待当前会话结束。e2e 因此逐连接串行测试。高并发 WS 待后续
-  ADR（方案 C 或 worker 级 WS）。
+- **单一会话串行**：~~（ADR-0006 已知限制）WS 会话期间 Mojo dispatch 被占用，
+  新连接的 upgrade 需等待当前会话结束~~ **已由 ADR-0008 解除**：WS 会话由
+  bridge poll 循环驱动，多会话与 HTTP 并发（e2e 含 10 并发 WS 检查）。
 - **WS 路由 v1 精确匹配**：无 `{param}`、无 method 概念（WS 升级恒为 GET）。
 - **text 回复不可含 NUL 字节**：Mojo 1.0.0 FFI 把传入的 CStringSlice 当作
   NUL 结尾 C 字符串消费（§5 教训）。需要 NUL 的回复用 binary 帧路径

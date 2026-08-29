@@ -17,8 +17,9 @@
 
 ## 后续（不在本 ADR 范围，需新 ADR）
 
-- **高并发 WS**（ADR-0006 §后续 第 2 项）：worker 级 WS 会话，或 C 层独立
-  poll + 显式消息队列（避免隐式回调）；当前 WS 会话串行占用 dispatch
+- ~~**高并发 WS**（ADR-0006 §后续 第 2 项）~~ → ✅ **已由 ADR-0008 落地**
+  （poll 循环驱动 + FIFO 事件队列 + 控制帧/保活 C 层自动处理；worker 级
+  分摊仍由 ADR-0005 提供）
 - WS 路由 `{param}` pattern 匹配
 - 鉴权（WS 升级头/首帧 token 校验）
 - 多字节 NUL 文本回复（binary 帧承载或 C 侧 len 传递协议修订）

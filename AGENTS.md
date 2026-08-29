@@ -36,9 +36,9 @@
 **本标已达成**：单一文件部署（scp 即运行）。实现机制见 `docs/adr/0003-single-binary-mechanism/`
 （Mojo 1.0.0 无静态运行时库 → 嵌入 + 启动暂存 + dlopen 符号转发）。
 
-> 注：`fastapi/` 目录是 bootstrap 时代（Phase 0，Mojo wrapper 调 Python FastAPI）
-> 保留的 git submodule（FastAPI 0.141.1 源码参考），**非运行期依赖** ——
-> 单一 binary 不读取它；Phase 2 完成后若不再需要参考可移除。
+> 注：bootstrap 时代（Phase 0）的 `fastapi/` git submodule（FastAPI 0.141.1 源码
+> 参考）**已移除**（Phase 2 完成后不再需要；单一 binary 从未读取它）。
+> 后续若需对照 FastAPI 语义，直接查上游仓库即可。
 
 ---
 
@@ -74,7 +74,7 @@
 - ADR 在 `docs/adr/`，每个 ADR 必须包含 **6 条架构隔离约束声明**
 - Benchmark 统一走 `./benchmark.sh`，禁止手写压测脚本
 - **CI** (`.github/workflows/ci.yml`) 在每次 push/PR 到 main 时守护本标：
-  单一 binary 构建 + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试 + e2e (71 项，含 WebSocket 增强)
+  单一 binary 构建 + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试 + e2e (74 项，含 WebSocket 增强/并发)
 
 ---
 
@@ -107,7 +107,8 @@
 - **已决策-14**：单一二进制实现机制 = 运行时嵌入 + 启动暂存 + dlopen 符号转发（见 ADR-0003）；构建入口 `./build_single.sh`，部署 `./deploy.sh`
 - **已决策-15**：WebSocket (RFC 6455) = C FFI 协议层 `ws.c` + `/ws` echo 端点（见 ADR-0006）；不等待 Mojo 原生网络模块，与 C5 同一 C 桥接绕过模式
 - **已决策-16**：WebSocket 增强 = Mojo 驱动会话循环 + WS 路由注册（`/ws` echo / `/ws/counter` 有状态 / `/ws/chat` 必需子协议）+ 子协议协商 + 服务端保活 ping（`FASTAPI_MOJO_WS_PING_MAX`）+ close 码校验（1002）/ text UTF-8 校验（1007）（见 ADR-0007）；C 内 echo 循环（`ws_upgrade_and_echo`）移除，业务分派归 `run_ws_message` 单点 dispatch
+- **已决策-17**：高并发 WebSocket = bridge poll 循环驱动 WS 会话（conn 阶段 3/4）+ FIFO 事件队列（数据帧逐条交 Mojo 分派）+ 控制帧/保活/UTF-8 校验 C 层自动处理（见 ADR-0008）；WS 会话不再阻塞 dispatch，多 WS 会话与 HTTP 并发（e2e：10 并发 + 空闲 WS 下探针 <1s）
 
 ---
 
-*最后更新：2026-08-30（决策-16 WebSocket 增强：多端点/子协议/保活/close 校验，ADR-0007；§3.2 桥接清单纳入 ws.c）*
+*最后更新：2026-08-30（决策-17 高并发 WebSocket：poll 驱动 + 事件队列，ADR-0008；决策-16 WebSocket 增强，ADR-0007；§3.2 桥接清单纳入 ws.c）*
