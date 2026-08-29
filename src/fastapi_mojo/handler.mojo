@@ -42,6 +42,20 @@ def KIND_TEMPLATE() -> Int:
     return 4
 
 
+# ---------- WebSocket 处理器行为 (ADR-0007) ----------
+
+def KIND_WS_ECHO() -> Int:
+    """WS 回显: text (UTF-8 校验后原样回显) / binary (零拷贝原样回显)."""
+    return 100
+
+
+def KIND_WS_COUNTER() -> Int:
+    """WS 计数器 (有状态演示): text-only; 每条整数字消息累加进连接级 state,
+    回复 "sum=<累计>"; 非整数 -> "error: expected an integer".
+    binary 帧由会话层回 close 1003 (不支持的数据类型)."""
+    return 101
+
+
 # ---------- Handler 类型 ----------
 
 struct Handler:
@@ -189,6 +203,41 @@ def run_handler(handler: Handler,
         resp["error"] = "Unknown handler kind"
         resp["status"] = "501"
         return ("501 Not Implemented", resp^)
+
+
+# ---------- WS 单点 dispatch 扩展点 (ADR-0007, 镜像 run_handler) ----------
+
+def run_ws_message(handler: Handler, opcode: Int, msg: String, state: Int) -> Tuple[Int, String, Int]:
+    """WS 消息分派 — 全项目唯一"认识 WS kind"的地方.
+    返回 (reply_opcode, reply_text, new_state); reply_opcode 0 = 不回复.
+    opcode: 1 = text (binary 帧由会话层在到达本函数前处理).
+    state: 连接级整型状态 (如计数器累计值), 会话循环持有.
+    新增 WS 行为 = 加一个 KIND_WS_x() 常量 + 这里加一个 elif (显式扩展点).
+    """
+    if handler.kind == KIND_WS_ECHO():
+        return (1, msg, state)
+
+    elif handler.kind == KIND_WS_COUNTER():
+        var v = 0
+        var ok = True
+        var n = msg.byte_length()
+        var i = 0
+        while i < n:
+            var d = ord(msg[byte=i])
+            if d < 48 or d > 57:
+                ok = False
+                break
+            if i >= 18:  # > 18 位必然超过 Int 范围
+                ok = False
+                break
+            v = v * 10 + (d - 48)
+            i += 1
+        if not ok:
+            return (1, "error: expected an integer", state)
+        return (1, "sum=" + String(state + v), state + v)
+
+    else:
+        return (0, "", state)
 
 
 def main() raises:

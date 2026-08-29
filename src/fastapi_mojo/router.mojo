@@ -3,7 +3,7 @@
 # Mojo 原生路由表实现（支持 pattern matching）
 # Route 携带 Handler (ADR-0004): 路由 = 数据, 行为由 handler.kind 决定.
 
-from handler import Handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE
+from handler import Handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER
 
 
 struct RouteMatch:
@@ -90,12 +90,42 @@ struct Route:
         return RouteMatch(True, params, self.handler)
 
 
+struct WsRouteMatch:
+    """WS 路由匹配结果 (ADR-0007)."""
+    var matched: Bool
+    var handler: Handler
+
+    def __init__(out self, matched: Bool, handler: Handler):
+        self.matched = matched
+        self.handler = handler.copy()
+
+    def __init__(out self):
+        self.matched = False
+        self.handler = Handler(KIND_ECHO(), "")
+
+
+struct WsRoute:
+    """WS 端点 (path + Handler, ADR-0007: user code = data, 同 HTTP 路由模式).
+    v1: 精确 path 匹配 (WS 不支持 {param} pattern, 需新 ADR)."""
+    var path: String
+    var handler: Handler
+
+    def __init__(out self, path: String, handler: Handler):
+        self.path = path
+        self.handler = handler.copy()
+
+    def match(self, path: String) -> Bool:
+        return self.path == path
+
+
 struct Router:
     """Mojo 原生路由表."""
     var routes: List[Route]
+    var ws_routes: List[WsRoute]
 
     def __init__(out self):
         self.routes = List[Route]()
+        self.ws_routes = List[WsRoute]()
 
     def add_route(mut self, path: String, method: String, handler: Handler):
         """添加路由 (handler = kind + name + data, ADR-0004)."""
@@ -128,6 +158,22 @@ struct Router:
     def route_count(self) -> Int:
         """获取路由数量."""
         return len(self.routes)
+
+
+    def add_ws_route(mut self, path: String, handler: Handler):
+        """添加 WS 端点 (handler.kind = 会话行为, ADR-0007)."""
+        self.ws_routes.append(WsRoute(path, handler))
+
+    def match_ws_route(self, path: String) -> WsRouteMatch:
+        """按精确 path 匹配 WS 端点."""
+        for i in range(len(self.ws_routes)):
+            if self.ws_routes[i].match(path):
+                return WsRouteMatch(True, self.ws_routes[i].handler)
+        return WsRouteMatch()
+
+    def ws_route_count(self) -> Int:
+        """获取 WS 端点数量."""
+        return len(self.ws_routes)
 
 
 def main() raises:
@@ -193,5 +239,21 @@ def main() raises:
         print("OK: /users/123/items/456 matched, handler=" + result2.handler.name)
         if "user_id" in result2.params and "item_id" in result2.params:
             print("OK: user_id=" + result2.params["user_id"] + ", item_id=" + result2.params["item_id"])
+
+    # WS routes (ADR-0007): exact match, user code = data
+    var ws_h = Handler(KIND_WS_ECHO(), "ws_echo")
+    router.add_ws_route("/ws", ws_h)
+    var ws_c = Handler(KIND_WS_COUNTER(), "ws_counter")
+    ws_c.set_data("ws_sp", "chat")
+    router.add_ws_route("/ws/counter", ws_c)
+    assert router.ws_route_count() == 2, "ws route count"
+    var wm = router.match_ws_route("/ws")
+    assert wm.matched and wm.handler.name == "ws_echo", "ws match /ws"
+    var wm2 = router.match_ws_route("/ws/counter")
+    assert wm2.matched and wm2.handler.data["ws_sp"] == "chat", "ws match /ws/counter"
+    var wm3 = router.match_ws_route("/nope")
+    assert not wm3.matched, "ws no match"
+    if wm.matched and wm2.matched and not wm3.matched:
+        print("OK: ws routes (exact match + handler data)")
 
     print("Mojo router pattern matching test completed!")

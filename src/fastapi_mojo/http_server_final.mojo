@@ -8,11 +8,12 @@
 from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
-from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER
 from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
+from ws_session import run_ws_session
 
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
@@ -95,6 +96,17 @@ def register_routes(mut router: Router) raises:
     router.add_route("/echo", "GET", Handler(KIND_ECHO(), "echo"))
     router.add_route("/echo", "POST", Handler(KIND_ECHO(), "echo"))
 
+    # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
+    # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
+    router.add_ws_route("/ws", Handler(KIND_WS_ECHO(), "ws_echo"))
+
+    var ws_counter_h = Handler(KIND_WS_COUNTER(), "ws_counter")
+    router.add_ws_route("/ws/counter", ws_counter_h)
+
+    var ws_chat_h = Handler(KIND_WS_ECHO(), "ws_chat")
+    ws_chat_h.set_data("ws_sp", "chat")  # 客户端必须提供 Sec-WebSocket-Protocol: chat
+    router.add_ws_route("/ws/chat", ws_chat_h)
+
 
 def main() raises:
     print("=== Mojo HTTP Server v1.8 ===")
@@ -166,16 +178,27 @@ def main() raises:
             _ = external_call["send_preflight_response", Int](cfd)
             mw_logging(mw_chain, req_id, method, path, query, "204 No Content", duration_ms)
             external_call["conn_done", NoneType](cfd, False)  # preflight response announces Connection: close
-        elif path == "/ws" and external_call["is_ws_upgrade", Int]() == 1:
-            # WebSocket upgrade (RFC 6455, ADR-0006): the C protocol layer (ws.c)
-            # does the 101 handshake + a minimal echo frame loop (text/binary
-            # echo, ping->pong, close->close). The session owns the connection
-            # until it ends; it is always closed afterwards (no keep-alive).
-            var ws_key = span_to_str(
-                external_call["get_ws_key_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
-            _ = external_call["ws_upgrade_and_echo", Int](cfd, ws_key.as_c_string_slice())
+        elif external_call["is_ws_upgrade", Int]() == 1:
+            # WebSocket upgrade (RFC 6455, ADR-0006/0007): WS route lookup +
+            # Mojo-driven session (subprotocol / keepalive ping / close code /
+            # UTF-8 validation / handler dispatch). The session always ends the
+            # connection (no keep-alive reuse).
+            var ws_match = router.match_ws_route(path)
+            var ws_sl = "404 Not Found"
+            if ws_match.matched:
+                var ws_status = run_ws_session(cfd, ws_match.handler)
+                ws_sl = "101 Switching Protocols"
+                if ws_status == 400:
+                    ws_sl = "400 Bad Request"
+                elif ws_status == 500:
+                    ws_sl = "500 Internal Server Error"
+            else:
+                var ws_resp = build_error_response("404", "Route not found")
+                var ws_body = json_serialize_dict(ws_resp)
+                _ = external_call["send_simple_response", Int](
+                    cfd, "404 Not Found".as_c_string_slice(), ws_body.as_c_string_slice())
             var duration_ms = mw_timing(mw_chain, start_ms)
-            mw_logging(mw_chain, req_id, method, path, query, "101 Switching Protocols", duration_ms)
+            mw_logging(mw_chain, req_id, method, path, query, ws_sl, duration_ms)
             external_call["conn_done", NoneType](cfd, False)
         else:
             # Handle HEAD method (same as GET but no body)
@@ -252,6 +275,9 @@ def main() raises:
                     for i in range(router.route_count()):
                         route_keys.append(router.routes[i].method + " " + router.routes[i].path)
                         route_names.append(router.routes[i].handler.name)
+                    for i in range(router.ws_route_count()):
+                        route_keys.append("WS " + router.ws_routes[i].path)
+                        route_names.append(router.ws_routes[i].handler.name)
                     var info = ServerInfo("1.8.0", "request_id, logging, timing", uptime_s,
                                           req_num, route_keys, route_names)
                     var result = run_handler(route_result.handler, route_result.params,

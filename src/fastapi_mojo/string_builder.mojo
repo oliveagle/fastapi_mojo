@@ -65,6 +65,17 @@ struct StringBuilder:
         return "".join(self.chunks)
 
 
+def trim_spaces(s: String) -> String:
+    """Trim ASCII space (0x20) from both ends (byte-wise, boundary-safe)."""
+    var a = 0
+    var b = s.byte_length()
+    while a < b and s[byte=a] == ' ':
+        a += 1
+    while b > a and s[byte=b - 1] == ' ':
+        b -= 1
+    return String(s[byte=a:b])
+
+
 def next_codepoint_len(s: String, i: Int) -> Int:
     """UTF-8 byte length of the codepoint starting at byte index i.
 
