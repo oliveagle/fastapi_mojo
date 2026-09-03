@@ -132,6 +132,8 @@ impl Conn {
 }
 
 // ========== 系统调用直连 ==========
+// 仅非测试构建需要 (测试构建 sys_close 是 no-op, 不引用 extern close).
+#[cfg(not(test))]
 extern "C" {
     fn close(fd: c_int) -> c_int;
 }
@@ -220,6 +222,16 @@ impl ConnTable {
     }
     pub fn active(&self) -> Option<usize> {
         self.active
+    }
+
+    /// 当前 conn 表已分配槽数 (用于遍历上界; 与 MAX_CONNS 解耦, 便于测试).
+    pub fn conns_len(&self) -> usize {
+        self.conns.len()
+    }
+
+    /// 槽位是否在用 (便捷访问; idx >= len 返回 false).
+    pub fn is_in_use(&self, idx: usize) -> bool {
+        self.conns.get(idx).map(|c| c.in_use).unwrap_or(false)
     }
 }
 

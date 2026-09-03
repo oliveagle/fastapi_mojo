@@ -74,9 +74,58 @@
     （内部重 lock）→ 自死锁（EXIT=124 超时被杀）；修复 = 显式 scope drop。
     测试助手 `lock_table()/lock_events()` 用 `unwrap_or_else(|e| e.into_inner())`
     防 PoisonError 级联。
-- **状态**：🚧 进行中（**DC1 ✅ 完成 / DC2 🔶 14 个 bridge 子模块（12 + send + ws_session_ffi）
-  265 单测绿（269 含 4 #[ignore]）、0 BUG；剩余 I/O 主体 recv_and_parse/poll 循环
-  待迁 / DC3 ⬜ 待开工**）
+
+  **追加更新-5**：2026-09-04（**DC2-g I/O 主体 io.rs 落地 + poison 防护根因修复
+  281 测试 / 281 通过 / 0 BUG**）：
+  - **DC2-g `bridge/io.rs`（~810 LOC）+ `io_tests.rs`（+16 单测）**：端口 C
+    `http_bridge_final.c` I/O 主路径（§820-1185）：`pump_conn` phase 0/1 状态机 +
+    phase 3 委托、`pump_ws_conn` 帧分派（尾块重放 + 控制帧/UTF-8 校验/保活 ping
+    全自动）、`ws_pump_close`（尽力 close + 入队 + 关 conn）、`ws_pump_now`（ADR-0009
+    立即重 pump）、`check_deadlines`（两阶段避免借用冲突：阶段 1 持 conn_table
+    lock 收集纯逻辑 `Decision`、阶段 2 释放锁后逐个短事务应用副作用）、
+    `conn_done`（复用/关闭 + body 释放 + phase 0）、`recv_and_parse`（master event
+    loop；WS 事件优先 FIFO → 然后 poll；accept 503 路径直接 close 不入 conn 表）、
+    `shutdown_all`（关 listen + 所有 conn，poison-safe）、`G_LISTEN_FD` AtomicI32
+    全局（端口 C `g_listen_fd` long）。系统调用 recv/close/poll/accept 用 extern "C"
+    直连；`#[repr(C)] pollfd_t` 8 字节 layout + `const _: [(); 8]` 静态断言；
+    静态 pf 数组 1 + MAX_CONNS = 1025 + pf_pos 槽位映射。
+  - **🔴 PoisonError 级联根因 + 修复（教训-12 / 决策-19 实战）**：
+    首批落地 io.rs 后跑全 cargo test → 28 失败（request/send/ws_session_ffi
+    全 PoisonError）。根因两层：
+    1. `bridge/request.rs::reset_request_fields` **漏 reset** `last_status_len` /
+      `last_status` / `active_fd` / `ws_key_len` / `ws_protocol_len`，io_tests 走
+      `check_deadlines_http_408_on_recv_timeout` → `send_error_json` →
+      `send_response` → `set_last_status("408 Request Timeout")` 把 last_status_len
+      写成 19；后续 `request::tests::empty_initial_state` 调 reset_request_fields
+      后断言 `last_status_len == 0` 失败 → **panic 时持有 CURRENT Mutex guard**
+      → CURRENT 被 poison → 后续 28 个 `.lock().unwrap()` 全部 `PoisonError` 级联。
+    2. WS_PING_MAX 用 `OnceLock<c_int>` 不可重置；`io_tests::check_deadlines_ws_phase_strikes_after_idle`
+      抢先调 `get_ws_ping_max()` 把缓存设成默认 3，导致
+      `ws_session_ffi_tests::ws_ping_max_env_read_once`（env="5" 验证）永远
+      拿到 cached 3。
+    修复：
+    - `reset_request_fields` 完整还原 `CurrentRequest::empty()`（last_status_len=0
+      + active_fd=-1 + ws_key_len=0 + ws_protocol_len=0 + last_status 清零）。
+    - `CURRENT` 全面走新助手 `lock_current()` = `unwrap_or_else(|e| e.into_inner())`
+      替代裸 `.lock().unwrap()`（22 处），poison 不再传染后续测试。
+    - `WS_PING_MAX` 改 `AtomicI32` + sentinel `-1`（语义等价 C `static int v=-1`
+      首读初始化），新增 `#[cfg(test)] reset_ws_ping_max_cache_for_test()`；
+      `ws_ping_max_env_read_once` 测试首尾各重置一次。
+  - **清理未用警告 5 条**：deadlines_tests `use super::super::conn::*` / io_tests
+    `Conn/HDR_BUF_SIZE` / ws_session_ffi_tests `set_ws_event_type` / send_tests
+    `EAGAIN` 常量 / conn.rs 测试 build 不引 `extern close` 加 `#[cfg(not(test))]`
+    守卫。`cargo build --release --tests` 0 warning。
+  - **累计**：15 个 bridge 子模块、**281 cargo 单测全绿（285 含 4 #[ignore]）、
+    0 BUG、0 警告**；e2e 79/79 绿；binary 5,000,720 B 严格不变、ldd 仅 libc。
+  - **后续（DC2 收口）**：`bridge/ffi.rs` extern "C" FFI 包装层（~40 符号，对齐
+    C ABI 签名；按 ADR-0010 §3 决策-4「FFI 包装延迟」约束在 build 切换那一 turn
+    统一加，规避 `--whole-archive` 同名冲突）；`build_single.sh` 删除
+    `gcc -c http_bridge_final.c -o bridge.o` + 链接行去掉 bridge.o（**shim.o 保留**
+    待 DC3）；DC3 `bridge/shim.rs` 端口 `runtime_shim.c` 360 LOC（embed/stage/
+    dlopen 符号转发 + 孤儿 stage 清理 + 退出清理），C 终态归零。
+- **状态**：🚧 进行中（**DC1 ✅ 完成 / DC2 🔶 15 个 bridge 子模块（14 + io）
+  281 单测绿（285 含 4 #[ignore]）、0 BUG、0 警告；剩余 ffi.rs extern "C"
+  包装层 + build 切换 + DC3 shim.rs 待迁 / DC3 ⬜ 待开工**）
 - **负责人**：oliveagle（agent 执行）
 - **上游**：`AGENTS.md`（§1 North Star / §3 架构约束 / §6 决议链，**决策-19**）、
   `docs/adr/0001~0010`（已接受决策，含 **ADR-0010 Rust bridge**）、
@@ -188,7 +237,7 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 
 | 文件 | LOC (基线→现状) | 主要职责 | → Rust 目标模块 | 状态 |
 |------|-----------------|---------|------------------|------|
-| `http_bridge_final.c` | 1774 → **1809** | socket I/O + poll 事件循环 + HTTP 解析 + keep-alive + 超时/慢连接防护 + CORS + 静态文件 + 限流 + 信号 + worker/SO_REUSEPORT 并发 + WS 会话状态镜像 | `bridge.rs`（按职责拆子模块） | 🔶 DC2 进行中（已落地 **14 子模块**（12 + send + ws_session_ffi）**265 单测绿（269 含 4 #[ignore]）、0 BUG**；I/O 主体 recv_and_parse/poll 循环待迁） |
+| `http_bridge_final.c` | 1774 → **1809** | socket I/O + poll 事件循环 + HTTP 解析 + keep-alive + 超时/慢连接防护 + CORS + 静态文件 + 限流 + 信号 + worker/SO_REUSEPORT 并发 + WS 会话状态镜像 | `bridge.rs`（按职责拆子模块） | 🔶 DC2 进行中（已落地 **15 子模块**（14 + io）**281 单测绿（285 含 4 #[ignore]）、0 BUG、0 警告**；I/O 主体已迁，剩 ffi.rs extern "C" 包装层 + build 切换） |
 | `ws.c` | 380 → **0（已删）** | WS 协议原语：SHA-1 / base64 / handshake / 帧解析 / 掩码 / close 码 / UTF-8 校验 | `ws.rs` | ✅ DC1 完成（行为等价 + e2e 79/79 绿 + 26 单测绿 + `build_single.sh` 接入） |
 | `runtime_shim.c` | 360 → 360 | 单 binary loader：Mojo 运行时嵌入 + 启动暂存 + dlopen 符号转发（ADR-0003 决策-14） | `shim.rs` | ⬜ DC3 待开工 |
 | **合计** | **2514 → 2169**（-13.7%；ws.c -380 已清零，KIND_RUN_CMD +35 净增） | | **0（C 清零，Phase 6 收口）** | |

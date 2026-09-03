@@ -76,6 +76,13 @@ impl CurrentRequest {
 
 static CURRENT: Mutex<CurrentRequest> = Mutex::new(CurrentRequest::empty());
 
+/// poison-safe CURRENT lock: 任何单测在持锁时 panic 会 poison Mutex,
+/// 用 into_inner 恢复, 避免单个测试失败级联污染全部后续测试 (教训-12).
+fn lock_current() -> std::sync::MutexGuard<'static, CurrentRequest> {
+    CURRENT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+
 /// C ABI slice (与 C `fmc_slice { const char *ptr; long len; }` 完全一致).
 #[repr(C)]
 pub struct CSlice {
@@ -88,7 +95,7 @@ use std::os::raw::c_long;
 
 /// 在 recv_and_parse 完成请求解析后调用, 把 method/path/query 写入全局.
 pub fn set_http_fields(method: &[u8], path: &[u8], query: &[u8], protocol_11: bool, close_after: bool, fd: i32) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     let mlen = method.len().min(MAX_METHOD);
     g.method[..mlen].copy_from_slice(&method[..mlen]);
     g.method_len = mlen;
@@ -107,7 +114,7 @@ pub fn set_http_fields(method: &[u8], path: &[u8], query: &[u8], protocol_11: bo
 
 /// 在 ws_conn_upgrade 时调用, 把 WS key/path 写入全局.
 pub fn set_ws_fields(ws_key: &[u8], ws_path: &[u8], ws_protocol: Option<&[u8]>) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     let klen = ws_key.len().min(255);
     g.ws_key[..klen].copy_from_slice(&ws_key[..klen]);
     g.ws_key[klen] = 0;
@@ -121,7 +128,7 @@ pub fn set_ws_fields(ws_key: &[u8], ws_path: &[u8], ws_protocol: Option<&[u8]>) 
 
 /// 单独设置 ws_protocol (get_ws_protocol_slice 读取).
 pub fn ws_session_set_protocol(p: &[u8]) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     let n = p.len().min(255);
     g.ws_protocol[..n].copy_from_slice(&p[..n]);
     g.ws_protocol[n] = 0;
@@ -129,33 +136,43 @@ pub fn ws_session_set_protocol(p: &[u8]) {
 }
 
 /// 重置 per-request 字段 (类似 C `finish_header` 开头的 per-request reset).
+///
+/// ⚠️ 必须**完整**还原 `CurrentRequest::empty()`: 漏掉任意字段都会让
+/// `request::tests::empty_initial_state` 在 io_tests / send_tests 之后
+/// 因污染状态而失败, panic 时持锁又会 poison CURRENT, 级联 28 测试失败.
+/// (教训-12 / 决策-19).
 pub fn reset_request_fields() {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     g.method_len = 0;
     g.path_len = 0;
     g.query_len = 0;
     g.protocol_11 = false;
     g.close_after_response = true;
+    g.active_fd = -1;
     g.active_phase = 0;
     g.ws_event_type = 0;
+    g.ws_key_len = 0;
+    g.ws_protocol_len = 0;
+    g.last_status_len = 0;
+    g.last_status = [0u8; 32];
 }
 
 /// 更新 active fd/phase (conn_done / pump 后).
 pub fn set_active(fd: i32, phase: i32) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     g.active_fd = fd;
     g.active_phase = phase;
 }
 
 /// 更新 ws_event_type (recv_and_parse 入队/出队时).
 pub fn set_ws_event_type(t: i32) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     g.ws_event_type = t;
 }
 
 /// 更新 last_status (send_response 后).
 pub fn set_last_status(s: &[u8]) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     let n = s.len().min(31);
     g.last_status[..n].copy_from_slice(&s[..n]);
     g.last_status[n] = 0;
@@ -164,35 +181,35 @@ pub fn set_last_status(s: &[u8]) {
 
 /// 更新 protocol_11 (finish_header 后).
 pub fn set_protocol_11(p: bool) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     g.protocol_11 = p;
 }
 
 /// 更新 close_after_response.
 pub fn set_close_after_response(c: bool) {
-    let mut g = CURRENT.lock().unwrap();
+    let mut g = lock_current();
     g.close_after_response = c;
 }
 
 /// 读取 close_after_response (get_close_after_response FFI 用).
 pub fn get_close_after_response() -> bool {
-    CURRENT.lock().unwrap().close_after_response
+    lock_current().close_after_response
 }
 
 /// 读取 protocol_11.
 pub fn get_protocol_11() -> bool {
-    CURRENT.lock().unwrap().protocol_11
+    lock_current().protocol_11
 }
 
 /// 读取 ws_event_type.
 pub fn get_ws_event_type() -> i32 {
-    CURRENT.lock().unwrap().ws_event_type
+    lock_current().ws_event_type
 }
 
 // ========== Slice 访问器 (FFI 形态, 返回 CSLice { ptr, len }) ==========
 
 pub fn get_method_slice() -> CSlice {
-    let g = CURRENT.lock().unwrap();
+    let g = lock_current();
     CSlice {
         ptr: g.method.as_ptr() as *const c_char,
         len: g.method_len as c_long,
@@ -200,7 +217,7 @@ pub fn get_method_slice() -> CSlice {
 }
 
 pub fn get_path_slice() -> CSlice {
-    let g = CURRENT.lock().unwrap();
+    let g = lock_current();
     CSlice {
         ptr: g.path.as_ptr() as *const c_char,
         len: g.path_len as c_long,
@@ -208,7 +225,7 @@ pub fn get_path_slice() -> CSlice {
 }
 
 pub fn get_query_slice() -> CSlice {
-    let g = CURRENT.lock().unwrap();
+    let g = lock_current();
     CSlice {
         ptr: g.query.as_ptr() as *const c_char,
         len: g.query_len as c_long,
@@ -216,7 +233,7 @@ pub fn get_query_slice() -> CSlice {
 }
 
 pub fn get_ws_key_slice() -> CSlice {
-    let g = CURRENT.lock().unwrap();
+    let g = lock_current();
     CSlice {
         ptr: g.ws_key.as_ptr() as *const c_char,
         len: g.ws_key_len as c_long,
@@ -224,7 +241,7 @@ pub fn get_ws_key_slice() -> CSlice {
 }
 
 pub fn get_ws_protocol_slice() -> CSlice {
-    let g = CURRENT.lock().unwrap();
+    let g = lock_current();
     CSlice {
         ptr: g.ws_protocol.as_ptr() as *const c_char,
         len: g.ws_protocol_len as c_long,
@@ -236,11 +253,11 @@ pub fn get_ws_protocol_slice() -> CSlice {
 /// 通过 conn 表实现.
 
 pub fn get_last_status_len() -> usize {
-    CURRENT.lock().unwrap().last_status_len
+    lock_current().last_status_len
 }
 
 pub fn read_last_status_byte(i: usize) -> i32 {
-    let g = CURRENT.lock().unwrap();
+    let g = lock_current();
     if i < g.last_status_len {
         g.last_status[i] as i32
     } else {
@@ -255,7 +272,7 @@ mod tests {
     #[test]
     fn empty_initial_state() {
         reset_request_fields();
-        let g = CURRENT.lock().unwrap();
+        let g = lock_current();
         assert_eq!(g.method_len, 0);
         assert_eq!(g.path_len, 0);
         assert_eq!(g.query_len, 0);
@@ -271,7 +288,7 @@ mod tests {
         let mut long_method = vec![b'A'; 100];
         long_method.truncate(MAX_METHOD);
         set_http_fields(b"GET", b"/foo", b"x=1", true, false, 42);
-        let g = CURRENT.lock().unwrap();
+        let g = lock_current();
         assert_eq!(&g.method[..3], b"GET");
         assert_eq!(g.method_len, 3);
         assert_eq!(&g.path[..4], b"/foo");
@@ -302,7 +319,7 @@ mod tests {
         // ⚠️ Mutex 非 reentrant: 必须在调用 get_ws_protocol_slice() 前先释放 guard,
         // 否则单线程 worker 也会自死锁 (实测: full cargo test 在此 test 上 hang)。
         {
-            let g = CURRENT.lock().unwrap();
+            let g = lock_current();
             assert_eq!(&g.ws_protocol[..g.ws_protocol_len], b"chat.v1");
             assert_eq!(g.ws_protocol_len, 7);
             assert_eq!(g.ws_protocol[7], 0, "NUL terminator");

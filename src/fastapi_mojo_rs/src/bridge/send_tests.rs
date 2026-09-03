@@ -26,7 +26,6 @@ const SOCK_STREAM: c_int = 1;
 const O_NONBLOCK: c_int = 0o4000;
 const F_GETFL: c_int = 3;
 const F_SETFL: c_int = 4;
-const EAGAIN: c_int = 11;
 
 /// 一对已连接的 socket; drop 时关闭两端。
 struct ConnPair {

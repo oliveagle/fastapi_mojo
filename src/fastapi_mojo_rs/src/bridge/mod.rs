@@ -33,6 +33,7 @@
 pub mod cmd;
 pub mod conn;
 pub mod init_workers;
+pub mod io;
 pub mod parse;
 pub mod request;
 pub mod port;
@@ -52,6 +53,9 @@ mod conn_tests;
 
 #[cfg(test)]
 mod init_workers_tests;
+
+#[cfg(test)]
+mod io_tests;
 
 #[cfg(test)]
 mod parse_tests;

@@ -21,6 +21,7 @@
 //! 时的同名符号冲突, 详见 ADR-0010 §3 决策-4)。
 
 use std::os::raw::{c_char, c_int};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::conn::parse::{check_ws_upgrade, get_ws_protocol};
@@ -332,15 +333,28 @@ pub fn ws_conn_close(fd: c_int) {
 }
 
 /// FASTAPI_MOJO_WS_PING_MAX (默认 3); 0 = 禁用保活. 端口 C `get_ws_ping_max` (§1369-1382).
-/// 一次性解析 + 缓存 (C 用 static int v=-1; 这里用 OnceLock<i32>).
+/// 一次性解析 + 缓存 — **等价 C `static int v=-1` 首读初始化**, 改用
+/// `AtomicI32` (sentinel -1 = 未初始化) 而非 OnceLock: 行为一致且允许
+/// 测试重置缓存 (教训-12: 否则 io_tests 早先调用 get_ws_ping_max 会先把
+/// 缓存设成默认 3, `ws_ping_max_env_read_once` 永远无法验证 env=5).
 pub fn get_ws_ping_max() -> c_int {
-    *WS_PING_MAX.get_or_init(|| {
-        let raw = std::env::var("FASTAPI_MOJO_WS_PING_MAX").ok();
-        let n = match raw {
-            Some(s) if !s.is_empty() => s.parse::<c_int>().unwrap_or(3).max(0),
-            _ => 3,
-        };
-        n
-    })
+    let v = WS_PING_MAX.load(Ordering::Acquire);
+    if v >= 0 {
+        return v;
+    }
+    let raw = std::env::var("FASTAPI_MOJO_WS_PING_MAX").ok();
+    let n = match raw {
+        Some(s) if !s.is_empty() => s.parse::<c_int>().unwrap_or(3).max(0),
+        _ => 3,
+    };
+    // compare_exchange(-1 -> n): 首个初始化者写入; 竞态时用同值 n 幂等.
+    let _ = WS_PING_MAX.compare_exchange(-1, n, Ordering::AcqRel, Ordering::Acquire);
+    n
 }
-static WS_PING_MAX: OnceLock<c_int> = OnceLock::new();
+static WS_PING_MAX: AtomicI32 = AtomicI32::new(-1);
+
+/// 仅测试: 重置 ping_max 缓存 (OnceLock 无法 reset, 故用 AtomicI32 sentinel).
+#[cfg(test)]
+pub fn reset_ws_ping_max_cache_for_test() {
+    WS_PING_MAX.store(-1, Ordering::Release);
+}

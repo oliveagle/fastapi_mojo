@@ -1,6 +1,5 @@
 // deadlines_tests.rs — check_deadlines 决策回归 (ADR-0010 DC2)
 use super::deadlines::*;
-use super::super::conn::*;  // for phase constants if needed
 
 const RECV_TIMEOUT: i64 = 5000;
 const IDLE_MAX: i64 = 60_000;

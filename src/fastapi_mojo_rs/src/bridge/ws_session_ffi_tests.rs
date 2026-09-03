@@ -11,7 +11,7 @@
 use std::os::raw::{c_int, c_void};
 
 use super::conn::{conn_table, ws_events};
-use super::request::{self, set_ws_event_type};
+use super::request::{self};
 use super::ws_session_ffi::*;
 
 extern "C" {
@@ -267,10 +267,14 @@ fn ws_conn_close_pushes_event_and_releases_conn() {
 
 #[test]
 fn ws_ping_max_env_read_once() {
+    // 必须先重置: io_tests 的 check_deadlines_ws_phase_strikes_after_idle
+    // 会先调 get_ws_ping_max() 把缓存设成默认 3 (教训-12).
+    reset_ws_ping_max_cache_for_test();
     std::env::set_var("FASTAPI_MOJO_WS_PING_MAX", "5");
     assert_eq!(get_ws_ping_max(), 5);
     // 缓存: 改 env 不再生效 (C static int v=-1 同语义)
     std::env::set_var("FASTAPI_MOJO_WS_PING_MAX", "9");
     assert_eq!(get_ws_ping_max(), 5);
     std::env::remove_var("FASTAPI_MOJO_WS_PING_MAX");
+    reset_ws_ping_max_cache_for_test();
 }
