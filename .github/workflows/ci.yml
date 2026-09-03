@@ -50,6 +50,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install modular
 
+      # Rust toolchain (ADR-0010, decision-19). 仓库 pin 在
+      # src/fastapi_mojo_rs/rust-toolchain.toml (channel 1.97.1).
+      - name: Install Rust toolchain (rustup, pinned)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup show active-toolchain || true
+
       - name: Verify toolchain
         run: |
           set -e
@@ -57,6 +65,8 @@ jobs:
           gcc --version | head -1
           objcopy --version | head -1
           curl --version | head -1
+          cargo --version
+          rustc --version
           python -c "import modular, os; print('modular lib:', os.path.join(os.path.dirname(modular.__file__), 'lib'))"
 
       # 确定性地导出 MODULAR_LIB，供 build_single.sh 使用（其自动定位的兜底之外的首选）
@@ -70,6 +80,7 @@ jobs:
         run: ./build_single.sh
 
       # North Star 门禁：单一 binary 仅依赖 libc + 内核组件
+      # (Rust staticlib 经 -static-libgcc 后不会引入 libgcc_s.so.1 — 见 build_single.sh)
       - name: Verify North Star — no forbidden runtime deps (ldd)
         run: |
           set -e
@@ -81,6 +92,34 @@ jobs:
           fi
           echo "$out" | grep -q 'libc\.so' || { echo "FAIL: libc 缺失（异常）"; exit 1; }
           echo "PASS: 单一 binary 仅依赖 libc + 内核组件（vdso/ld-linux）"
+
+      # 体积预算 (ADR-0010): C 基线 2.2M; Rust bridge 中间态引入 std 运行时,
+      # 中间态上限 6MB; Phase 6 去 std (task #12) 后收紧到 C + 2MB (终态 <= 4.2M).
+      - name: Track C — binary size budget
+        run: |
+          set -e
+          SZ=$(stat -c%s build/fastapi_mojo)
+          echo "binary size: $SZ bytes ($((SZ/1024/1024)) MB)"
+          if [[ "$SZ" -gt $((6*1024*1024)) ]]; then
+            echo "FAIL: 中间态体积 > 6MB (需去 std 收口, ADR-0010 task #12)"
+            exit 1
+          fi
+          echo "PASS: 中间态体积 <= 6MB"
+
+      # Track C 进度门禁: 显式断言当前还在 C 中间态 (Phase 4-5) — 三份 C bridge 文件
+      # 必须在终态前消失. 这条先 *记录* 现状, Phase 6 (C 清零) 翻转:
+      #   find src/fastapi_mojo -maxdepth 1 -name '*.c' | wc -l 期望 = 0.
+      - name: "Track C — count remaining .c bridge files (expected: >0 until Phase 6)"
+        run: |
+          set -e
+          N=$(find src/fastapi_mojo -maxdepth 1 -name '*.c' | wc -l)
+          echo "remaining .c bridge files in src/fastapi_mojo/: $N"
+          echo "  expected: 2 (http_bridge_final.c, runtime_shim.c) until Phase 6 (C 清零)"
+          if [[ "$N" == "0" ]]; then
+            echo "PASS: Phase 6 C 清零达成 — Mojo + Rust only"
+          else
+            echo "INFO: 仍在 Phase 4-5 (Rust bridge 进行中); $N 份 .c 待 DC2/DC3 迁移"
+          fi
 
       # North Star 门禁：干净环境（env -i）直接起服务 — 无 Python、无 LD_LIBRARY_PATH
       - name: Verify clean-env startup (env -i)
@@ -114,7 +153,19 @@ jobs:
             echo "=== mojo run $f.mojo ==="
             mojo run "$f.mojo"
           done
-          echo "PASS: all unit tests"
+          echo "PASS: all unit tests (Mojo)"
+
+      # ADR-0010: Rust bridge 单元测试. env 变体测试 (state_tests) 与 fork/signal
+      # 测试有全局副作用, 统一 --test-threads=1 保证可复现; #[ignore] fork/signal
+      # 集成测试单独跑 (CI 上 fork 子进程可能受限, 用 --ignored 也允许失败).
+      - name: Run Rust bridge unit tests (cargo, deterministic)
+        # timeout 300 兜底防 Mutex 自死锁 / 任意 hang（实测 ws_protocol_round_trip
+        # 修复前 full suite 永远 hang 280s+；实测修复后 0.22s 通过）。
+        run: |
+          set -e
+          cd src/fastapi_mojo_rs
+          timeout 300 cargo test --release -- --test-threads=1
+          echo "PASS: cargo test --release green (single-threaded, <=300s)"
 
       - name: Run e2e suite (79 checks incl. WebSocket enhancements/concurrency/refinements, CI-repeatable)
         run: ./scripts/e2e_test.sh

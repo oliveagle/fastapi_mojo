@@ -1,0 +1,28 @@
+# fastapi_mojo_rs — Rust bridge for fastapi_mojo (ADR-0010 / decision-19)
+#
+# 终态: Mojo + Rust only. 本 crate 是 bridge 层 (替代 http_bridge_final.c /
+# ws.c / runtime_shim.c), 以 staticlib + C ABI 形态静态链接进 single binary。
+#
+# 工程约束 (ADR-0010 §3, §6):
+#   - crate-type = ["staticlib"]  (只产 .a, 绝不 cdylib)
+#   - panic = "abort"             (panic 不跨界 unwind)
+#   - lto = true, codegen-units = 1, opt-level = "z"  (体积/速度平衡)
+#   - 零第三方 crate (系统调用用 extern "C" 直连; SHA-1/base64/UTF-8 手写)
+
+[package]
+name = "fastapi_mojo_rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+description = "Rust bridge layer for fastapi_mojo single binary (Mojo + Rust only)"
+license = "MIT"
+
+[lib]
+name = "fastapi_mojo_rs"
+crate-type = ["staticlib"]
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "z"

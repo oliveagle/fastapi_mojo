@@ -1,31 +1,138 @@
-# Goal-0001：FastAPI 对标实现 + 全链路去 Python 化（Phase 4+）
+# Goal-0001：FastAPI 对标实现 + 去 Python + 去 C（终态 Mojo + Rust only）（Phase 4+）
 
-- **日期**：2026-09-04
-- **状态**：🚧 进行中（roadmap / 待排期）
+- **日期**：2026-09-04（Track C 重定稿：由「迁回 Mojo」改为「Rust 替代全部 C」；
+  **用户定调「不，一步到位，mojo + rust only」**）
+  **追加更新-1**：2026-09-04（DC1 ws.rs ✅ 上线 + ws.c 删除 + build_single.sh 接入
+  `--whole-archive librust_bridge.a` + -static-libgcc 静态链接 + CI 安装 rustup
+  / cargo test / 体积 / C 计数门禁；e2e 79/79 绿；C 总量 2514 → 2134）
+  **追加更新-2**：2026-09-04（DC2-d：`bridge/conn/deadlines.rs` 16 单测 +
+  `bridge/request.rs` per-request 全局/slice 访问器 + CSlice 对齐 `fmc_slice` 落地；
+  bridge 子模块 **12 个**、cargo 单测 **230/230 全绿**；e2e 79/79 绿；
+  bench run#15 = **47281 req/s vs C-only 基线 35829 = +32%**、0 errors；
+  RSS 平台化 16720→16208→16208→16208→16208 kB（2500 req）无线性泄漏；
+  binary **5,000,720 B 严格不变**、ldd 仅 libc；
+  C 工作树现 **2169 LOC**（http_bridge_final.c 1809 + runtime_shim.c 360））
+  **追加更新-3**：2026-09-04（**0 BUG 门禁回归 + 质量门禁实测**）：
+  - **修复 P0 self-bug #1**（实测 deadlock）：`bridge/request.rs::ws_protocol_round_trip`
+    原代码在 `let g = CURRENT.lock()` 持有 guard 的 scope 内调用 `get_ws_protocol_slice()`
+    → 该函数再次 `CURRENT.lock()`，Mutex 非 reentrant，单线程 worker 自死锁，
+    `cargo test --release -- --test-threads=1` 在该 test 上**永远 hang**（验证：
+    旧代码 4 次连续运行全 hang，timeout 280s 仍未结束）。修复：先 `{ let g = lock; ... }`
+    显式 scope drop guard，再调 accessor。
+  - **修复 P0 self-bug #2**（实测 assertion failure）：修复 #1 后该 test 暴露
+    `assert_eq!(s.len, 8)` 错误断言 —— 实际 `ws_protocol_len = n`（数据长度 7），
+    NUL 在 `[n]` 位（与 method/path/query slice 语义一致：data only + trailing NUL）。
+    改为 `assert_eq!(s.len, 7)` + 验证 `s.len+1` 字节含 NUL 收尾（Mojo CString 读法）。
+  - **0 BUG 门禁通过**（实测）：`cargo test --release -- --test-threads=1` →
+    `running 241 tests ... test result: ok. 237 passed; 0 failed; 4 ignored;
+    0 measured; 0 filtered out; finished in 0.22s`（累计 12 bridge 子模块 +
+    ws.rs/ws/parser.rs，4 #[ignore] 为 signal/fork 真集成测试）。
+  - **教训文档化**：`Mutex 非 reentrant` 写进 `src/bridge/request.rs` 模块顶部
+    doc-comment + 关键 setter/getter 加 `// ⚠️` 提示；CI 单测已加 `timeout 300`
+    防 hang 兜底（.github/workflows/ci.yml）。
+  **追加更新-4**：2026-09-04（**DC2-e 响应发送层 + DC2-f WS 会话 FFI 落地，
+  269 测试 / 265 通过 / 0 BUG**）：
+  - **DC2-e `bridge/send.rs`**（端口 C §1395-1604，+13 单测）：`send_all` /
+    `send_response` / `send_error_json` / `send_simple_response` /
+    `send_simple_response_allow` / `send_head_response` / `send_preflight_response` /
+    `send_html_response` / `serve_static_file`（realpath 防穿越 + O_NOFOLLOW +
+    1MB 上限）/ `send_static_file` / `send_static_file_head`。测试用真实
+    socketpair 逐字节验证 (send_response 头/体、keep-alive 语义、JSON 错误体转义、
+    预检 204、静态 200/404/403 穿越/413 超限)。**顺带修复 3 个潜在 bug**：
+    - **response.rs 头终止符 bug**：原 `
+
+` 追加产生 `
+
+
+` 三连
+      CRLF（多一个空行）；改单 `
+`（CORS_HEADERS 末位已带 `
+`），与 C
+      `snprintf` 字节等价（existing `ends_with("\r\n\r\n")` 测试未捕获）。
+    - **send.rs 静态文件读空 bug**：`Vec::with_capacity(n)` len=0，`content[0..]`
+      切出空切片 → `read(fd, ptr, 0)` 读到 0 字节 → 静态文件 200 但 body 为空；
+      改 `vec![0u8; size]` 占位。**同类陷阱第二次出现**（第一次是 `last_status`
+      边界），已在 send.rs 注释标注。
+    - **ws_session_begin NUL 缺终止 bug**：`Vec<u8>` 无 NUL，ws_handshake 按
+      C 串读到 Vec 之外内存 → accept 值被污染（`u4FMQqF7...` ≠ RFC 6455
+      `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`）；补 `push(0)` 后正确。
+  - **DC2-f `bridge/ws_session_ffi.rs`**（端口 C §1221-1383，+15 单测）：
+    `is_ws_upgrade`（读 active conn hdr + request method + Sec-WebSocket-Key 入
+    WS_KEY_BUF）/ `get_ws_key_slice` / `get_ws_protocol_offer_slice`（按需读 hdr
+    offer，与 request.rs 的「服务器选中值」语义区分）/ `ws_session_begin`（真实
+    101 握手，socketpair 验证 accept 字节）/ `ws_conn_upgrade`（phase 0→3 + path
+    拷贝 + body/parser 重置）/ `ws_event_type` / `get_ws_path_slice` /
+    `ws_last_opcode` / `ws_payload_slice` / `ws_write_current` / `ws_write_text` /
+    `ws_send_close` / `ws_message_done`（phase 4→3）/ `ws_conn_close`（入队结束事件
+    + 释放 conn）/ `get_ws_ping_max`（env 一次性解析 + 缓存）。conn.rs 的
+    `par_reset` 转 `pub(crate)` 供本模块调用。
+  - **实测 0 BUG 门禁**：`cargo test --release -- --test-threads=1` →
+    `running 269 tests ... ok. 265 passed; 0 failed; 4 ignored`（0.22s）；
+    e2e 79/79 绿；binary 5,000,720 B 严格不变、ldd 仅 libc。
+  - **新增实测教训**：**conn 表 Mutex 非 reentrant 同样咬到测试**——
+    `ws_message_done_resumes_phase_3` 先持 `lock_table()` 再调 `ws_last_opcode`
+    （内部重 lock）→ 自死锁（EXIT=124 超时被杀）；修复 = 显式 scope drop。
+    测试助手 `lock_table()/lock_events()` 用 `unwrap_or_else(|e| e.into_inner())`
+    防 PoisonError 级联。
+- **状态**：🚧 进行中（**DC1 ✅ 完成 / DC2 🔶 14 个 bridge 子模块（12 + send + ws_session_ffi）
+  265 单测绿（269 含 4 #[ignore]）、0 BUG；剩余 I/O 主体 recv_and_parse/poll 循环
+  待迁 / DC3 ⬜ 待开工**）
 - **负责人**：oliveagle（agent 执行）
-- **上游**：`AGENTS.md`（§1 North Star / §3 架构约束 / §6 决议链）、`docs/adr/0001~0009`
-  （已接受决策）、`docs/migrate_mojo/todo.md`（bootstrap 时代历史规划，已废弃，仅参考）
+- **上游**：`AGENTS.md`（§1 North Star / §3 架构约束 / §6 决议链，**决策-19**）、
+  `docs/adr/0001~0010`（已接受决策，含 **ADR-0010 Rust bridge**）、
+  `docs/migrate_mojo/todo.md`（bootstrap 时代历史规划，已废弃，仅参考）
 - **说明**：本文件是 `docs/goals/` 下**第一个** goal 文件。仓库此前无 goals 目录；
   本 goal 在既有 ADR 决策链与各 ADR `tasks.md` 的「后续」清单基础上向前推进。
+  **Track C 方向定稿**：去 C 的终态不是「迁回 Mojo」，而是 **Rust staticlib 替代
+  全部 C bridge，终态 Mojo + Rust only**（Mojo 1.0.0 标准库无 socket/网络/静态
+  运行时，协议/系统逻辑由 Rust 承载比 C 更安全、比强行 Mojo 化更现实）。
 
 ---
 
 ## 1. 北极星引用
 
-> **AGENTS.md §1**：用 Mojo 将代码编译成**单一 Binary，运行时零外部依赖**；
+> **AGENTS.md §1**：用 **Mojo + Rust** 将代码编译成**单一 Binary，运行时零外部依赖**；
 > 部署 = `scp` 一个文件即运行。任何引入新 Python 依赖的 PR 都是倒退；
 > 任何依赖系统 Python 运行时的代码路径，最终都必须被 Mojo 原生实现替换。
+> **决策-19**：Bridge 层语言终态 = Rust（Mojo + Rust only），`src/` 下 `*.c` 清零。
 
 **已达成现状**：Phase 3 单一 binary 交付（ADR-0003 决策-14，运行时嵌入 + 启动暂存 +
 dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i` 可干净启动。
 
-**本 goal 的两条主线**（都是对北极星的延续，不是推翻）：
+**本 goal 的三条主线**（都是对北极星的延续，不是推翻）：
 
 1. **Track A — FastAPI 对标**：把 Mojo 侧框架从「demo server」推进到「可对标 FastAPI
    常用语义的框架」（类型化参数、异常、Request/Response 对象、依赖注入、表单/文件、
-   流式响应等），**全部 Mojo 原生 / C FFI 随 binary 打包**。
+   流式响应等），**全部 Mojo 原生 / Rust bridge（C ABI）随 binary 打包**。
 2. **Track B — 全链路去 Python**：把构建 / 测试 / 压测工具链里**剩余的所有 Python
-   环节**替换为纯 shell / C / Mojo，最终仓库 `*.py` 清零、`.venv` 移除。
+   环节**替换为纯 shell / Rust / Mojo，最终仓库 `*.py` 清零、`.venv` 移除。
+3. **Track C — 去 C（Rust 替代，一步到位）**：把三份 C bridge
+   （`http_bridge_final.c` / `ws.c` / `runtime_shim.c`，工作树 2169 LOC）**全部替换为
+   Rust staticlib**（`extern "C"` 导出，FFI 表面与架构分层完全不变），终态
+   **Mojo + Rust only，C 清零**。
+
+   **「最核心部分能否由 Rust 替代」= 能，且已经是终态方向**：bridge 的所有
+   *最核心* 字节/系统逻辑都由 Rust 承载，而不是仅「无关紧要的边角」：
+
+   | 最核心职责 | 现状 | 终态语言 |
+   |-----------|------|---------|
+   | socket syscall（`socket` / `bind` / `listen` / `accept` / `recv` / `send` / `close`） | C | **Rust**（`bridge/socket.rs`） |
+   | poll 事件循环（epoll/kqueue/poll + 计时器 + deadline） | C | **Rust**（`bridge/io.rs` + `bridge/conn/deadlines.rs`） |
+   | HTTP 请求行+头解析（method/path/version/headers/body chunked） | C | **Rust**（`bridge/parse.rs` + `bridge/conn/parse.rs`） |
+   | WebSocket 协议原语（SHA-1 / base64 / 帧解析 / 掩码 / 分片 / UTF-8 / close） | C | **Rust**（`ws.rs` + `ws/parser.rs`，DC1 ✅ 已上线 / ws.c 已删除） |
+   | Slowloris 防护 / keep-alive / 超时 | C | **Rust**（`bridge/conn/deadlines.rs` 纯逻辑 + I/O 主体待迁） |
+   | CORS / 限流 / 静态文件 / Range / 缓存头 | C | **Rust**（`bridge/{cors,ratelimit,static}.rs`，计划） |
+   | 信号处理（sigaction + handler） | C | **Rust**（`bridge/signals.rs`） |
+   | worker fork + SO_REUSEPORT + 进程编排 | C | **Rust**（`bridge/init_workers.rs`） |
+   | 单 binary loader（embed/stage/dlopen/符号转发/孤儿 stage） | C | **Rust**（`bridge/shim.rs`，DC3） |
+
+   **Mojo 侧保留** = 应用层 / 框架语义 / 业务逻辑（路由注册、参数解析、JSON 序列化、
+   handler 业务、错误处理、协议对象），即「应用/协议层原生」；bridge 仅是
+   不可避免的「系统调用 + 字节搬运」一层。**这与「迁回 Mojo」不同**：
+   Mojo 1.0.0 标准库无 socket / 网络 / crypto / 静态运行时，迁回 Mojo 必然
+   重新发明 socket/poll/SHA-1/loader（且无内存安全保证），属于**走回头路**；
+   一律由 Rust staticlib 承载更安全、门禁更可验证（FFI 表面 1:1 对齐 C 头 +
+   行为等价 e2e + bench + RSS 门禁）。
 
 ---
 
@@ -33,10 +140,10 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 
 ### 2.1 运行时：✅ 已 0 Python（本 goal 不触碰）
 
-- Mojo 原生 HTTP server（C FFI socket 桥接 + 原生协议层）+ 原生 JSON（json.mojo
+- Mojo 原生 HTTP server（bridge socket 桥接 + 原生协议层）+ 原生 JSON（json.mojo
   线性序列化）+ 原生 Router / 参数解析 / 异常→JSON。
 - WebSocket 全链路（ADR-0006~0009，决策-15~18）：多端点、{param} 路由、子协议、
-  保活 ping、close 码 / UTF-8 校验、高并发（C poll 循环 + Mojo 逐消息分派）、
+  保活 ping、close 码 / UTF-8 校验、高并发（bridge poll 循环 + Mojo 逐消息分派）、
   鉴权 token、合并帧尾块 P0 修复。
 - 并发：多进程 worker + SO_REUSEPORT（ADR-0005）。
 
@@ -44,8 +151,8 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 
 | # | 环节 | 现状（Python 用法） | 目标替代方案 | 工作量 |
 |---|------|--------------------|--------------|--------|
-| T1 | `bench.py` + `benchmark.sh` | 唯一 `.py`；stdlib 实现 HTTP(hey)/WS 负载；`.venv` 仅为它保留 | Mojo 原生 bench 二进制（或纯 shell + curl + 内置 WS 客户端）；移除 `.venv` | 大 |
-| T2 | `scripts/e2e_test.sh` | `python3` 生成畸形字节流 hex / 大 payload / WS 客户端 / keep-alive / HEAD body 校验 | 纯 shell（printf/od/openssl）+ 仓库内小 C 工具（随测试构建）| 中 |
+| T1 | `bench.py` + `benchmark.sh` | 唯一 `.py`；stdlib 实现 HTTP(hey)/WS 负载；`.venv` 仅为它保留 | Rust/Mojo 原生 bench 二进制（或纯 shell + curl + 内置 WS 客户端）；移除 `.venv` | 大 |
+| T2 | `scripts/e2e_test.sh` | `python3` 生成畸形字节流 hex / 大 payload / WS 客户端 / keep-alive / HEAD body 校验 | 纯 shell（printf/od/openssl）+ Rust 小工具（随测试构建）| 中 |
 | T3 | `build_single.sh` | `python3 -c 'import modular…'` 定位 Mojo 运行时 lib | shell 探测 `$MODULAR_LIB` + 固定路径候选扫描（`~/.modular/pkg/packages/…`）| 小 |
 
 > 约束：工具链去 Python **只影响 build/test/bench**，不得改变运行时交付物（single
@@ -68,20 +175,113 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 - **P2 框架生态**：URL 解码（`{param}` 含 `%xx`）、NUL 回复 FFI 协议修订
   （ADR-0007 §5 教训 3）、鉴权链统一（首帧 token / 自定义头 / 与 HTTP 中间件统一）、
   模块化 Router/APIRouter、OpenAPI 文档、lifespan 事件、JWT/OAuth2 助手、模板渲染。
-- **P3 协议/服务器**：gzip 压缩、Range/静态缓存头、TLS/HTTPS（可选，需新 C 依赖评估）、
-  HTTP/2（远期，不承诺）。
+- **P3 协议/服务器**：gzip 压缩、Range/静态缓存头、TLS/HTTPS（可选，需 Rust 依赖
+  评估，如 rustls 静态链接）、HTTP/2（远期，不承诺）。
+
+### 2.4 C 侧现状（Track C 进度，2026-09-04 — 已完成 DC1）
+
+**基线行数**（`wc -l src/fastapi_mojo/*.c`，2026-09-04 当日盘点）：
+基线 2514 LOC（http_bridge_final.c 1774 + ws.c 380 + runtime_shim.c 360）。
+**DC1 ✅ 已迁移 ws.c → ws.rs 并删除 ws.c**；KIND_RUN_CMD WIP 已落 HEAD `7b33c26`
+（http_bridge_final.c 1809）。**当前工作树剩 2169 LOC**
+（http_bridge_final.c 1809 + runtime_shim.c 360，待 DC2/DC3）。
+
+| 文件 | LOC (基线→现状) | 主要职责 | → Rust 目标模块 | 状态 |
+|------|-----------------|---------|------------------|------|
+| `http_bridge_final.c` | 1774 → **1809** | socket I/O + poll 事件循环 + HTTP 解析 + keep-alive + 超时/慢连接防护 + CORS + 静态文件 + 限流 + 信号 + worker/SO_REUSEPORT 并发 + WS 会话状态镜像 | `bridge.rs`（按职责拆子模块） | 🔶 DC2 进行中（已落地 **14 子模块**（12 + send + ws_session_ffi）**265 单测绿（269 含 4 #[ignore]）、0 BUG**；I/O 主体 recv_and_parse/poll 循环待迁） |
+| `ws.c` | 380 → **0（已删）** | WS 协议原语：SHA-1 / base64 / handshake / 帧解析 / 掩码 / close 码 / UTF-8 校验 | `ws.rs` | ✅ DC1 完成（行为等价 + e2e 79/79 绿 + 26 单测绿 + `build_single.sh` 接入） |
+| `runtime_shim.c` | 360 → 360 | 单 binary loader：Mojo 运行时嵌入 + 启动暂存 + dlopen 符号转发（ADR-0003 决策-14） | `shim.rs` | ⬜ DC3 待开工 |
+| **合计** | **2514 → 2169**（-13.7%；ws.c -380 已清零，KIND_RUN_CMD +35 净增） | | **0（C 清零，Phase 6 收口）** | |
+
+**关键观察 / 实测教训**：
+
+- **KIND_RUN_CMD WIP 已落 C**（HEAD `7b33c26`，http_bridge_final.c 净增 +35 LOC =
+  1809；含 KIND_HTML/serve_forever/run_command_json/UTF-8 codepoint 修复）；Rust 端
+  `bridge::cmd::run_command_json` 已就绪（13 单测绿，C 副本待 bridge.o 下线时整体
+  移除）。**HEAD 仍含 C 新增业务，但「无 C 新增」= 从现在起生效**：DC2/DC3 内
+  不再向 C 添加新逻辑；DC2 迁完一并删除 C 副本。
+- `ws.rs` 经验：SHA-1 / base64 / 帧解析 / 掩码 / close / UTF-8 全手写，**零第三方
+  crate**，Rust ownership 模型在字节位运算场景下确实甜区（ADR-0009 合并帧尾块
+  丢失 P0 在 Rust 版被类型系统静态杜绝同类 bug）。
+- **DC2-d（本轮增量）**：在 DC2-a/b/c（纯逻辑/I-O leaves/配置/socket/worker/conn
+  表共 11 子模块）之上新增 2 个子模块，**总计 12 个 bridge 子模块、230 cargo 单测
+  全绿**：
+  - `bridge/conn/deadlines.rs`（16 单测）：端口 C `check_deadlines`（§1028-1067）的
+    纯逻辑版。`DeadlineAction` 枚举（None/WsPing/WsClose1000/Timeout408/
+    CloseIdle）+ `decide(phase, first_data_ms, last_data_ms, last_active_ms,
+    &mut ws_strikes, ping_max, now_ms, recv_timeout_ms, idle_max_ms,
+    max_request_ms)`。覆盖 phase 0/1/2/3/4 各分支 + 阈值边界（`>=`）+ ping_max=0
+    禁用保活 + 时钟回拨 `saturating_sub` 防 underflow。I/O 主体（poll 驱动
+    check_deadlines 副作用）下一步迁移。
+  - `bridge/request.rs`（7 `#[test]`，含 `empty_initial_state` / `last_status_byte_access`
+    / `ws_protocol_round_trip` / `slice_accessors_return_correct_ptr_and_len` /
+    `set_http_fields_truncates_long_inputs` / `last_status_truncates_long_input` /
+    `close_after_response_toggle`）：per-request 全局 + slice 访问器。`CurrentRequest`
+    结构（method/path/query/protocol_11/close_after_response/active_fd/active_phase/
+    ws_event_type/ws_key/ws_protocol/last_status）；`static CURRENT: Mutex<CurrentRequest>`
+    （单线程 worker 进程内用 Mutex 满足 Rust 安全）；`CSlice { ptr: *const c_char,
+    len: c_long }` 与 C `fmc_slice` 字节对齐。setter：`set_http_fields` / `set_ws_fields`
+    / `ws_session_set_protocol` / `reset_request_fields` / `set_active` /
+    `set_ws_event_type` / `set_last_status` / `set_protocol_11` /
+    `set_close_after_response`。getter slice：`get_method_slice` / `get_path_slice`
+    / `get_query_slice` / `get_ws_key_slice` / `get_ws_protocol_slice`。getter
+    scalar：`get_close_after_response` / `get_protocol_11` / `get_ws_event_type`
+    / `get_last_status_len` / `read_last_status_byte`。**自检 self-bug 修复**：
+    `last_status_byte_access` "404 Not Found" 13 字符 i=12→'d' (100)、
+    i=13/100→-1 边界；`ws_protocol_round_trip` Mutex 自死锁（实测：full cargo test 在该 test 上 hang 280s+ 无输出；
+    guard 内调 accessor 重 lock）→ 已修复 `{ let g = lock; ... }` 显式 scope drop，
+    **追加更新-3** 验证全 241 测试 0.22s 通过。
+  - **Mutex 非 reentrant（新增教训）**：`CURRENT.lock()` 持有时不能再 lock，
+    否则进程自死锁（单线程 worker 也跑不出来）。测试用 `{ let g = lock(); ... }`
+    显式 scope drop；生产路径 setter/getter 不在同 scope 内重复锁。
+  - **panic=abort 单测仍是 unwind（新增教训）**：默认 `cfg(test)` 用 unwind，
+    故一个 panicking test 不杀整个 binary（单测 fail 后继续跑），便于一次性
+    收集全套失败信息。
+- **self-bug #2 修复（ws_protocol_round_trip assertion）**：修复 #1 的 deadlock 后，
+  test 暴露 `assert_eq!(s.len, 8)` 错误断言 —— 实现 `ws_protocol_len = n`（数据
+  长度 7，NUL 跟随在 `[n]`），与 method/path/query slice 一致。改 `assert_eq!(s.len, 7)`
+  + 验证 `s.len+1` 字节含 NUL 收尾（**追加更新-3**）。
+- **build 链接陷阱**：Rust staticlib 默认拉入 `libgcc_s.so.1`（compiler-rt 内建
+  函数如 `__udivti3`），破坏 North Star（CI libgcc_s 断言）。修复：
+  `gcc -fPIE -pie -O2 -static-libgcc` 静态链接 libgcc_s。已加进
+  `build_single.sh`，ldd 回归仅 libc。
+- **测试 syscall 隔离**：Rust `ConnTable::close()` 调用真 `close(fd)` syscall，
+  测试用合成 fd（101/102/...）若与 libtest 捕获管道撞号会误关，破坏无关测试。
+  修复：`#[cfg(test)] sys_close` no-op，单元测试永不真关 fd（生产路径仍走真
+  `close()`，行为等价 C）。
+- **state_tests env 全局副作用**：env vars 是进程全局，并行 `cargo test` 状态
+  测试互相污染。修复：CI 与本地回归统一 `cargo test --release -- --test-threads=1`
+  （≈ 0.22s，无明显开销）。
+- `shim.rs` 关键风险点：**构造函数顺序**（shim 必须在 Mojo KGEN_CompilerRT_* 首次
+  引用前运行）→ Rust 侧用 `#[used] #[link_section = ".init_array"]` + 链接时
+  `--whole-archive librust_bridge.a` 保证不被裁掉。
+- **binary 体积现状**：C-only 基线 2.2M；DC1 ws.rs 上线后 4.8M（含 -static-libgcc）。
+  中间态主要因 ws.rs 用了 `format!` + `Vec` + `CStr` 引入 std 运行时（~1.5-2MB）。
+  收口路径：ADR-0010 task #12「去 std 瘦身」（`core::ffi`/`core::slice` + 手写字节
+  组装 + 栈缓冲），目标终态 ≤ C + 2MB（≤ 4.2M），CI 中间态预算 ≤ 6M 兜底。
 
 ---
 
 ## 3. 目标（成功标准可验证）
 
-1. **Track A**：覆盖 P0 全部 + P1 大部分 + P2 可落地子项，全部 Mojo 原生 / C FFI
-   随 binary 打包；`e2e` 从 79 项扩展到 ≥ 120 项，覆盖每个新特性。
+1. **Track A**：覆盖 P0 全部 + P1 大部分 + P2 可落地子项，全部 Mojo 原生 / Rust
+   bridge 随 binary 打包；`e2e` 从 79 项扩展到 ≥ 120 项，覆盖每个新特性。
 2. **Track B**：仓库 `find . -name "*.py"`（排除 `.venv`）→ **0 个**；`.venv` 删除；
    `benchmark.sh` / `scripts/e2e_test.sh` / `build_single.sh` 中 `python3` 调用清零。
-3. **不变量保持**：`ldd` 仅 libc；`env -i ./build/fastapi_mojo` 干净启动；
-   CI（build + ldd + 干净环境 + unit + e2e）全绿；每个 `.mojo` 文件 < 500 行。
-4. **任务治理**：每个子项以 beads（`br`）建任务；每项重大特性/协议变更写新 ADR
+3. **Track C**：**C 清零，一步到位 mojo + rust only** — `find src -name '*.c'`
+   → **0**；三份 C bridge 全部由 Rust staticlib 替代（FFI 表面不变）：
+   `bridge.rs`（原 http_bridge_final.c 1809）、`ws.rs`（原 ws.c 380 ✅ DC1 已上线 /
+   ws.c 已删除）、`shim.rs`（原 runtime_shim.c 360）。
+   **DC1 ✅ 完成 / DC2 🔶 12 子模块 + 237 单测绿（241 含 4 #[ignore]）、0 BUG、
+   I/O 主体 + WS 会话 FFI 待迁 / DC3 ⬜ 待开工**。验收门禁：
+   - `ldd build/fastapi_mojo` 仍仅 libc；`env -i` 干净启动；
+   - 全量 e2e 79 项 + 新增强化项全绿；bench 性能不倒退 >10%；
+   - binary 体积增幅 ≤ +2 MB vs C 版（CI 断言）；
+   - 构造函数顺序正确（`--whole-archive` + `.init_array`）。
+4. **不变量保持**：`ldd` 仅 libc；`env -i ./build/fastapi_mojo` 干净启动；
+   CI（build + ldd + 干净环境 + unit + e2e + **C 清零断言**）全绿；
+   每个 `.mojo` 文件 < 500 行；每个 Rust bridge 模块 < 500 行（建议）。
+5. **任务治理**：每个子项以 beads（`br`）建任务；每项重大特性/协议变更写新 ADR
    （含 6 条架构隔离约束声明）+ e2e 增量 + README/AGENTS 对齐。
 
 ---
@@ -94,14 +294,20 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
   静态链接进单 binary 且经 ADR 评审）。
 - ❌ 不在本 goal 内做「Mojo 原生 ASGI/WSGI 协议层」（beads: phase1-mojo-native-crt.6，
   独立评估；与本仓库「自研 HTTP 协议层」路线重复，除非用户明确要求）。
-- ❌ 不承诺 HTTP/2 / TLS 全量实现（列入 P3 观察，需新 C 依赖与安全评审）。
+- ❌ 不承诺 HTTP/2 / TLS 全量实现（列入 P3 观察，需 Rust 依赖与安全评审）。
 - ❌ 不在本 goal 内把 benchmark 工具链语言本身变成「产品」——它是开发工具。
+- ❌ **不追求 Mojo 原生实现一切**：Mojo 1.0.0 标准库缺口（socket/网络/crypto/静态
+  运行时）由 **Rust bridge** 承载，不在本 goal 内强行 Mojo 化（与上一版「迁回 Mojo」
+  方向不同）。
+- ❌ **不引入 Rust 第三方动态链接 crate / 不走 cdylib**：Rust 段仅以 `staticlib` +
+  C ABI 出现；`panic = "abort"` + 系统 allocator + LTO；破坏 `ldd` 仅 libc 不变量
+  的 Rust 依赖一律禁止。
 
 ---
 
 ## 5. 阶段划分（roadmap）
 
-### Phase 4 — 框架语义对标（Track A·P0）
+### Phase 4 — 框架语义对标（Track A·P0 + Track C 启动）
 
 - P4.1 类型化参数：Path/Query/Body 支持 `Int/Float/Bool/List[String]/Dict[String,Any]`
   强类型转换 + 校验失败→422（对标 FastAPI/Pydantic 语义）。
@@ -109,44 +315,81 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
   400/404/405/413 分支）。
 - P4.3 Request/Response 对象：handler 可读 headers/cookies、设置 status_code /
   响应头 / set_cookie；响应支持嵌套 JSON 序列化。
-- 里程碑：新增 ADR-0010；e2e 79→90+；bench 不回归。
+- **DC1 Rust bridge 启动（ADR-0010 落地）**：Rust crate 骨架（`Cargo.toml`
+  `crate-type=["staticlib"]` + `lib.rs` 导出表 + `rust-toolchain.toml` pin）；
+  `build_single.sh` 接入 `cargo build --release`（`--whole-archive librust_bridge.a`
+  替代三份 `.o`，objcopy payload 符号 extern 引用）；CI 安装 rust toolchain +
+  C 清零断言；**ws.c → `ws.rs` 行为等价迁移**（SHA-1/base64/帧解析/掩码/close/UTF-8，
+  e2e M10-M21 回归）。
+- **DC1 完成情况（2026-09-04 当下）**：
+  - Rust crate `src/fastapi_mojo_rs/`（crate-type staticlib / panic=abort / LTO /
+    系统 allocator / 零第三方依赖；`rust-toolchain.toml` pin 1.97.1）；
+  - `ws.rs` 26 单元测试绿 + e2e 79/79 全绿（handshake / frame / mask / close /
+    UTF-8 / subprotocol / ping-pong / 合并帧 / {param} 路由 / 鉴权 — ADR-0006~0009
+    全套语义保持）；
+  - **`ws.c` 已删除**（build_single.sh 不再编译；C 清零 380/2514）；
+  - **build_single.sh 加 `-static-libgcc`**：Rust staticlib 默认拉入 libgcc_s
+    （compiler-rt），破坏 North Star；静态链接后 ldd 回归仅 libc；
+  - **CI 已更新**：`.github/workflows/ci.yml` 加 rustup 安装 + `cargo test --release
+    -- --test-threads=1` + 体积预算门禁（中间态 ≤ 6M）+ C 计数步骤（终态 = 0）；
+  - **测试 syscall 隔离**：`#[cfg(test)] sys_close` no-op，避免 libtest 捕获管道被
+    合成 fd 误关；`state_tests` env 全局副作用统一 `--test-threads=1`。
+- 里程碑：ADR-0010 已接受；e2e 79/79（保持，零回归）；`ws.rs` 上线 + `ws.c` 删除；
+  DC2 已落地 12 bridge 子模块 + 237 单测绿 / 241 含 4 #[ignore]（parse/response/cmd/time_util/port/
+  signals/state/socket/init_workers/conn/conn::parse/conn::deadlines/request）；
+  bench run#15 = +32%（47281 vs 35829）、RSS 平台化；binary 5,000,720 B 不变；
+  C 清零进度 380/2514（≈ -15%，ws.c）；CI 5 道新门禁绿。
 
-### Phase 5 — API 表面补齐（Track A·P1 + Track B 启动）
+### Phase 5 — API 表面补齐（Track A·P1 + Track B 启动 + Track C 主体迁移）
 
 - P5.1 Header/Cookie 参数 + 表单（application/x-www-form-urlencoded）解析。
-- P5.2 文件上传（multipart，C 侧分块解析 + 内存缓冲，不落盘）。
+- P5.2 文件上传（multipart，Rust 侧分块解析 + 内存缓冲，不落盘）。
 - P5.3 依赖注入（`Depends` 语义：解析顺序、缓存、子依赖）。
 - P5.4 中间件链（before/after 有序链 + 异常透传）+ 后台任务（进程内简单队列）。
 - P5.5 Streaming/File/Redirect Response 原语。
-- T1 启动：bench.py → Mojo 原生（与 P5 并行，独立任务线）。
-- 里程碑：新增 ADR-0011/0012；e2e 90→110；`.venv` 移除（bench 不再依赖 Python）。
+- T1 启动：bench.py → Rust/Mojo 原生（与 P5 并行，独立任务线）。
+- **DC2 http_bridge_final.c → `bridge.rs`**：socket/poll 事件循环 + HTTP 解析 +
+  keep-alive + 超时/慢连接防护 + CORS + 限流 + 静态 + 信号 + worker/SO_REUSEPORT +
+  WS 会话状态全部 Rust 重写（按职责拆子模块，每个 <500 行）；FFI 出口签名逐一对齐
+  （`recv_and_parse` / `send_*` / `get_*_slice` 等 ~40 符号）；C 清零进度
+  2169/2514（≈ -86%，ws.c 已清 380；剩 http_bridge_final.c 1809 + runtime_shim.c 360）。
+- 里程碑：新增 ADR-0011/0012；e2e 90→110；`.venv` 移除（bench 不再依赖 Python）；
+  `bridge.rs` 上线。
 
-### Phase 6 — 协议/生态收口（Track A·P2 + Track B 收尾）
+### Phase 6 — 协议/生态收口（Track A·P2 + Track B 收尾 + Track C 清零）
 
 - P6.1 URL 解码（HTTP + WS `{param}` 统一）；NUL 回复 FFI 协议修订。
 - P6.2 鉴权链统一（WS 首帧 token / 自定义头 / 与 HTTP 中间件共用）。
 - P6.3 模块化 Router 组合（多路由表合并）。
 - P6.4 OpenAPI/Swagger 文档（只读生成，`/openapi.json` 起步）+ lifespan 事件。
 - T2/T3 收尾：e2e_test.sh 与 build_single.sh python3 清零。
-- 里程碑：全仓库 `*.py` = 0；e2e ≥ 120；CI 全绿；最终发布 v0.4.0（或按里程碑细分）。
+- **DC3 runtime_shim.c → `shim.rs` + C 清零**：embed/stage/dlopen/符号转发 +
+  孤儿 stage 清理 → Rust；**删除三份 `*.c`**；`find src -name '*.c'` = 0；
+  终态 **Mojo + Rust only**。
+- 里程碑：全仓库 `*.py` = 0；`src/` 下 `*.c` = 0；e2e ≥ 120；CI 全绿；最终发布
+  v0.4.0（或按里程碑细分）。
 
 ---
 
 ## 6. 风险与约束（6 条架构隔离约束声明）
 
-1. **单 binary 零依赖不变量**：任何新增能力必须 Mojo 原生或 C FFI 随 binary 打包；
-   禁止新增 Python 运行期依赖 / 系统动态库依赖（ldd 仅 libc + env -i 启动断言永续）。
+1. **单 binary 零依赖 + Mojo 优先 + Rust bridge**：任何新增能力必须 **Mojo 原生
+   优先**，其次 Rust staticlib（C ABI）随 binary 打包；禁止新增 Python / C / 系统
+   动态库依赖（ldd 仅 libc + env -i 启动断言永续）。能 Mojo 原生实现的能力不得
+   新增到 bridge 层。
 2. **用户代码 = 纯数据**：新增路由/处理器 = 数据声明；行为扩展只走显式单点 dispatch
-   （`run_handler` / `run_ws_message`）加 kind 分支，核心不含 per-handler 业务逻辑。
-3. **God-file 阈值**：每个 `.mojo` 文件 < 500 行；超限即拆分新模块，并在 ADR 标注
-   拆分边界（如 params.mojo 已拆 params_query/params_json 的先例）。
-4. **工具链与运行时解耦**：Track B 只改 build/test/bench；运行时交付物形态不变；
-   工具链可用 shell/C/Mojo，不反向污染运行时依赖图。
-5. **决策先行**：每项重大特性/协议变更须先立 ADR（6 条约束声明）+ `br` 任务 +
-   e2e 增量；禁止「大改后补文档」。
-6. **兼容既有模式**：所有 C 侧新能力走显式 bridge/adapter 入口（如 ws.c /
-   http_bridge_final.c 先例）；Mojo 1.0.0 语法缺口（无闭包/match/文件级 let）用已验证
-   的「类型 + 数据 + 零参 def 常量」模式绕行，不引入新的不可验证技巧。
+  （`run_handler` / `run_ws_message`）加 kind 分支，核心不含 per-handler 业务逻辑。
+3. **God-file 阈值**：每个 `.mojo` 文件 < 500 行；每个 Rust bridge 模块 < 500 行
+  （超限拆子模块，标注拆分边界）；**C 文件不再新增，存量逐阶段清零**。
+4. **工具链与运行时解耦**：Track B 只改 build/test/bench；Track C 只改 bridge 内部
+  实现语言（FFI 表面 / 架构分层 / 单 binary 机制不变）；运行时交付物形态不变
+  （single binary 仍零依赖）；工具链可用 shell/Rust/Mojo，不反向污染运行时依赖图。
+5. **决策先行**：每项重大特性/协议变更（含 C→Rust 迁移点）须先立 ADR（6 条约束
+  声明）+ `br` 任务 + e2e 增量；禁止「大改后补文档」。
+6. **兼容既有模式 + C→Rust 迁移规范**：Rust 侧新能力走显式 bridge/adapter 入口
+  （`extern "C"` 导出表，与原 C 签名逐一对齐）；**存量 C 逻辑按「行为等价 + e2e
+  不回归 + 性能不倒退 >10%」逐段迁 Rust**；Mojo 1.0.0 语法缺口（无闭包/match/文件级
+  let）用已验证的「类型 + 数据 + 零参 def 常量」模式绕行，不引入新的不可验证技巧。
 
 ---
 
@@ -154,24 +397,34 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 
 | 工件 | 与本 goal 的关系 |
 |------|-----------------|
-| `AGENTS.md` §1/§3/§6 | 北极星、架构约束、决策链（本 goal 的硬约束） |
+| `AGENTS.md` §1/§3/§6 | 北极星、架构约束、决策链（本 goal 的硬约束；**决策-19 = 本 Track C 的上游**） |
+| `AGENTS.md` §3.1 部署约束 | 允许 Mojo / 社区包 / **Rust staticlib**；禁止最终形态含 C（已同步修订） |
 | ADR-0001~0005 | Mojo 替换策略 / 单 binary / 路由注册 / 并发 —— 已落地，本 goal 沿用其模式 |
-| ADR-0006~0009 | WebSocket 全链路 —— 其「后续」清单（鉴权扩展 / URL 解码 / NUL 回复 / WS bench）纳入本 goal P2/T1 |
+| ADR-0006~0009 | WebSocket 全链路 —— 其「后续」清单（鉴权扩展 / URL 解码 / NUL 回复 / WS bench）纳入本 goal P2/T1；`ws.c` → `ws.rs` 纳入 Track C DC1 |
+| **ADR-0010-rust-bridge** | **Track C 的实施载体**：Rust staticlib 替代三份 C bridge，6 约束 + 任务清单 |
 | `docs/migrate_mojo/todo.md` | 历史规划（已废弃）；其 C6「Mojo ASGI 协议层」标注为独立评估，非本 goal 范围 |
-| `scripts/e2e_test.sh` | 79 项 e2e，Track A/B 每步的验收门禁 |
-| `benchmark.sh` / `bench.py` | 统一压测入口；Track B T1 的替换对象 |
-| beads（`br`）| 每个子项建任务并跟踪状态 |
+| `scripts/e2e_test.sh` | 79 项 e2e，Track A/B/C 每步的验收门禁（含 C→Rust 行为等价回归） |
+| `benchmark.sh` / `bench.py` | 统一压测入口；Track B T1 的替换对象；Track C 验收需保证「性能不倒退 >10%」 |
+| beads（`br`）| 每个子项建任务并跟踪状态；Track C 子项（DC1/DC2/DC3）独立任务线 |
 
 ---
 
 ## 8. 度量（每阶段验收）
 
-- **功能**：e2e 增量（79 → 90 → 110 → 120+）；单元自检增量；每特性对应 e2e 用例数。
+- **功能**：e2e 增量（79 → 90 → 110 → 120+）；单元自检增量（Rust bridge
+  `cargo test --release -- --test-threads=1` **实测 237/241（4 #[ignore] signal/fork 真集成）、
+  0.22s、0 BUG**，**追加更新-3**）；每特性对应 e2e 用例数。
 - **性能**：`./benchmark.sh` 固定姿势；新增特性不得使既有场景吞吐倒退 >10%
-  （HEY HTTP ~20k rps / 单核顺序 ~300 rps 为基线）。
+  （HEY HTTP ~20k rps / 单核顺序 ~300 rps 为基线）；Track C 迁移同样以此为门禁。
+  **实测（DC2 迁移中，bench run#15）**：get_root_10k_100c = **47281 req/s** vs
+  C-only 基线 35829 = **+32%**、0 errors；RSS 平台化 16720→16208→16208→16208→16208 kB
+  （2500 req，无线性泄漏）——Rust bridge 迁移至今**零性能退化、零内存回归**。
 - **去 Python**：`find . -name "*.py"` 计数；`.venv` 是否移除；三个脚本 `python3`
   调用数归零。
-- **不变量**：CI 上 `ldd` 断言 + `env -i` 启动断言每 push 自动守护。
+- **去 C**：`find src -name '*.c'` → **0**；三份文件 → Rust 的 LOC 与迁移状态
+  （`ws.rs` / `bridge.rs` / `shim.rs`）；C→Rust 迁移点计数（~40 FFI 出口逐一核对）。
+- **binary 体积**：`du -h build/fastapi_mojo` 相对 C 版增幅 ≤ +2 MB（CI 断言）。
+- **不变量**：CI 上 `ldd` 断言 + `env -i` 启动断言 + **C 清零断言**每 push 自动守护。
 
 ---
 
@@ -202,17 +455,68 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 | lifespan | 事件 | ❌ | 支持 | P6.4 |
 | gzip 压缩 | 中间件 | ❌ | 支持 | P3 |
 | CORS 精细配置 | allow_headers/expose/max_age | 基础 | 补全 | P3 |
-| TLS/HTTPS | 支持 | ❌ | 观察（需新 C 依赖评审） | P3 |
+| TLS/HTTPS | 支持 | ❌ | 观察（需 Rust 依赖评审） | P3 |
 | HTTP/2 | 支持 | ❌ | 远期，不承诺 | P3 |
 
 ## 附录 B：Track B 去 Python 明细（当前 python3 调用点）
 
 | 文件 | 调用点 | 替代方案 | 阶段 |
 |------|--------|---------|------|
-| `bench.py` | 整个文件（HTTP + WS 负载、统计、SQLite 落库） | Mojo 原生 bench 二进制 | T1/Phase 5 |
-| `benchmark.sh` | `$PYTHON_BIN bench.py …`、`.venv` 探测 | 调用 Mojo bench | T1/Phase 5 |
-| `scripts/e2e_test.sh` | `python3 -c`/heredoc 共 ~15 处（hex 构造 / 大 payload / WS 客户端 / keep-alive / HEAD body） | 纯 shell（printf/od/openssl）+ 小 C 工具 | T2/Phase 6 |
+| `bench.py` | 整个文件（HTTP + WS 负载、统计、SQLite 落库） | Rust/Mojo 原生 bench 二进制 | T1/Phase 5 |
+| `benchmark.sh` | `$PYTHON_BIN bench.py …`、`.venv` 探测 | 调用 Rust/Mojo bench | T1/Phase 5 |
+| `scripts/e2e_test.sh` | `python3 -c`/heredoc 共 ~15 处（hex 构造 / 大 payload / WS 客户端 / keep-alive / HEAD body） | 纯 shell（printf/od/openssl）+ Rust 小工具 | T2/Phase 6 |
 | `build_single.sh` | `python3 -c 'import modular…'` 定位 lib | `$MODULAR_LIB` + 固定路径候选扫描 | T3/Phase 6 |
 
 > **验收红线**：Phase 6 结束时 `git grep -n "python3\|\.venv\|bench\.py" -- ':!docs' ':!AGENTS.md' ':!README.md'`
 > 应仅剩历史文档提及；`.venv/` 目录删除。
+
+## 附录 C：Track C 去 C（C → Rust）明细
+
+### C→Rust 迁移对照（2026-09-04 基线，终态 C 清零）
+
+| C 文件 | LOC（基线→现状） | 职责 | Rust 目标模块（现状） | 阶段 |
+|--------|------------------|------|----------------------|------|
+| `ws.c` | 380 → **0（已删）** | SHA-1（handshake）/ base64（Sec-WebSocket-Accept）/ handshake 构造（101 + subprotocol）/ 帧解析 / 掩码 / 分片重组 / close 码 / UTF-8 校验 / socket write（writev） | `ws.rs` + `ws/parser.rs`（26 单测绿） | ✅ DC1 完成 |
+| `http_bridge_final.c` | 1774 → **1809**（KIND_RUN_CMD +35 净增） | socket I/O / poll 事件循环 / accept / read / write / HTTP 请求行+头解析 / keep-alive / Slowloris 防护 / CORS / 限流 / 静态文件（嵌入 + Range/缓存头）/ 信号处理（sigaction + handler）/ WS 会话状态（parser 镜像 / 会话 ID / 队列）/ worker fork + SO_REUSEPORT / 动态 JSON 响应 / OPTIONS preflight | `bridge.rs` 按职责拆 12 子模块已落地：`parse.rs` / `response.rs` / `cmd.rs` / `time_util.rs` / `port.rs` / `signals.rs` / `state.rs` / `socket.rs` / `init_workers.rs` / `conn.rs` / `conn/parse.rs` / `conn/deadlines.rs` / `request.rs`（**237 单测绿 / 241 含 4 #[ignore]、0 BUG**；I/O 主体 `io.rs` + WS 会话 FFI + `send.rs` 待迁，见 ADR-0010 tasks） | 🔶 DC2 / Phase 5 |
+| `runtime_shim.c` | 360 → 360 | Mojo 运行时嵌入（objcopy payload）/ 启动暂存 / dlopen 符号转发（KGEN_CompilerRT_* 等）/ 孤儿 stage 清理 / 进程退出清理 | `shim.rs`（`.init_array` 构造顺序 + `--whole-archive` 防裁） | ⬜ DC3 / Phase 6 |
+| **合计** | **2514 → 2169** | | **0 C** | |
+
+> 注：`bridge.rs` 目标模块名按 ADR-0010 规划为 `socket/parse/cors/ratelimit/static/
+> signal/ws_state/worker` 等；实际落地按「纯逻辑优先、I/O 后迁」拆分，当前
+> `mod.rs` 声明的 12 个子模块即为生产态模块边界（见 ADR-0010 `tasks.md`）。
+
+### Rust crate 工程约束（ADR-0010）
+
+- `Cargo.toml`：`[lib] crate-type = ["staticlib"]`；`[profile.release] panic = "abort",
+  lto = true, codegen-units = 1, opt-level = "z"`；系统 allocator（不引 jemalloc）。
+- 依赖：倾向**零第三方 crate**（SHA-1 / base64 / UTF-8 / 帧解析全手写，保 ldd 干净
+  + 体积小）；若引入，仅限**纯 Rust、静态链接、无系统依赖**的 crate，且经 ADR 评审。
+- FFI：全部 `extern "C"` 导出，`#[repr(C)]` 结构体，与原 C 头逐字段镜像；
+  ~40 个导出符号（`recv_and_parse` / `send_*` / `get_*_slice` / `ws_*` /
+  `bridge_fail` / `init_workers` 等）逐一核对。
+- 链接：`gcc -pie ... --whole-archive librust_bridge.a` + objcopy payload
+  （`_binary_*_start/_end`）用 `extern "C"` 引用；shim 构造函数经
+  `#[used] #[link_section = ".init_array"]` 保证先于 Mojo 运行时符号首次引用。
+- 工具链 pin：`rust-toolchain.toml` 固定版本；CI / `build_single.sh` 自动检测/安装。
+
+### 迁移优先级（DC1 → DC2 → DC3）
+
+1. **DC1（Phase 4）`ws.rs`** ✅ 已完成：最小、最独立（纯协议原语，不碰 socket
+   事件循环）；e2e M10-M21 全绿后切流；C 清零进度 380/2514（**ws.c 已删除**）。
+2. **DC2（Phase 5）`bridge.rs`**：主体工程（1809 LOC），按职责拆子模块
+   （已落地 12 子模块 + **237 单测绿 / 241 含 4 #[ignore]、0 BUG**）；FFI 出口签名
+   逐一对齐；e2e 全量 + bench 门禁；C 清零进度 2169/2514（ws.c 已清 380）。
+3. **DC3（Phase 6）`shim.rs` + C 删除**：loader 迁 Rust；三份 `*.c` 删除；
+   `find src -name '*.c'` = 0；终态 **Mojo + Rust only**。
+
+### 关键验证点（每个迁移阶段必查）
+
+- `ldd build/fastapi_mojo` 仅 libc；
+- `env -i ./build/fastapi_mojo` 干净启动；
+- 全量 e2e 不回归；bench 不倒退 >10%；
+- binary 体积增幅 ≤ +2 MB（CI 断言）；
+- shim 构造函数先于 Mojo 运行时符号首次引用（启动即验证，失败 = 段错误/符号未定义）。
+
+> **Track C 验收红线**：Phase 6 结束时 `find src -name '*.c'` → **0**；
+> `git grep -n "\.c\b" -- src/`（业务代码）→ 0（build_single.sh 中 gcc 链接入口
+> 移除，改 `cargo` / `rustc`）；终态 **Mojo + Rust only**。

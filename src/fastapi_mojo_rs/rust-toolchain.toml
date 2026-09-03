@@ -1,0 +1,6 @@
+# Pin the Rust toolchain used to build the bridge (ADR-0010 §3.6).
+# CI / build_single.sh 据此自动安装, 保证可复现。
+[toolchain]
+channel = "1.97.1"
+components = []
+profile = "minimal"

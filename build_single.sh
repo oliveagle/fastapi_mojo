@@ -21,7 +21,7 @@ SRC="$ROOT/src/fastapi_mojo"
 BUILD="$ROOT/build"
 OUT="$BUILD/fastapi_mojo"
 
-for tool in mojo gcc objcopy; do
+for tool in mojo gcc objcopy cargo; do
     command -v "$tool" >/dev/null || { echo "ERROR: $tool not found"; exit 1; }
 done
 
@@ -125,22 +125,33 @@ if [[ -d "$SRC/static" ]]; then
 fi
 STATIC_DEFS+=(-DN_EMBED_STATIC=$n_static)
 
-echo "[3/5] Compiling C bridge + WebSocket protocol + runtime shim..."
+echo "[3/5] Compiling C bridge + runtime shim (bridge/ws C -> Rust, ADR-0010)..."
+
+# Rust bridge (staticlib): ws protocol layer (DC1 done), HTTP bridge/shim (DC2/3).
+# 链接顺序: 用 --whole-archive 强制拉入全部对象 (含未来 shim 的 .init_array 构造器).
+RS_DIR="$ROOT/src/fastapi_mojo_rs"
+RS_LIB="$RS_DIR/target/release/libfastapi_mojo_rs.a"
+
+# C bridge (尚未迁 Rust 的部分): 仅保留 http_bridge_final.c + runtime_shim.c
 gcc -fPIC -O2 -Wall -c "$SRC/http_bridge_final.c" -o "$BUILD/bridge.o"
-gcc -fPIC -O2 -Wall -c "$SRC/ws.c" -o "$BUILD/ws.o"
 gcc -fPIC -O2 -Wall -c "$SRC/runtime_shim.c" -o "$BUILD/shim.o" \
     -DKGEN_PAYLOAD_START="${SYM_START[payload_kgen]}"   -DKGEN_PAYLOAD_END="${SYM_END[payload_kgen]}" \
     -DMSUPP_PAYLOAD_START="${SYM_START[payload_msupp]}" -DMSUPP_PAYLOAD_END="${SYM_END[payload_msupp]}" \
     -DASYNCRT_PAYLOAD_START="${SYM_START[payload_asyncrt]}" -DASYNCRT_PAYLOAD_END="${SYM_END[payload_asyncrt]}" \
     "${STATIC_DEFS[@]}"
 
+echo "[3.5] Building Rust bridge (fastapi_mojo_rs staticlib)..."
+cargo build --release --manifest-path "$RS_DIR/Cargo.toml" --quiet
+
 echo "[4/5] Linking single binary (PIE, shim constructor first)..."
 # NOTE: objcopy binary objects carry no .note.GNU-stack; suppress the exec-stack warning.
-gcc -fPIE -pie -O2 \
+# NOTE: Rust staticlib 引入 libgcc_s (compiler-rt), 必须 -static-libgcc 静态链接
+# 否则 ldd 出现 libgcc_s.so.1 违反 North Star (CI libgcc_s 断言).
+gcc -fPIE -pie -O2 -static-libgcc \
     "$BUILD/shim.o" \
     "$BUILD/server.o" \
     "$BUILD/bridge.o" \
-    "$BUILD/ws.o" \
+    -Wl,--whole-archive "$RS_LIB" -Wl,--no-whole-archive \
     "$BUILD/payload_kgen.o" \
     "$BUILD/payload_msupp.o" \
     "$BUILD/payload_asyncrt.o" \
