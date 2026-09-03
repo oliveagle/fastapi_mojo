@@ -294,6 +294,70 @@ RSS 平台化（HTTP 2500 req + WS 180k frames）→ 无线性泄漏
   - **清理 stale 标记**：全文 grep `待迁|待开工|已完成 DC1|⬜ 待|，计划）|🔶` 全部 0 匹配。
   - **commit message（待 push）**：`docs(goal): 终态速览 + 清理过时 C 状态标记 + README 同步`。
 
+- **追加更新-10**：2026-09-04（**质量门禁 0 警告 0 BUG 闭环（fmtool + fastapi_mojo_rs 全量 clippy -D warnings）**）：
+  - **fmtool 22→0 警告**：前序的 47 处 `io::Error::new(ErrorKind::Other, x)` → `io::Error::other(x)`
+    已完成；本轮补齐 22 条 —— redundant_closure x7 (main.rs `|p| e2e::cont100(p)` → `e2e::cont100`)
+    + vec![] x2 (bench.rs `obj.push(..)` 5 行 / `root.push(..)` 7 行) + explicit_counter_loop x2
+    (`for (i, sc) in (1..).zip(arr.iter())` / `for (id, line) in (start + 1..).zip(...)`)
+    + match→unwrap_or_default (e2e.rs:123) + type alias x2 (`WsConnectResult` / `HandshakeResult`)
+    + is_multiple_of (net.rs:72) + div_ceil (ws.rs:100 base64 容量) +
+    iter_mut enumerate (ws.rs:51 SHA1 `w[16..80]`, 详见下方「SHA1 级联修复」) +
+    match→? (ws.rs:243 handshake recv) + strip_prefix (bench.rs:567 `url.strip_prefix("ws://")`)
+    + Display format! (bench.rs:203 `&String::from_utf8_lossy(...)` 而非 `.to_string()`)
+    + `let mut root` → `let root` (vec![] 已不可变)。**编译验证**：2 处修复未通过编译
+    (`.to_string()` 漏 `&` + 旧 `i += 1` 残留) → 已修。
+  - **fastapi_mojo_rs 69→0 警告**（此前从未对 bridge crate 跑过 clippy，暴露 69 处）：
+    - **lib 根 `#![allow(clippy::not_unsafe_ptr_arg_deref)]` 38 条**：本 crate 的 `pub` 函数
+      绝大多数是 `#[no_mangle] extern "C"` 导出 (~40 个，与原 C bridge 同名对齐)，
+      指针有效性由 Mojo C ABI 调用契约保证；按 FFI glue 标准做法 (libc / nix 等同模式)
+      在 lib 根 allow 而非逐函数标 `unsafe` (后者会污染 50+ 个 Rust 单测调用点)。
+    - **doc 注释 x13**：mod.rs / send.rs 列表项续行缩进 (4/5/6/8 反复横跳，最终 5 空格对齐
+      bullet 文字列)；io.rs sys_recv/sys_accept 返回码改 backtick inline code (避免
+      `0 : EOF` 被误读为 quote continuation)；response.rs:8 加空行；request.rs:260 删空行。
+    - **Default impl x3**：`impl Default for ConnTable/WsEventQueue/WsParser { default() -> Self::new() }`
+      (避免重写 new() 逻辑；不引入 derive 因 new() 用 `Vec::with_capacity(MAX_CONNS)` 而非默认空)。
+    - **机械修复**：`(b'A'..=b'Z').contains(&c)` → `c.is_ascii_uppercase()` (conn/parse.rs:177)；
+      `while let Some(arg) = iter.next()` → `for arg in iter.by_ref()` (port.rs:30)；
+      `b"/proc/self/exe\0".as_ptr() as *const c_char` → `c"/proc/self/exe".as_ptr()`
+      (shim.rs:327, Rust 1.77+ 原生 C 串字面量)；`b"X".offset(len as isize)` → `b"X".add(len)`
+      (ws.rs:165/190, 同安全语义, 避免 `usize → isize` 转换 lint)；
+      `< a && b > c` / `cp < x || cp > y` → `(a..=b).contains(&c)` x3 (ws.rs:293/371/374)。
+    - **折叠 + needless_range_loop**：io.rs:661 `pf_pos[i] = nfd` → `for (i, pos) in pf_pos.iter_mut().enumerate()`
+      (消除索引借用冲突)；send.rs:101 / ws.rs:271 嵌套 `if a { if b { ... } }` 合并为 `if a && b { ... }`。
+    - **测试 3 条**：state_tests.rs:162 `<= MAX - 1` → `< MAX`；cmd_tests.rs:139
+      `expect(&format!(...))` 拆出局部变量 (避免临时构造的引用)；send_tests.rs:78
+      `find_blank_line(&resp)` → `find_blank_line(resp)` (needless_borrow)。
+  - **🔴 SHA1 级联依赖 BUG（实测 catch + 修复，0 BUG 门禁价值）**：原 SHA1 实现 w[16..80]
+    是顺序循环（`for i in 16..80 { w[i] = rotl(w[i-3]^w[i-8]^w[i-14]^w[i-16], 1) }`），w[i]
+    依赖 w[i-3]，而 i ≥ 19 时 w[i-3] 是**刚算的新值**。clippy 让改为 `iter_mut().enumerate()`
+    时遇到借用冲突，本想用预计算 + 回写绕过（`new_w[k] = w[i-3] ^ ...` 全用旧 w），跑测试
+    立刻 FAIL —— `sha1_abc` / `sha1_fox` / `sha1_empty` / `compute_accept_rfc6455_example`
+    / `ws_session_begin_sends_101` 共 5 个测试红。**根因**：预计算用了 w 的旧值，但
+    i ≥ 19 的 w[i-3] 已经是新值。**修复**：级联预计算
+    ```
+    for k in 0..64 {  // k 对应 w[i], i = k + 16
+        let w_im3 = if k >= 3  { new_w[k-3]  } else { w[k+13] };
+        let w_im8 = if k >= 8  { new_w[k-8]  } else { w[k+8]  };
+        let w_im14 = if k >= 14 { new_w[k-14] } else { w[k+2]  };
+        let w_im16 = if k >= 16 { new_w[k-16] } else { w[k]     };
+        new_w[k] = (w_im3 ^ w_im8 ^ w_im14 ^ w_im16).rotate_left(1);
+    }
+    ```
+    保证每次 `w[i-3]` 读最新计算值的同时仍满足 clippy 不变借用。**5 测试重测全绿**。
+  - **验收**（实测）：
+    - `RUSTFLAGS="-D warnings" cargo clippy --release` (fmtool)       → 0 警告
+    - `RUSTFLAGS="-D warnings" cargo clippy --release --tests` (fastapi_mojo_rs) → 0 警告
+    - `cargo test --release -- --test-threads=1` (fastapi_mojo_rs)    → **281 passed; 0 failed; 4 ignored** (0.22s)
+    - `./build_single.sh` → binary **5.2M**; `ldd build/fastapi_mojo` 仅 libc
+    - `./scripts/e2e_test.sh` → **79/79** 全绿
+    - `./benchmark.sh` → 6 场景 **0 errors**; `get_root_10k_100c = 42,771 req/s`
+      (基线 39,500, +8%; 在共享机 QEMU+nacos 抖动噪声内, 无退化)
+    - `env -i ./build/fastapi_mojo` → 干净启动 health 200
+    - **RSS 平台化**（worker PPID=supervisor，HTTP 5 轮 × 200 req 共 1000 req）：
+      17160 → 17200 → 17216 → 17232 → 17232 kB（round 4→5 平台化 +0 kB；+72 kB 总增量在
+      Mojo runtime + worker stack 自然 warm-up 区间，**无线性泄漏**）
+    - `pgrep -x fastapi_mojo = 0`（无孤儿 server）
+
 - **状态**：✅ **已完成（终态 Mojo + Rust only, 零 Python 工具链, C 清零达成）**（DC1 ✅ ws.c 已删 / DC2 ✅ http_bridge_final.c → bridge/* 15 子模块 + ffi.rs /
   DC3 ✅ runtime_shim.c → bridge/shim.rs / **DC4 Track B 工具链去 Python**（fmtool 替代 bench.py + e2e python 客户端, `.venv`/`benchmark.db` 删除）；
   `find src -name '*.c'` = 0；`find . -name "*.py"` (excl `.git docs`) = 0；`.venv` 不存在；
