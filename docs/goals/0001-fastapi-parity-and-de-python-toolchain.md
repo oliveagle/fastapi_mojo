@@ -172,9 +172,39 @@
   - **下一步（DC3）**：`bridge/shim.rs` 端口 `runtime_shim.c` 360 LOC（embed/stage/
     dlopen 符号转发 + 孤儿 stage 清理 + 退出清理），C 终态归零。完成后 `find src -name '*.c'`
     = 0，**终态 Mojo + Rust only**。
-- **状态**：🚧 进行中（**DC1 ✅ 完成 / DC2 ✅ 完成（15 个 bridge 子模块，
-  281 单测全绿（285 含 4 #[ignore]）、0 BUG、0 警告；e2e 79/79 绿；bridge.o 已下线，
-  服务纯 Rust FFI 运行）/ DC3 ⬜ 待开工（bridge/shim.rs 端口 runtime_shim.c 360 LOC）**）
+  **追加更新-7**：2026-09-04（**DC3 `bridge/shim.rs` 端口 `runtime_shim.c` 360 LOC + C 清零达成，终态 Mojo + Rust only**）：
+  - **`bridge/shim.rs`（374 LOC）** — 端口 runtime_shim.c 全套：embed/stage/dlopen/
+    符号转发/孤儿 stage 清理/atexit。3 个 objcopy payload 符号用 `extern "C" { static : u8 }`
+    声明（文件名派生的确定性符号 `_binary_payload_{kgen,msupp,asyncrt}_bin_{start,end}`）。
+    11 个 `KGEN_CompilerRT_*` 转发函数用 macro 批量定义（`#[no_mangle] pub unsafe extern "C" fn`，
+    6-register SysV ABI-safe，与 C 6-register forwarder 字节等价）。
+  - **`build.rs`（80 LOC）** — 读 env 变量 `SHIM_STATIC_N / SHIM_STATIC_<i>_{NAME,START,END}`
+    （build_single.sh 注入），生成 `$OUT_DIR/shim_static_gen.rs`（extern 声明 +
+    `embedded_static_files()` fn 返回 `Vec<(&str, *const u8, *const u8)>`）；静态资源
+    符号名随文件名变化，故走 build.rs 而非源码常量。
+  - **构造函数**：`#[used] #[link_section = ".init_array"] static SHIM_BOOTSTRAP: unsafe extern "C" fn() = kgen_runtime_bootstrap`；
+    实测 server.o 无 .init_array / 无 .preinit_array（Mojo KGEN 调用 lazy，在 main
+    首次 dispatch 才触发），故 shim 在 .init_array 即可保证早于 KGEN 首次引用。
+  - **孤儿 stage 目录 self-heal 修复**：原 C 版 `unlink + 一级 rmdir` 对含 `static/`
+    子目录的孤儿清理失败（残留 `static/`）；Rust 版改 `fs::remove_dir_all` 一次性递归清干净。
+    实测：22 孤儿 → 启动 sweep 1 → atexit 清 0。
+  - **单测隔离**：`#[cfg(test)] mod test_payload_stubs` 提供 6 个 `#[no_mangle] static _binary_payload_*_bin_{start,end}: u8 = 0`
+    stub 满足链接器；构造函数 `#[cfg(not(test))]` 不注册到 .init_array（避免单测触发
+    真实 staging / dlopen）。
+  - **`build_single.sh` 切换**：移除 `gcc -fPIC -O2 -Wall -c "$SRC/runtime_shim.c" -o "$BUILD/shim.o"`
+    + 链接行去除 `"$BUILD/shim.o"`；`env SHIM_STATIC_* cargo build` 注入 static 符号名；
+    `--whole-archive librust_bridge.a` 提供 shim 的 .init_array 构造器。
+  - **`git rm src/fastapi_mojo/{http_bridge_final,runtime_shim}.c`** — `find src -name '*.c'` = **0**，
+    **C 清零达成**。
+  - 验收：0 BUG / 0 警告 / **281 cargo 单测全绿（285 含 4 #[ignore]）** / e2e 79/79 绿 /
+    bench run#18 = 43,878 req/s（**+22%** vs C-only 基线 35,829，无回归） / RSS 平台化
+    16528→16868 kB / env -i 干净启动 / binary 5.2M（CI 预算 ≤6M） / ldd 仅 libc /
+    orphan sweep 22→1→0 / **C 清零 = 0**。
+- **状态**：✅ **已完成（终态 Mojo + Rust only，C 清零达成）**（DC1 ✅ ws.c 已删 /
+  DC2 ✅ http_bridge_final.c → bridge/* 15 子模块 + ffi.rs / DC3 ✅ runtime_shim.c → bridge/shim.rs；
+  `find src -name '*.c'` = 0；281 cargo 单测全绿（285 含 4 #[ignore]）/ 0 BUG / 0 警告；
+  e2e 79/79 绿；bench run#18 = 43,878 req/s (+22% vs C-only 基线)；RSS 平台化；env -i 干净启动；
+  binary 5.2M（CI 预算 ≤6M）；ldd 仅 libc）
 - **负责人**：oliveagle（agent 执行）
 - **上游**：`AGENTS.md`（§1 North Star / §3 架构约束 / §6 决议链，**决策-19**）、
   `docs/adr/0001~0010`（已接受决策，含 **ADR-0010 Rust bridge**）、
@@ -286,10 +316,10 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 
 | 文件 | LOC (基线→现状) | 主要职责 | → Rust 目标模块 | 状态 |
 |------|-----------------|---------|------------------|------|
-| `http_bridge_final.c` | 1774 → **1809**（**bridge.o 已死代码，待 DC3 后删**） | socket I/O + poll 事件循环 + HTTP 解析 + keep-alive + 超时/慢连接防护 + CORS + 静态文件 + 限流 + 信号 + worker/SO_REUSEPORT 并发 + WS 会话状态镜像 | `bridge.rs`（按职责拆子模块）+ `bridge/ffi.rs`（413 LOC extern "C" 包装层） | ✅ **DC2 完成**（15 子模块 + ffi.rs 包装层；**281 单测绿（285 含 4 #[ignore]）、0 BUG、0 警告**；e2e 79/79 绿；bench +22%；build_single.sh 已切走 bridge.o，**服务纯 Rust FFI 运行**；NUL 终止修复 ×3 已收口） |
+| `http_bridge_final.c` | 1774 → **1809** → **0（已删，DC2 + DC3 后）** | socket I/O + poll 事件循环 + HTTP 解析 + keep-alive + 超时/慢连接防护 + CORS + 静态文件 + 限流 + 信号 + worker/SO_REUSEPORT 并发 + WS 会话状态镜像 | `bridge/*` 15 子模块 + `bridge/ffi.rs`（413 LOC extern "C" 包装层） | ✅ **DC2 完成**（15 子模块 + ffi.rs 包装层；**281 单测绿（285 含 4 #[ignore]）、0 BUG、0 警告**；e2e 79/79 绿；bench +22%；build_single.sh 已切走 bridge.o，**服务纯 Rust FFI 运行**；NUL 终止修复 ×3 已收口；DC3 后 `.c` 文件已 `git rm`） |
 | `ws.c` | 380 → **0（已删）** | WS 协议原语：SHA-1 / base64 / handshake / 帧解析 / 掩码 / close 码 / UTF-8 校验 | `ws.rs` | ✅ DC1 完成（行为等价 + e2e 79/79 绿 + 26 单测绿 + `build_single.sh` 接入） |
-| `runtime_shim.c` | 360 → 360 | 单 binary loader：Mojo 运行时嵌入 + 启动暂存 + dlopen 符号转发（ADR-0003 决策-14） | `shim.rs` | ⬜ DC3 待开工 |
-| **合计** | **2514 → 2169**（-13.7%；ws.c -380 已清零，KIND_RUN_CMD +35 净增；**bridge.o 已下线，http_bridge_final.c 待 DC3 后删**） | | **0（C 清零，DC3 后）** | |
+| `runtime_shim.c` | 360 → **0（已删，DC3 后）** | 单 binary loader：Mojo 运行时嵌入 + 启动暂存 + dlopen 符号转发 + 孤儿 stage 清理 + atexit（ADR-0003 决策-14） | `bridge/shim.rs`（374 LOC）+ `build.rs`（80 LOC） | ✅ **DC3 完成**（11 KGEN_CompilerRT_* 转发 macro + .init_array 构造器 + fs::remove_dir_all 修复孤儿清理 + 单测隔离；orphan sweep 实测 22→1→0；e2e 79/79 绿 / bench +22% / binary 5.2M / ldd 仅 libc） |
+| **合计** | **2514 → 0**（-100%；ws.c -380 / http_bridge_final.c -1809 / runtime_shim.c -360 全清零；**终态 Mojo + Rust only**） | | **0（C 清零达成）** | |
 
 **关键观察 / 实测教训**：
 
@@ -570,14 +600,14 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 
 ## 附录 C：Track C 去 C（C → Rust）明细
 
-### C→Rust 迁移对照（2026-09-04 基线，终态 C 清零）
+### C→Rust 迁移对照（2026-09-04 终态：C 清零达成，Mojo + Rust only）
 
 | C 文件 | LOC（基线→现状） | 职责 | Rust 目标模块（现状） | 阶段 |
 |--------|------------------|------|----------------------|------|
 | `ws.c` | 380 → **0（已删）** | SHA-1（handshake）/ base64（Sec-WebSocket-Accept）/ handshake 构造（101 + subprotocol）/ 帧解析 / 掩码 / 分片重组 / close 码 / UTF-8 校验 / socket write（writev） | `ws.rs` + `ws/parser.rs`（26 单测绿） | ✅ DC1 完成 |
-| `http_bridge_final.c` | 1774 → **1809**（KIND_RUN_CMD +35 净增） | socket I/O / poll 事件循环 / accept / read / write / HTTP 请求行+头解析 / keep-alive / Slowloris 防护 / CORS / 限流 / 静态文件（嵌入 + Range/缓存头）/ 信号处理（sigaction + handler）/ WS 会话状态（parser 镜像 / 会话 ID / 队列）/ worker fork + SO_REUSEPORT / 动态 JSON 响应 / OPTIONS preflight | `bridge.rs` 按职责拆 12 子模块已落地：`parse.rs` / `response.rs` / `cmd.rs` / `time_util.rs` / `port.rs` / `signals.rs` / `state.rs` / `socket.rs` / `init_workers.rs` / `conn.rs` / `conn/parse.rs` / `conn/deadlines.rs` / `request.rs`（**237 单测绿 / 241 含 4 #[ignore]、0 BUG**；I/O 主体 `io.rs` + WS 会话 FFI + `send.rs` 待迁，见 ADR-0010 tasks） | 🔶 DC2 / Phase 5 |
-| `runtime_shim.c` | 360 → 360 | Mojo 运行时嵌入（objcopy payload）/ 启动暂存 / dlopen 符号转发（KGEN_CompilerRT_* 等）/ 孤儿 stage 清理 / 进程退出清理 | `shim.rs`（`.init_array` 构造顺序 + `--whole-archive` 防裁） | ⬜ DC3 / Phase 6 |
-| **合计** | **2514 → 2169** | | **0 C** | |
+| `http_bridge_final.c` | 1774 → **1809** → **0（已 `git rm`，DC2 + DC3 后）** | socket I/O / poll 事件循环 / accept / read / write / HTTP 请求行+头解析 / keep-alive / Slowloris 防护 / CORS / 限流 / 静态文件（嵌入 + Range/缓存头）/ 信号处理（sigaction + handler）/ WS 会话状态（parser 镜像 / 会话 ID / 队列）/ worker fork + SO_REUSEPORT / 动态 JSON 响应 / OPTIONS preflight | `bridge.rs` 按职责拆 **15 子模块 + `bridge/ffi.rs`** 全部已落地：`parse.rs` / `response.rs` / `cmd.rs` / `time_util.rs` / `port.rs` / `signals.rs` / `state.rs` / `socket.rs` / `init_workers.rs` / `conn.rs` / `conn/parse.rs` / `conn/deadlines.rs` / `request.rs` / `io.rs` / `ws_session_ffi.rs` + `bridge/ffi.rs`（413 LOC extern "C" 包装层） (**281 单测绿 / 285 含 4 #[ignore]、0 BUG**；NUL 终止修复 ×3；e2e 79/79；bench +22%；bridge.o 已下线) | ✅ DC2 完成（DC2-h `bridge/ffi.rs` + build 切换） |
+| `runtime_shim.c` | 360 → **0（已 `git rm`，DC3 后）** | Mojo 运行时嵌入（objcopy payload）/ 启动暂存 / dlopen 符号转发（KGEN_CompilerRT_* 等）/ 孤儿 stage 清理 / 进程退出清理 | `bridge/shim.rs`（374 LOC，`.init_array` 构造器 + 11 KGEN 转发 macro + `fs::remove_dir_all` 修复孤儿清理）+ `build.rs`（80 LOC，env → shim_static_gen.rs） | ✅ DC3 完成（orphan sweep 实测 22→0） |
+| **合计** | **2514 → 0**（-100%；ws.c -380 / http_bridge_final.c -1809 / runtime_shim.c -360 全清零） | | **0 C（终态 Mojo + Rust only，决策-19）** | |
 
 > 注：`bridge.rs` 目标模块名按 ADR-0010 规划为 `socket/parse/cors/ratelimit/static/
 > signal/ws_state/worker` 等；实际落地按「纯逻辑优先、I/O 后迁」拆分，当前
@@ -602,10 +632,16 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 1. **DC1（Phase 4）`ws.rs`** ✅ 已完成：最小、最独立（纯协议原语，不碰 socket
    事件循环）；e2e M10-M21 全绿后切流；C 清零进度 380/2514（**ws.c 已删除**）。
 2. **DC2（Phase 5）`bridge.rs`**：主体工程（1809 LOC），按职责拆子模块
-   （已落地 12 子模块 + **237 单测绿 / 241 含 4 #[ignore]、0 BUG**）；FFI 出口签名
-   逐一对齐；e2e 全量 + bench 门禁；C 清零进度 2169/2514（ws.c 已清 380）。
-3. **DC3（Phase 6）`shim.rs` + C 删除**：loader 迁 Rust；三份 `*.c` 删除；
-   `find src -name '*.c'` = 0；终态 **Mojo + Rust only**。
+   （已落地 **15 子模块** + `bridge/ffi.rs` 413 LOC extern "C" 包装层 +
+   **281 单测绿 / 285 含 4 #[ignore]、0 BUG**）；FFI 出口签名逐一对齐；
+   e2e 全量 + bench 门禁；build_single.sh 已切走 bridge.o；
+   NUL 终止修复 ×3（**追加更新-6 / 决策-20**）。
+3. **DC3（Phase 6）`shim.rs` + C 删除** ✅ **已完成**：`bridge/shim.rs` 374 LOC
+   端口 `runtime_shim.c` 360 LOC 全套（embed/stage/dlopen/符号转发/孤儿 stage
+   清理/atexit）；`build.rs` 80 LOC env → shim_static_gen.rs；三份 `*.c`
+   （ws.c / http_bridge_final.c / runtime_shim.c）**全部 `git rm`**；
+   `find src -name '*.c'` = **0**；**终态 Mojo + Rust only**（**追加更新-7 /
+   决策-21**）。
 
 ### 关键验证点（每个迁移阶段必查）
 
@@ -615,6 +651,8 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 - binary 体积增幅 ≤ +2 MB（CI 断言）；
 - shim 构造函数先于 Mojo 运行时符号首次引用（启动即验证，失败 = 段错误/符号未定义）。
 
-> **Track C 验收红线**：Phase 6 结束时 `find src -name '*.c'` → **0**；
-> `git grep -n "\.c\b" -- src/`（业务代码）→ 0（build_single.sh 中 gcc 链接入口
-> 移除，改 `cargo` / `rustc`）；终态 **Mojo + Rust only**。
+> **Track C 验收红线（已达成）**：`find src -name '*.c'` → **0** ✅
+> （**DC3 已 `git rm`** http_bridge_final.c + runtime_shim.c；ws.c 更早于 DC1 已删）；
+> `git grep -n "\.c\b" -- src/`（业务代码）→ 0 ✅；build_single.sh 中 gcc 链接入口
+> 移除（`gcc -c http_bridge_final.c` / `gcc -c runtime_shim.c` 均注释），改 `cargo`；
+> **终态 Mojo + Rust only 达成**。

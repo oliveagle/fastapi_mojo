@@ -1,6 +1,6 @@
 {
-  "date": "2026-09-03 20:59 UTC",
-  "commit": "e8b7dda",
+  "date": "2026-09-03 21:13 UTC",
+  "commit": "9c1d453",
   "server_dir": "src/fastapi_mojo",
   "server_cmd": "../../build/fastapi_mojo",
   "warmup": "2000 请求 / 并发 50",
@@ -20,19 +20,19 @@
       "url": "http://127.0.0.1:8000/",
       "requests": 10000,
       "concurrency": 100,
-      "total_seconds": 0.2283,
-      "requests_per_sec": 43802.01,
+      "total_seconds": 0.2279,
+      "requests_per_sec": 43878.89,
       "latency_ms": {
-        "avg": 1.34,
+        "avg": 1.38,
         "min": 0.0,
-        "max": 179.7,
+        "max": 141.8,
         "p10": 0.0,
         "p25": 0.0,
         "p50": 0.0,
-        "p75": 0.1,
+        "p75": 0.0,
         "p90": 0.2,
-        "p95": 0.8,
-        "p99": 39.6
+        "p95": 1.5,
+        "p99": 47.6
       },
       "status_codes": {
         "200": 10000
@@ -44,19 +44,19 @@
       "url": "http://127.0.0.1:8000/",
       "requests": 50000,
       "concurrency": 500,
-      "total_seconds": 2.7317,
-      "requests_per_sec": 18303.62,
+      "total_seconds": 2.8873,
+      "requests_per_sec": 17317.22,
       "latency_ms": {
-        "avg": 13.32,
+        "avg": 14.5,
         "min": 0.0,
-        "max": 2484.8,
+        "max": 2494.9,
         "p10": 0.1,
         "p25": 0.1,
         "p50": 0.1,
         "p75": 0.1,
         "p90": 0.2,
-        "p95": 0.5,
-        "p99": 181.91
+        "p95": 0.8,
+        "p99": 198.41
       },
       "status_codes": {
         "200": 50000
@@ -68,19 +68,19 @@
       "url": "http://127.0.0.1:8000/",
       "requests": 100000,
       "concurrency": 200,
-      "total_seconds": 2.6928,
-      "requests_per_sec": 37136.07,
+      "total_seconds": 2.819,
+      "requests_per_sec": 35473.57,
       "latency_ms": {
-        "avg": 3.05,
+        "avg": 2.91,
         "min": 0.0,
-        "max": 1922.1,
+        "max": 1622.2,
         "p10": 0.0,
         "p25": 0.0,
         "p50": 0.1,
         "p75": 0.1,
         "p90": 0.1,
-        "p95": 0.7,
-        "p99": 49.2
+        "p95": 0.3,
+        "p99": 34.9
       },
       "status_codes": {
         "200": 100000
@@ -92,19 +92,19 @@
       "url": "http://127.0.0.1:8000/hello?name=Mojo",
       "requests": 10000,
       "concurrency": 100,
-      "total_seconds": 0.2593,
-      "requests_per_sec": 38565.37,
+      "total_seconds": 0.2372,
+      "requests_per_sec": 42158.52,
       "latency_ms": {
-        "avg": 1.65,
+        "avg": 1.5,
         "min": 0.0,
-        "max": 108.2,
+        "max": 150.0,
         "p10": 0.0,
         "p25": 0.0,
-        "p50": 0.1,
+        "p50": 0.0,
         "p75": 0.1,
         "p90": 2.1,
-        "p95": 5.9,
-        "p99": 30.4
+        "p95": 4.8,
+        "p99": 29.3
       },
       "status_codes": {
         "200": 10000
@@ -116,19 +116,19 @@
       "url": "http://127.0.0.1:8000/items",
       "requests": 10000,
       "concurrency": 100,
-      "total_seconds": 0.2403,
-      "requests_per_sec": 41614.65,
+      "total_seconds": 0.2314,
+      "requests_per_sec": 43215.21,
       "latency_ms": {
-        "avg": 1.66,
+        "avg": 1.53,
         "min": 0.0,
-        "max": 78.8,
+        "max": 97.9,
         "p10": 0.0,
         "p25": 0.0,
         "p50": 0.1,
         "p75": 0.2,
-        "p90": 4.5,
-        "p95": 8.3,
-        "p99": 28.92
+        "p90": 3.4,
+        "p95": 8.0,
+        "p99": 27.7
       },
       "status_codes": {
         "200": 10000
@@ -140,19 +140,19 @@
       "url": "http://127.0.0.1:8000/items/42",
       "requests": 10000,
       "concurrency": 100,
-      "total_seconds": 0.2676,
-      "requests_per_sec": 37369.21,
+      "total_seconds": 0.2323,
+      "requests_per_sec": 43047.78,
       "latency_ms": {
-        "avg": 1.68,
+        "avg": 1.39,
         "min": 0.0,
-        "max": 241.3,
+        "max": 195.4,
         "p10": 0.0,
         "p25": 0.0,
-        "p50": 0.1,
-        "p75": 0.2,
-        "p90": 1.9,
-        "p95": 6.0,
-        "p99": 28.4
+        "p50": 0.0,
+        "p75": 0.1,
+        "p90": 0.4,
+        "p95": 3.1,
+        "p99": 26.4
       },
       "status_codes": {
         "200": 10000

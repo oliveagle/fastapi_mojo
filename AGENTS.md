@@ -36,7 +36,7 @@
 | Phase 1: 核心组件 Mojo 化 | ✅ 完成 | HTTP server（C FFI 桥接）/ JSON / Router / 参数解析 全部原生 |
 | Phase 2: 去 Python 化 | ✅ 完成 | 零 Python 运行期依赖（.venv 仅保留给 benchmark 工具链） |
 | Phase 3: 单 Binary 交付 | ✅ 已达成 | `./build_single.sh` 产出 `build/fastapi_mojo`，ldd 仅 libc |
-| Phase 4: 去 C 化（Rust bridge）| 🚧 进行中 | `http_bridge_final.c` / `ws.c` / `runtime_shim.c` → Rust staticlib（ADR-0010）；终态 **Mojo + Rust only** |
+| Phase 4: 去 C 化（Rust bridge）| ✅ **完成（Mojo + Rust only）** | `ws.c`（✅ 已删）/ `http_bridge_final.c`（✅ 已迁 Rust）/ `runtime_shim.c`（✅ 已迁 `bridge/shim.rs`，DC3）→ Rust staticlib（ADR-0010）；**`find src -name '*.c'` = 0，C 清零达成** |
 
 **本标已达成（Phase 3）**：单一文件部署（scp 即运行）。实现机制见 `docs/adr/0003-single-binary-mechanism/`
 （Mojo 1.0.0 无静态运行时库 → 嵌入 + 启动暂存 + dlopen 符号转发）。
@@ -58,11 +58,12 @@
   随 binary 静态链接；仅 libc/libm 等基础运行时）**
 - ❌ **禁止**（最终形态）：Python 运行时、pip 包、`.venv`、系统动态库依赖、
   **C 代码（bridge 层终态必须 Rust）**
-- ⚠️ **过渡允许**：迁移中间态仍存在 1 份 C bridge（`runtime_shim.c` 360 LOC，
-  单 binary loader），须按 ADR-0010 由 Rust staticlib 替换，C 清零为 Phase 4 终态
-  （**DC1 ws.c → ws.rs ✅ 已删；DC2 http_bridge_final.c → bridge/* 15 子模块 ✅
-  已迁，build_single.sh 已切走 bridge.o，服务纯 Rust FFI 运行；DC3 runtime_shim.c
-  → shim.rs ⬜ 待开工**）；历史 bootstrap 时代的 Python interop 已拆除。
+- ✅ **已达成**（Phase 4 终态）：bridge 层 100% Rust staticlib，**C 清零**
+  （`find src -name '*.c'` = 0）。历史迁移：
+  **DC1 ws.c → ws.rs ✅；DC2 http_bridge_final.c → bridge/* 15 子模块 +
+  bridge/ffi.rs extern "C" 包装层 ✅；DC3 runtime_shim.c → bridge/shim.rs ✅**
+  （embed/stage/dlopen/符号转发/孤儿 stage 清理/atexit）。历史 bootstrap 时代的
+  Python interop 已拆除。
 
 ### 3.2 代码约束
 
@@ -71,11 +72,11 @@
 - `src/fastapi_mojo/` 只做 FastAPI 域，不混杂其他主题
 - 当前运行期桥接是 **Rust staticlib**（`extern "C"` 导出，FFI 表面与既有 C bridge
   完全一致）：socket I/O / poll 事件循环 / CORS / 静态 / 限流 / 信号 / WS 会话状态
-  / WS 协议原语 / 单 binary loader（运行时嵌入/暂存/dlopen 转发）。C 源文件正由
-  同名 Rust 模块替换：`http_bridge_final.c` → `bridge/*` 15 子模块 + `bridge/ffi.rs`
-  extern "C" 包装层（**DC1 ws.c → ws.rs ✅ 已删；DC2 http_bridge_final.c ✅ 已迁，
-  build_single.sh 已切走 bridge.o**）、`runtime_shim.c` → `shim.rs`（⬜ DC3 待开工）；
-  Phase 0 的 `wrapper.mojo` 已拆除，未来每个新替换点都需显式 bridge/adapter
+  / WS 协议原语 / 单 binary loader（运行时嵌入/暂存/dlopen 转发）。**C 源文件已
+  全部清零**：`http_bridge_final.c` → `bridge/*` 15 子模块 + `bridge/ffi.rs` extern
+  "C" 包装层（DC2 ✅）、`runtime_shim.c` → `bridge/shim.rs`（DC3 ✅）、`ws.c` →
+  `ws.rs`（DC1 ✅）。Phase 0 的 `wrapper.mojo` 已拆除，未来新能力一律走 Rust
+  bridge / Mojo 原生，不再引入 C。
 - **build 链接守则（Rust bridge 实战教训）**：Rust staticlib 默认拉入
   `libgcc_s.so.1`（compiler-rt 内建函数如 `__udivti3`），破坏 North Star；`build_single.sh`
   必须用 `gcc -fPIE -pie -O2 -static-libgcc` 静态链接 libgcc_s，使 `ldd` 回归仅
@@ -120,7 +121,7 @@
 | Mojo 无成熟 JSON 库 | 需自研或 FFI | ✅ 已解决：`json.mojo` 原生线性时间序列化，orjson 路径已删除（决策-10） |
 | Mojo 异步/并发模型不稳定 | 高并发 HTTP server 实现难度 | ✅ 已解决：多进程 worker + SO_REUSEPORT（nginx pre-fork，ADR-0005） |
 | 静态链接可行性未验证 | `mojo build` 是否真能产出无依赖 binary | ✅ 已验证：运行时嵌入 + 启动暂存 + dlopen 符号转发（ADR-0003，决策-14；shim 将迁 Rust） |
-| C 清零可行性 | Rust staticlib 能否完全替换三份 C bridge | 🚧 评估中：ADR-0010 已接受；三份文件逐一替换，以 e2e + ldd + env -i 为验收门禁 |
+| C 清零可行性 | Rust staticlib 能否完全替换三份 C bridge | ✅ **已达成**（DC1/DC2/DC3）：`find src -name '*.c'` = 0；e2e 79/79 + ldd 仅 libc + env -i 干净启动门禁全绿 |
 
 > 注：Mojo 1.0.0 标准库无网络模块的约束经 **Rust 桥接**绕过；单 Binary 零依赖本标
 > 已达成（§2 Phase 3）。后续风险以新 ADR 跟踪。
@@ -175,13 +176,42 @@
   16624→16972 kB / env -i 干净启动 / binary 5.1M（CI 预算 ≤6M） / ldd 仅 libc；
   C 工作树剩 2169 LOC（http_bridge_final.c 1809 + runtime_shim.c 360，
   bridge.o 已死代码）。
+- **已决策-21**：**DC3 `bridge/shim.rs` 端口 `runtime_shim.c` 360 LOC + C 清零**
+  （ADR-0010 终态门禁）：
+  1. **`bridge/shim.rs`（374 LOC + `build.rs` 80 LOC）** — 端口 runtime_shim.c
+     全套：`stage_embedded_statics` / `try_run` / `bind_symbols` / `remove_all_staged`
+     / `sweep_orphaned_stages` / `atexit(runtime_cleanup)`。3 个 objcopy payload
+     符号（`_binary_payload_{kgen,msupp,asyncrt}_bin_{start,end}`）用
+     `extern "C" { static : u8 }` 声明（文件名派生，确定性符号名）；嵌入
+     static 文件（index.html / test.json）符号由 **build.rs** 读
+     `SHIM_STATIC_N / SHIM_STATIC_<i>_{NAME,START,END}` env 变量（build_single.sh
+     注入），生成 `$OUT_DIR/shim_static_gen.rs`（extern 声明 + `embedded_static_files()`
+     fn 返回 `Vec<(&str, *const u8, *const u8)>`）。11 个 `KGEN_CompilerRT_*` 转发函数
+     用 macro 批量定义（`#[no_mangle] pub unsafe extern "C" fn ...`），6-register
+     SysV ABI-safe（与 C 6-register forwarder 等价）。
+  2. **构造函数**：`#[used] #[link_section = ".init_array"] static SHIM_BOOTSTRAP: unsafe extern "C" fn() = kgen_runtime_bootstrap`
+     （实测 server.o 无 .init_array / 无 .preinit_array，Mojo KGEN 调用为 lazy，
+     在 main 首次 dispatch 才触发，故 shim 在 .init_array 即可保证早于 KGEN 首次引用）。
+  3. **孤儿 stage 目录 self-heal 修复**：原 C 版 `unlink + 一级 rmdir` 对含 `static/`
+     子目录的孤儿清理失败（残留 `static/`）；Rust 版改用 `fs::remove_dir_all` 一次性
+     递归清干净（实测：22 孤儿 → 0，atexit 后再 → 0）。
+  4. **`build_single.sh` 切换**：移除 `gcc -fPIC -O2 -Wall -c "$SRC/runtime_shim.c" -o "$BUILD/shim.o"` +
+     链接行去除 `"$BUILD/shim.o"`；`env SHIM_STATIC_* cargo build` 注入 static 符号名。
+  5. **C 清零达成**：`git rm src/fastapi_mojo/{http_bridge_final,runtime_shim}.c`，
+     `find src -name '*.c'` = 0；**终态 Mojo + Rust only**。
+  6. **单测隔离**：shim.rs 用 `#[cfg(test)] mod test_payload_stubs` 提供 6 个
+     `#[no_mangle] static _binary_payload_*_bin_{start,end}: u8 = 0` stub 满足链接器；
+     `#[cfg(not(test))]` 守住构造函数不注册到 .init_array（避免单测触发真实 staging）。
+  验收：0 BUG / 0 警告 / **281 cargo 单测全绿（285 含 4 #[ignore]）** / e2e 79/79 绿 /
+  bench run#18 = 43,878 req/s（vs C-only 基线 35,829 = **+22%**，无回归） / RSS 平台化
+  16528→16868 kB / env -i 干净启动 / binary 5.2M（CI 预算 ≤6M） / ldd 仅 libc /
+  `find src -name '*.c'` = **0** / **orphan sweep: 22 → 1 → 0**（启动扫 + atexit 清）。
 
 ---
 
-*最后更新：2026-09-04（决策-20 DC2-h bridge/ffi.rs + build 切换 + NUL 修复 ×3：
-bridge.o 已下线，服务纯 Rust FFI 运行；ADR-0010 §3 决策-4「FFI 包装延迟」兑现；
-e2e 79/79 绿 / 281 单测 / bench +22% / binary 5.1M / ldd 仅 libc；
-C 仅剩 runtime_shim.c 待 DC3 迁 shim.rs；
-决策-19 Bridge 层语言终态 = Rust（Mojo + Rust only），ADR-0010；
-决策-18 WebSocket 精化，ADR-0009；决策-17 高并发 WebSocket，ADR-0008；
-决策-16 WebSocket 增强，ADR-0007）*
+*最后更新：2026-09-04（**决策-21 DC3 `bridge/shim.rs` 端口 `runtime_shim.c` + C 清零达成**：
+`find src -name '*.c'` = 0，**终态 Mojo + Rust only**；e2e 79/79 绿 / 281 单测 /
+bench run#18 = 43,878 req/s（+22%） / RSS 平台化 / binary 5.2M / ldd 仅 libc /
+orphan sweep 22→0；决策-20 DC2-h bridge/ffi.rs + NUL 修复 ×3；决策-19 Bridge 层
+语言终态 = Rust，ADR-0010；决策-18 WebSocket 精化，ADR-0009；决策-17 高并发
+WebSocket，ADR-0008；决策-16 WebSocket 增强，ADR-0007）*

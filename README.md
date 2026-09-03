@@ -16,7 +16,9 @@
 
 Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so`、
 `libMSupportGlobals.so`、`libAsyncRTRuntimeGlobals.so`），没有静态库，
-`mojo build` 也没有 `--static`。本项目采用的机制（见 `runtime_shim.c`）：
+`mojo build` 也没有 `--static`。本项目采用的机制（见
+`src/fastapi_mojo_rs/src/bridge/shim.rs`，DC3 已把 `runtime_shim.c` 全量迁 Rust，
+**终态 Mojo + Rust only，C 清零**）：
 
 1. `mojo build --emit object` 产出服务器对象（其外部依赖仅为 11 个
    `KGEN_CompilerRT_*` C API 符号 + libc + C 桥接符号）；
@@ -38,10 +40,7 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 ├── benchmark.sh                   # 固定姿势 benchmark（唯一压测入口，AGENTS.md §4）
 ├── src/fastapi_mojo/
 │   ├── http_server_final.mojo     # HTTP 服务器主程序（路由/handler/日志）
-│   ├── http_bridge_final.c        # C FFI 桥接：socket I/O + CORS + 静态文件 + 限流 + 信号
-│   ├── runtime_shim.c             # 单一二进制：运行时嵌入/暂存/dlopen/符号转发
-│   ├── ws.c                     # WebSocket (RFC 6455) 协议原语：SHA-1/base64/帧编解码/close 码/UTF-8 (ADR-0006/0007)
-│   ├── ws_session.mojo          # WebSocket 会话循环：子协议/保活 ping/控制帧/handler 分派 (ADR-0007)
+│   ├── ws_session.mojo            # WebSocket 会话循环：子协议/保活 ping/控制帧/handler 分派 (ADR-0007)
 │   ├── router.mojo                # 模式匹配路由（{param} segment）
 │   ├── params_query.mojo          # Path/Query 参数解析 + ParsedParams (values + types)
 │   ├── params_json.mojo           # Body JSON parser（UTF-8 安全 + 类型标记）
@@ -52,6 +51,8 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │   └── static/                    # 静态文件目录
 │       ├── index.html
 │       └── test.json
+│   （无 C 文件：bridge 全部在 src/fastapi_mojo_rs — Rust staticlib，
+│     终态 Mojo + Rust only，决策-19）
 ├── docs/adr/                      # 架构决策记录（含 6 条架构隔离约束声明）
 └── .beads/                        # beads-rust 任务管理
 ```
@@ -191,7 +192,7 @@ curl http://127.0.0.1:8000/test.json
 │  ├── 字符串构建 (string_builder.mojo, 线性时间)        │
 │  └── 静态文件 / CORS / 限流 / 日志                     │
 ├────────────────────────────────────────────────────────┤
-│  http_bridge_final.c（C FFI，随 binary 静态打包）        │
+│  bridge/*.rs（Rust staticlib，随 binary 静态打包）      │
 │  ├── Socket I/O（read/parse 完整 body）                │
 │  ├── UTF-8 校验（非法请求 400）                        │
 │  ├── Content-Length 限流（413，先检查后截断）          │
@@ -204,7 +205,7 @@ curl http://127.0.0.1:8000/test.json
 │  ├── close 码校验 (§7.4.1) + text UTF-8 校验 (§5.6)    │
 │  └── 会话: bridge poll 驱动 + 事件队列 (ADR-0008)      │
 ├────────────────────────────────────────────────────────┤
-│  runtime_shim.c（单一二进制机制）                        │
+│  bridge/shim.rs（单一二进制机制，DC3）                   │
 │  ├── 嵌入 3 个 Mojo 运行时 .so（objcopy binary 数据）  │
 │  ├── constructor：暂存到 /dev/shm|/tmp + dlopen        │
 │  ├── 11 个 KGEN_CompilerRT_* 符号转发                  │

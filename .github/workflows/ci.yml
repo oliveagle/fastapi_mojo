@@ -106,19 +106,19 @@ jobs:
           fi
           echo "PASS: 中间态体积 <= 6MB"
 
-      # Track C 进度门禁: 显式断言当前还在 C 中间态 (Phase 4-5) — 三份 C bridge 文件
-      # 必须在终态前消失. 这条先 *记录* 现状, Phase 6 (C 清零) 翻转:
-      #   find src/fastapi_mojo -maxdepth 1 -name '*.c' | wc -l 期望 = 0.
-      - name: "Track C — count remaining .c bridge files (expected: >0 until Phase 6)"
+      # Track C 终态门禁: `find src -name '*.c'` 必须 = 0 (Mojo + Rust only, 决策-19).
+      # 历史: ws.c (DC1 ✅) / http_bridge_final.c (DC2-h ✅) / runtime_shim.c (DC3 ✅) 已全迁 Rust.
+      - name: "Track C — count remaining .c bridge files (终态期望: 0)"
         run: |
           set -e
-          N=$(find src/fastapi_mojo -maxdepth 1 -name '*.c' | wc -l)
-          echo "remaining .c bridge files in src/fastapi_mojo/: $N"
-          echo "  expected: 2 (http_bridge_final.c, runtime_shim.c) until Phase 6 (C 清零)"
+          N=$(find src -name '*.c' | wc -l)
+          echo "remaining .c files in src/: $N"
           if [[ "$N" == "0" ]]; then
-            echo "PASS: Phase 6 C 清零达成 — Mojo + Rust only"
+            echo "PASS: 终态 Mojo + Rust only — C 清零达成 (决策-19)"
           else
-            echo "INFO: 仍在 Phase 4-5 (Rust bridge 进行中); $N 份 .c 待 DC2/DC3 迁移"
+            echo "FAIL: 仍有 $N 份 .c 桥接文件 (违反决策-19 / Track C 终态)"
+            find src -name '*.c'
+            exit 1
           fi
 
       # North Star 门禁：干净环境（env -i）直接起服务 — 无 Python、无 LD_LIBRARY_PATH

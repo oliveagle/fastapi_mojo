@@ -39,6 +39,7 @@ pub mod parse;
 pub mod request;
 pub mod port;
 pub mod response;
+pub mod shim;
 pub mod send;
 pub mod signals;
 pub mod socket;

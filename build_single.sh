@@ -102,6 +102,9 @@ done
 # (set_embedded_static_dir). Max 5 files (EMBED_STATIC_0..4 in runtime_shim.c).
 STATIC_PAYLOAD_OBJS=()
 STATIC_DEFS=()
+STATIC_NAMES=()
+STATIC_STARTS=()
+STATIC_ENDS=()
 n_static=0
 if [[ -d "$SRC/static" ]]; then
     for f in "$SRC/static"/*; do
@@ -119,37 +122,43 @@ if [[ -d "$SRC/static" ]]; then
         [[ -n "$ss" && -n "$se" ]] || { echo "ERROR: could not extract symbols for static_$safe.o"; exit 1; }
         STATIC_PAYLOAD_OBJS+=("$BUILD/static_$safe.o")
         STATIC_DEFS+=(-DEMBED_STATIC_${n_static}_NAME="\"$name\"" -DEMBED_STATIC_${n_static}_START="$ss" -DEMBED_STATIC_${n_static}_END="$se")
+        STATIC_NAMES+=("$name")
+        STATIC_STARTS+=("$ss")
+        STATIC_ENDS+=("$se")
         echo "  embedded static: $name ($ss)"
         n_static=$((n_static + 1))
     done
 fi
 STATIC_DEFS+=(-DN_EMBED_STATIC=$n_static)
 
-echo "[3/5] Compiling C runtime shim (bridge http_bridge_final.c -> Rust ffi.rs, ADR-0010 §3 决策-4)..."
+echo "[3/5] Building Rust bridge (DC1 ws + DC2 http_bridge + DC3 shim; C 清零)..."
 
-# Rust bridge (staticlib): ws protocol layer (DC1 done), HTTP bridge/shim (DC2/3).
-# 链接顺序: 用 --whole-archive 强制拉入全部对象 (含未来 shim 的 .init_array 构造器).
+# Rust bridge (staticlib): ws (DC1) + HTTP bridge (DC2, 15 子模块 + ffi.rs) + shim (DC3).
+# 链接顺序: --whole-archive 拉入全部对象 (含 shim 的 .init_array 构造器); shim
+# 早于 Mojo 首次 KGEN_CompilerRT_* 引用 (实测 server.o 无 .init_array, Mojo 在
+# main 首次 dispatch 才触发 KGEN 调用, shim 在 .init_array 即可).
 RS_DIR="$ROOT/src/fastapi_mojo_rs"
 RS_LIB="$RS_DIR/target/release/libfastapi_mojo_rs.a"
 
-# C bridge: http_bridge_final.c **已迁 Rust** (DC2-g io.rs + ffi.rs extern "C",
-# 285 tests 0 BUG, ADR-0010 §3 决策-4). 仅保留 runtime_shim.c (DC3 待办).
-# gcc -fPIC -O2 -Wall -c "$SRC/http_bridge_final.c" -o "$BUILD/bridge.o"   # [已迁 Rust]
-gcc -fPIC -O2 -Wall -c "$SRC/runtime_shim.c" -o "$BUILD/shim.o" \
-    -DKGEN_PAYLOAD_START="${SYM_START[payload_kgen]}"   -DKGEN_PAYLOAD_END="${SYM_END[payload_kgen]}" \
-    -DMSUPP_PAYLOAD_START="${SYM_START[payload_msupp]}" -DMSUPP_PAYLOAD_END="${SYM_END[payload_msupp]}" \
-    -DASYNCRT_PAYLOAD_START="${SYM_START[payload_asyncrt]}" -DASYNCRT_PAYLOAD_END="${SYM_END[payload_asyncrt]}" \
-    "${STATIC_DEFS[@]}"
+# DC1: ws.c -> ws.rs (已删).
+# DC2: http_bridge_final.c -> bridge/* 15 子模块 + ffi.rs extern "C" 包装层 (DC2-h).
+# DC3: runtime_shim.c -> bridge/shim.rs (embed/stage/dlopen/符号转发/孤儿清理/atexit).
 
-echo "[3.5] Building Rust bridge (fastapi_mojo_rs staticlib)..."
-cargo build --release --manifest-path "$RS_DIR/Cargo.toml" --quiet
+echo "[3.5] Building Rust bridge (fastapi_mojo_rs staticlib) + shim static env..."
+# DC3: 嵌入 static 文件的 objcopy 符号经 env 传给 build.rs -> shim_static_gen.rs.
+SHIM_STATIC_ENVS=("SHIM_STATIC_N=$n_static")
+for (( i=0; i<n_static; i++ )); do
+    SHIM_STATIC_ENVS+=("SHIM_STATIC_${i}_NAME=${STATIC_NAMES[$i]}")
+    SHIM_STATIC_ENVS+=("SHIM_STATIC_${i}_START=${STATIC_STARTS[$i]}")
+    SHIM_STATIC_ENVS+=("SHIM_STATIC_${i}_END=${STATIC_ENDS[$i]}")
+done
+env "${SHIM_STATIC_ENVS[@]}" cargo build --release --manifest-path "$RS_DIR/Cargo.toml" --quiet
 
 echo "[4/5] Linking single binary (PIE, shim constructor first)..."
 # NOTE: objcopy binary objects carry no .note.GNU-stack; suppress the exec-stack warning.
 # NOTE: Rust staticlib 引入 libgcc_s (compiler-rt), 必须 -static-libgcc 静态链接
 # 否则 ldd 出现 libgcc_s.so.1 违反 North Star (CI libgcc_s 断言).
 gcc -fPIE -pie -O2 -static-libgcc \
-    "$BUILD/shim.o" \
     "$BUILD/server.o" \
     -Wl,--whole-archive "$RS_LIB" -Wl,--no-whole-archive \
     "$BUILD/payload_kgen.o" \
