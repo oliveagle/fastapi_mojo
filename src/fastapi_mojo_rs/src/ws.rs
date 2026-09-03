@@ -43,12 +43,24 @@ fn ws_sha1(data: &[u8], out: &mut [u8; 20]) {
                 | ((p[off + 4 * i + 2] as u32) << 8)
                 | (p[off + 4 * i + 3] as u32);
         }
-        for i in 16..80 {
-            let x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
-            w[i] = x.rotate_left(1);
+        // 预计算 w[16..80] 的新值, 避免 iter_mut() 与 w[i-3..i-16] 读取的借用冲突.
+        // 算法 (RFC 3174 §6.1): w[i] = rotl(w[i-3]^w[i-8]^w[i-14]^w[i-16], 1)
+        // 关键: w[i] 依赖 w[i-3] (i >= 19 时是刚算的新值), 故必须级联预计算
+        // —— 不能用未更新的 w 读 new_w[k+3] 等位置.
+        let mut new_w = [0u32; 64];
+        for k in 0..64usize {
+            // k 对应原 w[i], i = k + 16
+            let w_im3 = if k >= 3  { new_w[k - 3]  } else { w[k + 13] };
+            let w_im8 = if k >= 8  { new_w[k - 8]  } else { w[k + 8]  };
+            let w_im14 = if k >= 14 { new_w[k - 14] } else { w[k + 2]  };
+            let w_im16 = if k >= 16 { new_w[k - 16] } else { w[k]      };
+            new_w[k] = (w_im3 ^ w_im8 ^ w_im14 ^ w_im16).rotate_left(1);
+        }
+        for (wi, new) in w[16..].iter_mut().zip(new_w.iter()) {
+            *wi = *new;
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        for i in 0..80 {
+        for (i, wi) in w.iter().enumerate() {
             let (f, k): (u32, u32) = if i < 20 {
                 ((b & c) | (!b & d), 0x5A827999u32)
             } else if i < 40 {
@@ -62,7 +74,7 @@ fn ws_sha1(data: &[u8], out: &mut [u8; 20]) {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[i]);
+                .wrapping_add(*wi);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -162,7 +174,7 @@ pub extern "C" fn ws_handshake(
     // 读取 NUL 结尾 C 串 key
     let key_bytes = unsafe {
         let mut len = 0;
-        while *key.offset(len as isize) != 0 {
+        while *key.add(len) != 0 {
             len += 1;
         }
         std::slice::from_raw_parts(key as *const u8, len)
@@ -187,7 +199,7 @@ pub extern "C" fn ws_handshake(
             None
         } else {
             let mut len = 0;
-            while *subprotocol.offset(len as isize) != 0 {
+            while *subprotocol.add(len) != 0 {
                 len += 1;
             }
             if len == 0 {
@@ -268,10 +280,8 @@ pub extern "C" fn ws_write_message(
     if ws_send_all(fd, &hdr[..hlen]) != 0 {
         return -1;
     }
-    if !payload_slice.is_empty() {
-        if ws_send_all(fd, payload_slice) != 0 {
-            return -1;
-        }
+    if !payload_slice.is_empty() && ws_send_all(fd, payload_slice) != 0 {
+        return -1;
     }
     0
 }
@@ -290,7 +300,7 @@ fn ws_parse_close_code(payload: &[u8], code_out: &mut c_int) -> c_int {
     }
     let c = ((payload[0] as c_int) << 8) | (payload[1] as c_int);
     *code_out = c;
-    if c == 1000 || c == 1001 || (c >= 3000 && c <= 4999) {
+    if c == 1000 || c == 1001 || (3000..=4999).contains(&c) {
         return 1;
     }
     -1
@@ -368,10 +378,10 @@ pub extern "C" fn ws_validate_utf8(p: *const c_uchar, n: usize) -> c_int {
         if extra == 1 && cp < 0x80 {
             return 0;
         } // overlong
-        if extra == 2 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        if extra == 2 && (cp < 0x800 || (0xD800..=0xDFFF).contains(&cp)) {
             return 0;
         }
-        if extra == 3 && (cp < 0x10000 || cp > 0x10FFFF) {
+        if extra == 3 && !(0x10000..=0x10FFFF).contains(&cp) {
             return 0;
         }
         i += 1 + extra;

@@ -3,14 +3,14 @@
 //! 行为等价翻译自 `http_bridge_final.c`:
 //!   - `send_all`                §1395-1414 (循环 send 直到写完)
 //!   - `send_response`           §1421-1445 (头装配 + last_status 记录 +
-//!                               keep-alive 读全局; 头/体发送)
+//!     keep-alive 读全局; 头/体发送)
 //!   - `send_error_json`         §1477-1488 (JSON 错误体, msg/status 转义)
 //!   - `send_simple_response`    §1490-1493 (application/json)
 //!   - `send_simple_response_allow` §1495-1503 (RFC 7231 Allow 头)
 //!   - `send_head_response`      §1505-1508 (仅头无体)
 //!   - `send_preflight_response` §1517-1526 (固定 204; 字节串在 response.rs)
 //!   - `serve_static_file`       §1530-1582 (realpath 防穿越 + O_NOFOLLOW +
-//!                               1MB 上限 + Range-free)
+//!     1MB 上限 + Range-free)
 //!   - `send_static_file` / `send_static_file_head` §1584-1591
 //!   - `send_html_response`      §1600-1604 (text/html)
 //!
@@ -98,10 +98,8 @@ pub fn send_response(
     if send_all(fd, &hdr) != 0 {
         return -1;
     }
-    if include_body && !body.is_empty() {
-        if send_all(fd, body) != 0 {
-            return -1;
-        }
+    if include_body && !body.is_empty() && send_all(fd, body) != 0 {
+        return -1;
     }
     0
 }

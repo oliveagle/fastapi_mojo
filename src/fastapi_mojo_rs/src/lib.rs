@@ -19,6 +19,14 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(non_camel_case_types)]
 
+// FFI glue: 本 crate 的 `pub` 函数绝大多数是 `#[no_mangle] extern "C"` 导出
+// (与原 C bridge 同名符号对齐, ~40 个), 它们的指针参数由 Mojo C ABI 调用契约
+// 保证有效 (与原 C bridge 行为字节等价). 在 lib 根部 allow 该 lint 而非逐函数
+// 标记 `unsafe`, 以避免 50+ 个 Rust 单测调用点都需要 `unsafe { }` 包装 ——
+// 这不会带来任何额外的安全保证 (解引用已经在函数体内, unsafe block 只是语法).
+// Rust 调用方不存在 (这些符号是 C ABI 边界, 仅供 Mojo 用); 契约保证是设计层面的.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 pub mod bridge;
 pub mod ws;
 

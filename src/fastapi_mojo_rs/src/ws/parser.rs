@@ -49,6 +49,12 @@ impl WsParser {
     }
 }
 
+impl Default for WsParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 #[no_mangle]
 pub extern "C" fn ws_parser_init(p: *mut WsParser) {

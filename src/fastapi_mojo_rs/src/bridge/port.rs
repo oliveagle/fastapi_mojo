@@ -27,7 +27,7 @@ pub const MAX_PORT: u16 = 65535;
 pub fn parse_cmdline_port(cmdline: &[u8]) -> Option<u16> {
     let mut iter = cmdline.split(|&b| b == 0);
     let mut pending_port = false;
-    while let Some(arg) = iter.next() {
+    for arg in iter.by_ref() {
         if arg.is_empty() {
             // C 不在空段重置 pending_port (段 alen=0 时整个 if 块跳过);
             // 若上一段是 "--port", 下一段触发 `if pending_port` 分支直接解析

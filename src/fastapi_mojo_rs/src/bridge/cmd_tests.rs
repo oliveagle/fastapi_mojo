@@ -136,7 +136,8 @@ fn json_field_order() {
     let order = ["\"rc\":", "\"ok\":", "\"timeout\":", "\"out\":", "\"err\":"];
     let mut last = 0usize;
     for key in order {
-        let idx = text.find(key).expect(&format!("missing {key} in {text}"));
+        let msg = format!("missing {key} in {text}");
+        let idx = text.find(key).expect(&msg);
         assert!(idx > last, "field {key} out of order in {text}");
         last = idx;
     }

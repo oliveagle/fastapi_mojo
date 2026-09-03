@@ -75,7 +75,7 @@ fn recv_all(cp: &mut ConnPair) -> Vec<u8> {
 }
 
 fn body_after_headers(resp: &[u8]) -> &[u8] {
-    let idx = find_blank_line(&resp);
+    let idx = find_blank_line(resp);
     &resp[idx..]
 }
 

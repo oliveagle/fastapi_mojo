@@ -258,7 +258,6 @@ pub fn get_ws_protocol_slice() -> CSlice {
 /// ws_path / ws_payload / ws_protocol 等**需要 active conn 状态**的访问器
 /// 不能直接走 CURRENT (它们依赖 conn 表里的 conn 实例). 由 ws_session_ffi 模块
 /// 通过 conn 表实现.
-
 pub fn get_last_status_len() -> usize {
     lock_current().last_status_len
 }

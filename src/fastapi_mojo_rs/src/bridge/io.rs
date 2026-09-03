@@ -109,11 +109,11 @@ fn errno() -> c_int {
     unsafe { *__errno_location() }
 }
 
-/// Non-blocking recv (MSG_DONTWAIT). 返回:
-///   >0  : 读到的字节数
-///    0  : EOF (对端关闭)
-///   -1  : EAGAIN/EWOULDBLOCK (spurious); 调用方应 return 0
-///   -2  : 其它错误 (ECONNRESET 等); 调用方应 close
+/// Non-blocking recv (MSG_DONTWAIT). 返回码:
+///   - `>0` : 读到的字节数
+///   - `0`  : EOF (对端关闭)
+///   - `-1` : EAGAIN/EWOULDBLOCK (spurious); 调用方应 return 0
+///   - `-2` : 其它错误 (ECONNRESET 等); 调用方应 close
 fn sys_recv(fd: i32, buf: &mut [u8]) -> i32 {
     let n = unsafe {
         recv(fd, buf.as_mut_ptr() as *mut c_void, buf.len(), MSG_DONTWAIT)
@@ -131,10 +131,10 @@ fn sys_recv(fd: i32, buf: &mut [u8]) -> i32 {
     -2
 }
 
-/// Non-blocking accept. 返回:
-///   >=0 : 新 conn fd
-///   -1  : EAGAIN/EWOULDBLOCK (无 pending)
-///   -2  : 其它错误
+/// Non-blocking accept. 返回码:
+///   - `>=0` : 新 conn fd
+///   - `-1`  : EAGAIN/EWOULDBLOCK (无 pending)
+///   - `-2`  : 其它错误
 fn sys_accept(fd: i32) -> i32 {
     // sockaddr_in 16B (Linux x86_64); addrlen in/out 都用 16.
     let mut addr = [0u8; 16];
@@ -658,12 +658,12 @@ pub fn recv_and_parse() -> i32 {
         let mut nfd: usize = 1;
         {
             let table = conn_table().lock().expect("CONN_TABLE poisoned");
-            for i in 0..MAX_CONNS {
+            for (i, pos) in pf_pos.iter_mut().enumerate() {
                 let c = match table.get(i) {
                     Some(c) if c.in_use => c,
                     _ => continue,
                 };
-                pf_pos[i] = nfd;
+                *pos = nfd;
                 pf[nfd].fd = c.fd;
                 pf[nfd].events = POLLIN;
                 pf[nfd].revents = 0;

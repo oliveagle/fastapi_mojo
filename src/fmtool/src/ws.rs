@@ -52,7 +52,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
         let mut d = h3;
         let mut e = h4;
 
-        for i in 0..80 {
+        for (i, wi) in w.iter_mut().enumerate() {
             let (f, k) = if i < 20 {
                 ((b & c) | ((!b) & d), 0x5A827999)
             } else if i < 40 {
@@ -67,7 +67,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[i]);
+                .wrapping_add(*wi);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -97,7 +97,7 @@ const B64: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn base64_encode(data: &[u8]) -> String {
-    let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= data.len() {
         let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
@@ -214,12 +214,14 @@ pub fn recv_frame(s: &mut TcpStream) -> io::Result<Frame> {
 
 // ---------- handshake ----------
 
+type HandshakeResult = (Vec<String>, Vec<(String, String)>, String);
+
 pub fn connect_and_handshake(
     s: &mut TcpStream,
     port: u16,
     path: &str,
     extra_headers: &str,
-) -> io::Result<(Vec<String>, Vec<(String, String)>, String)> {
+) -> io::Result<HandshakeResult> {
     // 生成 16B 随机 base64 key (RFC 6455 §1.3 风格, 服务端只 hash, 不要求可解码)
     let key_bytes = random_bytes(16);
     let key = base64_encode(&key_bytes);
@@ -240,10 +242,7 @@ pub fn connect_and_handshake(
     let mut resp = Vec::with_capacity(2048);
     let mut tmp = [0u8; 4096];
     while !resp.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = match s.read(&mut tmp) {
-            Ok(n) => n,
-            Err(e) => return Err(e),
-        };
+        let n = s.read(&mut tmp)?;
         if n == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF in handshake"));
         }

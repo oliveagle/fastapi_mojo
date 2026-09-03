@@ -69,7 +69,7 @@ pub fn recv_until_headers(s: &mut TcpStream) -> io::Result<Vec<u8>> {
 
 pub fn hex_decode(s: &str) -> io::Result<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "odd hex length"));
     }
     let mut out = Vec::with_capacity(s.len() / 2);

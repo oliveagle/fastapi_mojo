@@ -324,7 +324,7 @@ unsafe extern "C" fn kgen_runtime_bootstrap() {
 
     // 兜底: 可执行文件所在目录
     let mut exe = [0u8; 1024];
-    let n = readlink(b"/proc/self/exe\0".as_ptr() as *const c_char, exe.as_mut_ptr() as *mut c_char, exe.len() - 1);
+    let n = readlink(c"/proc/self/exe".as_ptr(), exe.as_mut_ptr() as *mut c_char, exe.len() - 1);
     if n > 0 {
         let exe_path = String::from_utf8_lossy(&exe[..n as usize]).into_owned();
         if let Some(slash) = exe_path.rfind('/') {

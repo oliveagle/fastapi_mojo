@@ -159,7 +159,7 @@ fn static_dir_truncates_long_input() {
     set_static_dir(Some(&long));
     let got = get_static_dir();
     // NUL 终止, 字节长度 <= MAX_STATIC_DIR - 1
-    assert!(got.len() <= MAX_STATIC_DIR - 1);
+    assert!(got.len() < MAX_STATIC_DIR);
     assert_eq!(got.len(), MAX_STATIC_DIR - 1);
     assert!(got.chars().all(|c| c == 'a'));
 }

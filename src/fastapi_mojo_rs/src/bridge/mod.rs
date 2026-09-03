@@ -9,18 +9,18 @@
 //!
 //! 子模块:
 //!   - parse        : HTTP 头部工具 (find_header_end, header value 提取,
-//!                    UTF-8 校验, Connection/Expect 指令识别) — 端口 §511-665
+//!     UTF-8 校验, Connection/Expect 指令识别) — 端口 §511-665
 //!   - response     : 响应头构建 (Content-Type 表、响应头装配、CORS 头、
-//!                    preflight 响应、JSON 转义) — 端口 §1385-1525
+//!     preflight 响应、JSON 转义) — 端口 §1385-1525
 //!   - cmd          : `run_command_json` — sh -c 包装 + 超时 + 输出封顶 +
-//!                    JSON 化; 端口 §1600-1775 (含 KIND_RUN_CMD WIP)
+//!     JSON 化; 端口 §1600-1775 (含 KIND_RUN_CMD WIP)
 //!   - time_util    : `now_ms` (墙钟毫秒) — 端口 §230-233 gettimeofday_ms;
-//!                    供 cmd / port / signals / 未来 conn 共享
+//!     供 cmd / port / signals / 未来 conn 共享
 //!   - port         : `get_configured_port` (env + /proc/self/cmdline 解析,
-//!                    --port N / --port=N) — 端口 §306-348
+//!     --port N / --port=N) — 端口 §306-348
 //!   - signals      : `setup_signal_handlers` (SIGINT/SIGTERM -> G_RUNNING=0,
-//!                    SIGPIPE -> SIG_IGN) + `is_running` / `server_shutdown` —
-//!                    端口 §184-202
+//!     SIGPIPE -> SIG_IGN) + `is_running` / `server_shutdown` —
+//!     端口 §184-202
 //!
 //! 设计守则:
 //!   - 零第三方 crate; 系统调用用 extern "C" 直连; SHA-1/base64/UTF-8/poll/

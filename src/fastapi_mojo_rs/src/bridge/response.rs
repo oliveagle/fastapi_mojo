@@ -5,6 +5,7 @@
 //!   - `json_escape_cstr`      §1452-1474 (JSON 字符串转义)
 //!   - `send_response` 的头装配 §1495-1520 (本模块 `build_response_headers`)
 //!   - `send_preflight_response` §1517-1526 (本模块 `build_preflight_response`)
+//!
 //! 纯函数、零 IO; 发送动作 (send_all) 由 I/O 层负责。
 //!
 //! 与 C 的差异 (仅内部表达, 语义等价):

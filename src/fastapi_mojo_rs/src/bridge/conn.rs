@@ -166,7 +166,15 @@ impl ConnTable {
             active: None,
         }
     }
+}
 
+impl Default for ConnTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConnTable {
     /// 端口 C `alloc_conn` (§444-458): 找空闲槽, 初始化, 记录 connected_ms /
     /// last_active_ms. 满则 None (调用方 503).
     /// 行为等价 C alloc_conn (§445-458): 先扫描既有槽位找已 reset 的
@@ -259,7 +267,15 @@ impl WsEventQueue {
             count: 0,
         }
     }
+}
 
+impl Default for WsEventQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WsEventQueue {
     /// 端口 C `ws_event_push` (§844-849): 0 = 入队成功, 1 = 溢出.
     pub fn push(&mut self, fd: i32, ty: i32) -> bool {
         if self.count >= WS_EV_MAX {

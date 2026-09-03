@@ -52,7 +52,15 @@ impl Server {
         // 避免 execvp 相对父进程 cwd 解析导致 "No such file or directory".
         let full = std::path::Path::new(server_dir).join(&bin);
         let abs = std::fs::canonicalize(&full).unwrap_or(full);
-        match Command::new(&abs).args(&args).current_dir(server_dir).spawn() {
+        // 服务器 stdout/stderr 丢弃 (bench.py 同样用 DEVNULL): 避免 10k 条
+        // access log 灌满 bench 输出, 也避免上游管道 (head/awk) 提前关闭时
+        // SIGPIPE 杀掉 server 导致端口残留孤儿进程 (实测 hang 根因)。
+        match Command::new(&abs)
+            .args(&args)
+            .current_dir(server_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn() {
             Ok(child) => s.proc = Some(child),
             Err(e) => {
                 eprintln!("[bench] 无法启动服务器 {bin}: {e}");
@@ -192,7 +200,7 @@ fn run_hey(hey_bin: &str, url: &str, n: usize, c: usize, method: &str, data: Opt
     cmd.arg(url);
     let out = cmd.output().map_err(|e| format!("hey 失败: {e}"))?;
     if !out.status.success() {
-        return Err(format!("hey 失败(exit {}): {}", out.status, String::from_utf8_lossy(&out.stderr)[..500.min(String::from_utf8_lossy(&out.stderr).len())].to_string()));
+        return Err(format!("hey 失败(exit {}): {}", out.status, &String::from_utf8_lossy(&out.stderr)[..500.min(String::from_utf8_lossy(&out.stderr).len())]));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let csv = Csv::parse(&stdout).map_err(|e| format!("csv 解析失败: {e}"))?;
@@ -305,13 +313,13 @@ fn jint(i: usize) -> Value {
 }
 
 fn summary_to_value(s: &Summary) -> Value {
-    let mut obj = Vec::new();
-    // "name" 由 caller 注入 (在 Vec 头部)
-    obj.push(("url".into(), jstr(&s.url)));
-    obj.push(("requests".into(), jint(s.requests)));
-    obj.push(("concurrency".into(), jint(s.concurrency)));
-    obj.push(("total_seconds".into(), jnum(s.total_seconds)));
-    obj.push(("requests_per_sec".into(), jnum(s.rps)));
+    let mut obj = vec![
+        ("url".into(), jstr(&s.url)),
+        ("requests".into(), jint(s.requests)),
+        ("concurrency".into(), jint(s.concurrency)),
+        ("total_seconds".into(), jnum(s.total_seconds)),
+        ("requests_per_sec".into(), jnum(s.rps)),
+    ];
     let lat = [
         ("avg", s.latency[0]),
         ("min", s.latency[1]),
@@ -421,8 +429,7 @@ fn render_markdown(data: &Value) -> String {
     s.push_str("- 压测命令：`hey -n <总数> -c <并发> <url>`（csv 逐请求采集，脚本统一计算统计量）\n");
     s.push_str("\n## 3. 测试结果\n\n");
     if let Some(arr) = data.get("scenarios").and_then(|v| v.as_arr()) {
-        let mut i = 1;
-        for sc in arr {
+        for (i, sc) in (1..).zip(arr.iter()) {
             let name = sc.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let url = sc.get("url").and_then(|v| v.as_str()).unwrap_or("");
             s.push_str(&format!("### 3.{i} {name}（{url}）\n\n| 指标 | 值 |\n|---|---|\n"));
@@ -445,7 +452,6 @@ fn render_markdown(data: &Value) -> String {
             }
             let errs = sc.get("errors").and_then(|v| v.as_num()).unwrap_or(0.0) as i64;
             s.push_str(&format!("| 错误 | {errs} |\n\n"));
-            i += 1;
         }
     }
     s.push_str("## 4. 结论\n\n（由 `fmtool bench` 自动生成，结论需人工补充）\n\n## 5. 复现方法\n\n```bash\n./benchmark.sh\n```\n");
@@ -481,27 +487,22 @@ fn show_history(db: &str, limit: usize) {
     };
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(limit);
-    let mut id = start + 1;
-    for line in &lines[start..] {
-        match json::parse(line) {
-            Ok(v) => {
-                let date = v.get("date").and_then(|x| x.as_str()).unwrap_or("");
-                let commit = v.get("commit").and_then(|x| x.as_str()).unwrap_or("");
-                let scmd = v.get("server_cmd").and_then(|x| x.as_str()).unwrap_or("");
-                println!("run #{id}  {date}  commit={commit}  {scmd}");
-                if let Some(arr) = v.get("scenarios").and_then(|x| x.as_arr()) {
-                    for sc in arr {
-                        let name = sc.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                        let rps = sc.get("requests_per_sec").and_then(|x| x.as_num()).unwrap_or(0.0);
-                        let avg = sc.get("latency_ms").and_then(|x| x.get("avg")).and_then(|x| x.as_num()).unwrap_or(0.0);
-                        let errs = sc.get("errors").and_then(|x| x.as_num()).unwrap_or(0.0) as i64;
-                        println!("    {name:<22} {rps:>9.1} req/s  avg {avg:>6.2} ms  errors {errs}");
-                    }
+    for (id, line) in (start + 1..).zip(lines[start..].iter()) {
+        if let Ok(v) = json::parse(line) {
+            let date = v.get("date").and_then(|x| x.as_str()).unwrap_or("");
+            let commit = v.get("commit").and_then(|x| x.as_str()).unwrap_or("");
+            let scmd = v.get("server_cmd").and_then(|x| x.as_str()).unwrap_or("");
+            println!("run #{id}  {date}  commit={commit}  {scmd}");
+            if let Some(arr) = v.get("scenarios").and_then(|x| x.as_arr()) {
+                for sc in arr {
+                    let name = sc.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                    let rps = sc.get("requests_per_sec").and_then(|x| x.as_num()).unwrap_or(0.0);
+                    let avg = sc.get("latency_ms").and_then(|x| x.get("avg")).and_then(|x| x.as_num()).unwrap_or(0.0);
+                    let errs = sc.get("errors").and_then(|x| x.as_num()).unwrap_or(0.0) as i64;
+                    println!("    {name:<22} {rps:>9.1} req/s  avg {avg:>6.2} ms  errors {errs}");
                 }
             }
-            Err(_) => {}
         }
-        id += 1;
     }
 }
 
@@ -556,7 +557,7 @@ pub fn run_bench(opts: &BenchOpts) -> i32 {
         let c = sc.c;
         let summary = if url.starts_with("ws://") {
             eprintln!("[bench] 场景 {name}: {n} echo 往返 / 并发 {c} (WS {url}) ...");
-            let rest = &url["ws://".len()..];
+            let rest = url.strip_prefix("ws://").unwrap();
             let (hostport, ppath) = match rest.split_once('/') {
                 Some((h, p)) => (h, format!("/{p}")),
                 None => (rest, "/".to_string()),
@@ -606,15 +607,16 @@ pub fn run_bench(opts: &BenchOpts) -> i32 {
     };
     let warmup_desc = if opts.no_warmup { "无".to_string() } else { format!("{WARMUP_N} 请求 / 并发 {WARMUP_C}") };
 
-    let mut root = Vec::new();
-    root.push(("date".into(), jstr(&date)));
-    root.push(("commit".into(), jstr(&commit)));
-    root.push(("server_dir".into(), jstr(&opts.server_dir)));
-    root.push(("server_cmd".into(), jstr(&opts.server_cmd)));
-    root.push(("warmup".into(), jstr(&warmup_desc)));
     let env_pairs = env_info().into_iter().map(|(k, v)| (k, Value::Str(v))).collect();
-    root.push(("environment".into(), Value::Object(env_pairs)));
-    root.push(("scenarios".into(), Value::Array(scenarios_out)));
+    let root = vec![
+        ("date".into(), jstr(&date)),
+        ("commit".into(), jstr(&commit)),
+        ("server_dir".into(), jstr(&opts.server_dir)),
+        ("server_cmd".into(), jstr(&opts.server_cmd)),
+        ("warmup".into(), jstr(&warmup_desc)),
+        ("environment".into(), Value::Object(env_pairs)),
+        ("scenarios".into(), Value::Array(scenarios_out)),
+    ];
     let data = Value::Object(root);
 
     let db = opts.db.clone().unwrap_or_else(default_db);
@@ -647,7 +649,7 @@ pub fn run_bench(opts: &BenchOpts) -> i32 {
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as i64;
+    let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

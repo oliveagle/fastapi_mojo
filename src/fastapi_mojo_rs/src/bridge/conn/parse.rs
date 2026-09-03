@@ -174,7 +174,7 @@ pub fn parse_request_line(hdr: &[u8]) -> Option<RequestLine> {
     let protocol_11 = proto == b"HTTP/1.1";
     let ok_method = !method.is_empty()
         && method.len() < MAX_METHOD
-        && method.iter().all(|&c| (b'A'..=b'Z').contains(&c));
+        && method.iter().all(|&c| c.is_ascii_uppercase());
     let ok_path = !path.is_empty() && path[0] == b'/';
     let ok_proto = proto == b"HTTP/1.0" || proto == b"HTTP/1.1";
     if !ok_method || !ok_path || !ok_proto {

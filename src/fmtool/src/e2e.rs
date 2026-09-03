@@ -120,10 +120,7 @@ pub fn cont100(port: u16) -> i32 {
         }
     }
     // final: headers + body
-    let final_resp = match read_response(&mut s) {
-        Ok(r) => r,
-        Err(_) => Vec::new(),
-    };
+    let final_resp = read_response(&mut s).unwrap_or_default();
     let dt = t0.elapsed().as_secs_f64();
     let hdr = String::from_utf8_lossy(&final_resp).into_owned();
     let ok = String::from_utf8_lossy(&interim).contains("100 Continue")
@@ -242,7 +239,9 @@ fn send_frame(s: &mut TcpStream, op: u8, payload: &[u8], fin: bool) -> io::Resul
     send_exact(s, &ws::make_frame(op, payload, fin, &m))
 }
 
-fn ws_connect(port: u16, path: &str, extra: &str) -> io::Result<(TcpStream, String, Vec<(String, String)>, String)> {
+type WsConnectResult = (TcpStream, String, Vec<(String, String)>, String);
+
+fn ws_connect(port: u16, path: &str, extra: &str) -> io::Result<WsConnectResult> {
     let mut s = tcp_connect(&format!("127.0.0.1:{port}"), DEFAULT_TIMEOUT)?;
     let (statuses, hdrs, key) = ws::connect_and_handshake(&mut s, port, path, extra)?;
     let status = statuses[0].clone();
@@ -264,21 +263,21 @@ pub fn ws1(port: u16) -> i32 {
     let mk = || {
         let (mut s, status, hdrs, key) = ws_connect(port, "/ws", "")?;
         if !status.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("status {status}")));
+            return Err(io::Error::other(format!("status {status}")));
         }
         // 验证 Sec-WebSocket-Accept (RFC 6455 §1.3: base64(sha1(key+GUID)))
         // 我的 key 是随机生成的 — 服务端必须对它 hash 出正确 accept。
         // 为精确复现 python 的固定 key 校验, 这里单独重算:
         let accept_ok = verify_accept(&hdrs, &key);
         if !accept_ok {
-            return Err(io::Error::new(io::ErrorKind::Other, "bad Sec-WebSocket-Accept"));
+            return Err(io::Error::other("bad Sec-WebSocket-Accept"));
         }
         println!("M1");
 
         send_frame(&mut s, 0x1, b"hello mojo", true)?;
         let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
         if !(f.fin && f.op == 0x1 && f.payload == b"hello mojo") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M2 echo mismatch"));
+            return Err(io::Error::other("M2 echo mismatch"));
         }
         println!("M2");
 
@@ -286,7 +285,7 @@ pub fn ws1(port: u16) -> i32 {
         send_frame(&mut s, 0x0, b" part2", true)?;
         let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
         if !(f.fin && f.op == 0x1 && f.payload == b"part1 part2") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M3 reassembly mismatch"));
+            return Err(io::Error::other("M3 reassembly mismatch"));
         }
         println!("M3");
 
@@ -294,21 +293,21 @@ pub fn ws1(port: u16) -> i32 {
         send_frame(&mut s, 0x2, &big, true)?;
         let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
         if !(f.fin && f.op == 0x2 && f.payload == big) {
-            return Err(io::Error::new(io::ErrorKind::Other, "M4 big binary mismatch"));
+            return Err(io::Error::other("M4 big binary mismatch"));
         }
         println!("M4");
 
         send_frame(&mut s, 0x9, b"keepalive", true)?;
         let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
         if !(f.op == 0xA && f.payload == b"keepalive") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M5 pong mismatch"));
+            return Err(io::Error::other("M5 pong mismatch"));
         }
         println!("M5");
 
         send_frame(&mut s, 0x8, &1000u16.to_be_bytes(), true)?;
         match recv_frame_timeout(&mut s, DEFAULT_TIMEOUT) {
             Ok(f) if f.op == 0x8 => {}
-            Ok(_) => return Err(io::Error::new(io::ErrorKind::Other, "M6 close mismatch")),
+            Ok(_) => return Err(io::Error::other("M6 close mismatch")),
             Err(_) => {} // 连接直接关闭也接受 (python 里 ConnectionError 是 pass 的)
         }
         println!("M6");
@@ -334,16 +333,16 @@ pub fn ws2(port: u16) -> i32 {
         // M7: /ws/chat + subprotocol "chat"
         let (mut s, status, hdrs, _key) = ws_connect(port, "/ws/chat", "Sec-WebSocket-Protocol: chat\r\n")?;
         if !status.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M7 status {status}")));
+            return Err(io::Error::other(format!("M7 status {status}")));
         }
         let proto = hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-protocol")).map(|(_, v)| v.clone()).unwrap_or_default();
         if proto != "chat" {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M7 proto {proto}")));
+            return Err(io::Error::other(format!("M7 proto {proto}")));
         }
         send_frame(&mut s, 0x1, b"hi chat", true)?;
         let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
         if !(f.fin && f.op == 0x1 && f.payload == b"hi chat") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M7 echo mismatch"));
+            return Err(io::Error::other("M7 echo mismatch"));
         }
         close_ws(&mut s);
         println!("M7");
@@ -351,7 +350,7 @@ pub fn ws2(port: u16) -> i32 {
         // M8: no subprotocol -> 400
         let (s2, status2, _, _) = ws_connect(port, "/ws/chat", "")?;
         if !status2.starts_with("HTTP/1.1 400") {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M8 status {status2}")));
+            return Err(io::Error::other(format!("M8 status {status2}")));
         }
         drop(s2);
         println!("M8");
@@ -359,13 +358,13 @@ pub fn ws2(port: u16) -> i32 {
         // M9: /ws/counter stateful
         let (mut s3, status3, _, _) = ws_connect(port, "/ws/counter", "")?;
         if !status3.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M9 status {status3}")));
+            return Err(io::Error::other(format!("M9 status {status3}")));
         }
         for (num, expected) in [("1", "sum=1"), ("2", "sum=3"), ("3", "sum=6")] {
             send_frame(&mut s3, 0x1, num.as_bytes(), true)?;
             let f = recv_frame_timeout(&mut s3, DEFAULT_TIMEOUT)?;
             if !(f.fin && f.op == 0x1 && f.payload == expected.as_bytes()) {
-                return Err(io::Error::new(io::ErrorKind::Other, format!("M9 counter {num} -> {:?}", f.payload)));
+                return Err(io::Error::other(format!("M9 counter {num} -> {:?}", f.payload)));
             }
         }
         close_ws(&mut s3);
@@ -374,22 +373,22 @@ pub fn ws2(port: u16) -> i32 {
         // M10: server keepalive ping on idle
         let (mut s4, status4, _, _) = ws_connect(port, "/ws", "")?;
         if !status4.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M10 status {status4}")));
+            return Err(io::Error::other(format!("M10 status {status4}")));
         }
         s4.set_read_timeout(Some(Duration::from_secs(30)))?;
         let t0 = Instant::now();
         let f = ws::recv_frame(&mut s4)?;
         if f.op != 0x9 || !f.payload.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M10 first frame {:?}", f.payload)));
+            return Err(io::Error::other(format!("M10 first frame {:?}", f.payload)));
         }
         if t0.elapsed().as_secs_f64() < 1.5 {
-            return Err(io::Error::new(io::ErrorKind::Other, "M10 ping too early"));
+            return Err(io::Error::other("M10 ping too early"));
         }
         // pong reset → 2nd ping after another idle window
         send_frame(&mut s4, 0xA, b"", true)?;
         let f = ws::recv_frame(&mut s4)?;
         if f.op != 0x9 {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M10 2nd ping op {}", f.op)));
+            return Err(io::Error::other(format!("M10 2nd ping op {}", f.op)));
         }
         close_ws(&mut s4);
         println!("M10");
@@ -397,12 +396,12 @@ pub fn ws2(port: u16) -> i32 {
         // M11: invalid close code 1005 -> 1002
         let (mut s5, status5, _, _) = ws_connect(port, "/ws", "")?;
         if !status5.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M11 status"));
+            return Err(io::Error::other("M11 status"));
         }
         send_frame(&mut s5, 0x8, &1005u16.to_be_bytes(), true)?;
         let f = recv_frame_timeout(&mut s5, DEFAULT_TIMEOUT)?;
         if f.op != 0x8 || f.payload.len() < 2 || u16::from_be_bytes([f.payload[0], f.payload[1]]) != 1002 {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M11 close code {:?}", f.payload)));
+            return Err(io::Error::other(format!("M11 close code {:?}", f.payload)));
         }
         drop(s5);
         println!("M11");
@@ -410,12 +409,12 @@ pub fn ws2(port: u16) -> i32 {
         // M12: invalid UTF-8 text -> close 1007
         let (mut s6, status6, _, _) = ws_connect(port, "/ws", "")?;
         if !status6.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M12 status"));
+            return Err(io::Error::other("M12 status"));
         }
         send_frame(&mut s6, 0x1, &[0xff, 0xfe], true)?;
         let f = recv_frame_timeout(&mut s6, DEFAULT_TIMEOUT)?;
         if f.op != 0x8 || f.payload.len() < 2 || u16::from_be_bytes([f.payload[0], f.payload[1]]) != 1007 {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M12 close code {:?}", f.payload)));
+            return Err(io::Error::other(format!("M12 close code {:?}", f.payload)));
         }
         drop(s6);
         println!("M12");
@@ -423,14 +422,14 @@ pub fn ws2(port: u16) -> i32 {
         // M13: valid close code + reason echoed (4000 "bye")
         let (mut s7, status7, _, _) = ws_connect(port, "/ws", "")?;
         if !status7.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M13 status"));
+            return Err(io::Error::other("M13 status"));
         }
         let mut reason = 4000u16.to_be_bytes().to_vec();
         reason.extend_from_slice(b"bye");
         send_frame(&mut s7, 0x8, &reason, true)?;
         let f = recv_frame_timeout(&mut s7, DEFAULT_TIMEOUT)?;
         if f.op != 0x8 || f.payload != reason {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M13 close {:?}", f.payload)));
+            return Err(io::Error::other(format!("M13 close {:?}", f.payload)));
         }
         drop(s7);
         println!("M13");
@@ -454,13 +453,13 @@ pub fn ws3(port: u16) -> i32 {
                 let r = (|| -> io::Result<()> {
                     let (mut s, status, _, _) = ws_connect(port, "/ws", "")?;
                     if !status.starts_with("HTTP/1.1 101") {
-                        return Err(io::Error::new(io::ErrorKind::Other, "status"));
+                        return Err(io::Error::other("status"));
                     }
                     let payload = format!("msg-{i}");
                     send_frame(&mut s, 0x1, payload.as_bytes(), true)?;
                     let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
                     if !(f.fin && f.op == 0x1 && f.payload == payload.as_bytes()) {
-                        return Err(io::Error::new(io::ErrorKind::Other, "echo mismatch"));
+                        return Err(io::Error::other("echo mismatch"));
                     }
                     close_ws(&mut s);
                     Ok(())
@@ -474,7 +473,7 @@ pub fn ws3(port: u16) -> i32 {
             let _ = h.join();
         }
         if ok_count.load(Ordering::SeqCst) != 10 {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M14 only {}/10 ok", ok_count.load(Ordering::SeqCst))));
+            return Err(io::Error::other(format!("M14 only {}/10 ok", ok_count.load(Ordering::SeqCst))));
         }
         println!("M14");
 
@@ -483,7 +482,7 @@ pub fn ws3(port: u16) -> i32 {
         for _ in 0..3 {
             let (s, status, _, _) = ws_connect(port, "/ws", "")?;
             if !status.starts_with("HTTP/1.1 101") {
-                return Err(io::Error::new(io::ErrorKind::Other, "M15 connect"));
+                return Err(io::Error::other("M15 connect"));
             }
             idle.push(s);
         }
@@ -493,7 +492,7 @@ pub fn ws3(port: u16) -> i32 {
         let resp = read_response(&mut probe)?;
         let dt = t0.elapsed().as_secs_f64();
         if !resp.starts_with(b"HTTP/1.1 200") || dt >= 1.0 {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("M15 probe {}s resp {:?}", dt, &resp[..resp.len().min(20)])));
+            return Err(io::Error::other(format!("M15 probe {}s resp {:?}", dt, &resp[..resp.len().min(20)])));
         }
         drop(probe);
         for mut s in idle {
@@ -505,7 +504,7 @@ pub fn ws3(port: u16) -> i32 {
         let (mut sa, st1, _, _) = ws_connect(port, "/ws/counter", "")?;
         let (mut sb, st2, _, _) = ws_connect(port, "/ws/counter", "")?;
         if !st1.starts_with("HTTP/1.1 101") || !st2.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M16 connect"));
+            return Err(io::Error::other("M16 connect"));
         }
         // 4 步顺序 (sa/sb 交替), 不能放数组 (借用检查); 直接展开
         for (s, num, expected) in [
@@ -518,7 +517,7 @@ pub fn ws3(port: u16) -> i32 {
             send_frame(s_ref, 0x1, num.as_bytes(), true)?;
             let f = recv_frame_timeout(s_ref, DEFAULT_TIMEOUT)?;
             if !(f.op == 0x1 && f.payload == expected.as_bytes()) {
-                return Err(io::Error::new(io::ErrorKind::Other, format!("M16 {num} -> {:?}", f.payload)));
+                return Err(io::Error::other(format!("M16 {num} -> {:?}", f.payload)));
             }
         }
         close_ws(&mut sa);
@@ -538,7 +537,7 @@ pub fn ws4(port: u16) -> i32 {
         // M17: 合并帧不丢失
         let (mut s, status, _, _) = ws_connect(port, "/ws", "")?;
         if !status.starts_with("HTTP/1.1 101") {
-            return Err(io::Error::new(io::ErrorKind::Other, "M17 status"));
+            return Err(io::Error::other("M17 status"));
         }
         let m = mask4();
         let f1 = ws::make_frame(0x1, b"first", true, &m);
@@ -547,9 +546,9 @@ pub fn ws4(port: u16) -> i32 {
         joined.extend_from_slice(&f2);
         send_exact(&mut s, &joined)?;
         let a = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
-        if !(a.op == 0x1 && a.payload == b"first") { return Err(io::Error::new(io::ErrorKind::Other, "M17 first")); }
+        if !(a.op == 0x1 && a.payload == b"first") { return Err(io::Error::other("M17 first")); }
         let b = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
-        if !(b.op == 0x1 && b.payload == b"second") { return Err(io::Error::new(io::ErrorKind::Other, "M17 second")); }
+        if !(b.op == 0x1 && b.payload == b"second") { return Err(io::Error::other("M17 second")); }
         // 3 数据帧 + 1 ping 混合
         let f3 = ws::make_frame(0x1, b"a", true, &m);
         let f4 = ws::make_frame(0x9, b"pp", true, &m);
@@ -559,54 +558,54 @@ pub fn ws4(port: u16) -> i32 {
         mixed.extend_from_slice(&f5);
         send_exact(&mut s, &mixed)?;
         let a = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
-        if !(a.op == 0x1 && a.payload == b"a") { return Err(io::Error::new(io::ErrorKind::Other, "M17 a")); }
+        if !(a.op == 0x1 && a.payload == b"a") { return Err(io::Error::other("M17 a")); }
         let p = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
-        if !(p.op == 0xA && p.payload == b"pp") { return Err(io::Error::new(io::ErrorKind::Other, "M17 pong")); }
+        if !(p.op == 0xA && p.payload == b"pp") { return Err(io::Error::other("M17 pong")); }
         let c = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
-        if !(c.op == 0x1 && c.payload == b"c") { return Err(io::Error::new(io::ErrorKind::Other, "M17 c")); }
+        if !(c.op == 0x1 && c.payload == b"c") { return Err(io::Error::other("M17 c")); }
         close_ws(&mut s);
         println!("M17");
 
         // M18: text 含 NUL
         let (mut s2, status2, _, _) = ws_connect(port, "/ws", "")?;
-        if !status2.starts_with("HTTP/1.1 101") { return Err(io::Error::new(io::ErrorKind::Other, "M18 status")); }
+        if !status2.starts_with("HTTP/1.1 101") { return Err(io::Error::other("M18 status")); }
         send_frame(&mut s2, 0x1, b"a\x00b", true)?;
         let f = recv_frame_timeout(&mut s2, DEFAULT_TIMEOUT)?;
-        if !(f.op == 0x1 && f.payload == b"a\x00b") { return Err(io::Error::new(io::ErrorKind::Other, "M18 nul")); }
+        if !(f.op == 0x1 && f.payload == b"a\x00b") { return Err(io::Error::other("M18 nul")); }
         close_ws(&mut s2);
         println!("M18");
 
         // M19: {param} 路由 /ws/greet/{name}
         let (mut s3, status3, _, _) = ws_connect(port, "/ws/greet/Alice", "")?;
-        if !status3.starts_with("HTTP/1.1 101") { return Err(io::Error::new(io::ErrorKind::Other, "M19 status")); }
+        if !status3.starts_with("HTTP/1.1 101") { return Err(io::Error::other("M19 status")); }
         send_frame(&mut s3, 0x1, b"hi", true)?;
         let f = recv_frame_timeout(&mut s3, DEFAULT_TIMEOUT)?;
-        if !(f.op == 0x1 && f.payload == b"hello Alice: hi") { return Err(io::Error::new(io::ErrorKind::Other, format!("M19 {:?}", f.payload))); }
+        if !(f.op == 0x1 && f.payload == b"hello Alice: hi") { return Err(io::Error::other(format!("M19 {:?}", f.payload))); }
         send_frame(&mut s3, 0x1, b"again", true)?;
         let f = recv_frame_timeout(&mut s3, DEFAULT_TIMEOUT)?;
-        if !(f.op == 0x1 && f.payload == b"hello Alice: again") { return Err(io::Error::new(io::ErrorKind::Other, "M19 again")); }
+        if !(f.op == 0x1 && f.payload == b"hello Alice: again") { return Err(io::Error::other("M19 again")); }
         close_ws(&mut s3);
         println!("M19");
 
         // M20: 鉴权
         let (mut s4, status4, _, _) = ws_connect(port, "/ws/private?token=secret", "")?;
-        if !status4.starts_with("HTTP/1.1 101") { return Err(io::Error::new(io::ErrorKind::Other, format!("M20 auth status {status4}"))); }
+        if !status4.starts_with("HTTP/1.1 101") { return Err(io::Error::other(format!("M20 auth status {status4}"))); }
         send_frame(&mut s4, 0x1, b"ok", true)?;
         let f = recv_frame_timeout(&mut s4, DEFAULT_TIMEOUT)?;
-        if !(f.op == 0x1 && f.payload == b"ok") { return Err(io::Error::new(io::ErrorKind::Other, "M20 echo")); }
+        if !(f.op == 0x1 && f.payload == b"ok") { return Err(io::Error::other("M20 echo")); }
         close_ws(&mut s4);
         let (_, st_no, _, _) = ws_connect(port, "/ws/private", "")?;
-        if !st_no.starts_with("HTTP/1.1 403") { return Err(io::Error::new(io::ErrorKind::Other, format!("M20 no-token {st_no}"))); }
+        if !st_no.starts_with("HTTP/1.1 403") { return Err(io::Error::other(format!("M20 no-token {st_no}"))); }
         let (_, st_bad, _, _) = ws_connect(port, "/ws/private?token=wrong", "")?;
-        if !st_bad.starts_with("HTTP/1.1 403") { return Err(io::Error::new(io::ErrorKind::Other, format!("M20 bad-token {st_bad}"))); }
+        if !st_bad.starts_with("HTTP/1.1 403") { return Err(io::Error::other(format!("M20 bad-token {st_bad}"))); }
         println!("M20");
 
         // M21: {param} + echo — /ws/room/{room}
         let (mut s5, status5, _, _) = ws_connect(port, "/ws/room/abc123", "")?;
-        if !status5.starts_with("HTTP/1.1 101") { return Err(io::Error::new(io::ErrorKind::Other, "M21 status")); }
+        if !status5.starts_with("HTTP/1.1 101") { return Err(io::Error::other("M21 status")); }
         send_frame(&mut s5, 0x1, b"ping", true)?;
         let f = recv_frame_timeout(&mut s5, DEFAULT_TIMEOUT)?;
-        if !(f.op == 0x1 && f.payload == b"ping") { return Err(io::Error::new(io::ErrorKind::Other, "M21 echo")); }
+        if !(f.op == 0x1 && f.payload == b"ping") { return Err(io::Error::other("M21 echo")); }
         close_ws(&mut s5);
         println!("M21");
         Ok(())
