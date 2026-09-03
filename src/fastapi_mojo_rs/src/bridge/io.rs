@@ -185,8 +185,10 @@ fn apply_request_header(c: &mut Conn, hdr: super::conn::parse::RequestHeader) ->
     }
 
     // 非 0 body: 分配 c.body (Vec<u8>, 等价 C malloc(cl+1))
-    // ⚠️ Vec::with_capacity(n) 后 len=0 (踩坑教训); 用 resize 强制 len = content_length.
-    c.body.resize(hdr.content_length, 0u8);
+    // ⚠️ Vec::with_capacity(n) 后 len=0 (踩坑教训); 用 resize 强制 len = content_length+1.
+    // **+1 是 NUL 终止字节** (C: `c->body[body_got]=0`; Mojo CStringSlice 读到 NUL,
+    // 无 NUL 会读越界 garbage — 教训-12).
+    c.body.resize(hdr.content_length + 1, 0u8);
     c.body_got = hdr.body_got.min(hdr.content_length);
 
     // 已随 header 到达的 body 字节 (pipelining 已被 C 丢弃; 这里按 C 行为字节等价).

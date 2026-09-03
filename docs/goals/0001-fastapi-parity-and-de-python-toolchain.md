@@ -123,9 +123,58 @@
     `gcc -c http_bridge_final.c -o bridge.o` + 链接行去掉 bridge.o（**shim.o 保留**
     待 DC3）；DC3 `bridge/shim.rs` 端口 `runtime_shim.c` 360 LOC（embed/stage/
     dlopen 符号转发 + 孤儿 stage 清理 + 退出清理），C 终态归零。
-- **状态**：🚧 进行中（**DC1 ✅ 完成 / DC2 🔶 15 个 bridge 子模块（14 + io）
-  281 单测绿（285 含 4 #[ignore]）、0 BUG、0 警告；剩余 ffi.rs extern "C"
-  包装层 + build 切换 + DC3 shim.rs 待迁 / DC3 ⬜ 待开工**）
+  **追加更新-6**：2026-09-04（**DC2-h ffi.rs extern "C" 包装层 + build 切换 + NUL 终止修复 ×3，DC2 收口**）：
+  - **`bridge/ffi.rs`**（413 LOC）：全部 `#[no_mangle] pub extern "C" fn` 包装层（41 符号），
+    对齐 C ABI（CSlice/fmc_slice、c_long/c_int、*const c_char）。全部子模块用 `as` 别名避免与
+    `extern "C" fn` 同名冲突；`create_bound_socket` 内部调 `io_set_listen_fd(fd)`（C 语义
+    `g_listen_fd=fd`，否则 recv_and_parse 不认得 listen fd——实测 server 起不来）；
+    `run_command_json` malloc+copy，`run_command_free` 走 libc free（与 C bridge 内存契约一致）。
+  - **`build_single.sh` 已切换**：注释掉 `gcc -c http_bridge_final.c -o bridge.o` +
+    链接行去掉 `bridge.o`（**shim.o 保留**待 DC3）；`--whole-archive librust_bridge.a`
+    提供同名 `extern "C"` 符号，无缝替换 C 实现。binary **5,000,720 → 5.1M**（CI 预算 ≤6M 兜底），
+    ldd 仅 libc。**服务已可纯 Rust FFI 运行**（curl /health 200、keep-alive 5 连发全通、
+    POST 10KB/30KB body 200、WS /ws echo + /ws/counter + /ws/greet/{name} + {param} 路由 + 鉴权 token 全通）。
+  - **NUL 终止修复 ×3**（教训-12，Mojo `CStringSlice.as_bytes()` 读到 NUL 为止；C 都写
+    `buf[len]=0`，Rust Vec<u8> 默认无 NUL → 越界读 Vec 多余容量 0 字节导致字符串判等失败）：
+    1. **`set_http_fields`** 补 `g.method[mlen]=0 / g.path[plen]=0 / g.query[qlen]=0`
+       → 修复 keep-alive 路径污染（实测 `/health` 后 `/hello` 变 `/helloh` 串残留）。**同时**
+       把 `min(MAX_*)` 改为 `min(MAX_*-1)`（防御 OOB：`g.method[MAX_METHOD]=0` 会越界写
+       `g.path[0]`；解析器 conn/parse.rs 已限 MAX_*-1，生产安全，但显式防御未来静态调用）。
+    2. **`ws_conn_upgrade`** 里 `c.ws_path.push(0)` + `get_ws_path_slice` 剥尾 NUL
+       → 修复 WS 路由（实测 `/ws` 变 `/wsـY` garbage，路由永不匹配，echo 超时）。
+    3. **`get_ws_protocol_offer_slice`** 里 `offer.push(0)` + len 不含 NUL
+       → 修复 **WS 子协议协商 400 bug**（实测 `/ws/chat` + `Sec-WebSocket-Protocol: chat`
+       始终返回 "required subprotocol not offered"——Mojo `trim_spaces("chat\0\0...") != "chat"`
+       判错）。**同时修复 FFI export routing**：原 ffi.rs 把 `get_ws_protocol_slice` 路由到
+       `request::get_ws_protocol_slice`（**服务器选中值**，upgrade 前为空），正确目标应是
+       `ws_session_ffi::get_ws_protocol_offer_slice`（**客户端原始 offer**，与 C ABI 一致）。
+    4. **`apply_request_header`** `c.body.resize(content_length + 1)`（+1 NUL 槽）
+       → 修复 POST body 读越界（body 内容可能含任意字节，无 NUL 时 `CStringSlice.as_bytes()`
+       读到 Vec 末尾外的内存）。
+  - **测试更新**：`ws_conn_upgrade_moves_phase_and_saves_path` 断言改为
+    `&c.ws_path[..len-1] == b"/ws/counter"` + `last()==Some(&0)`；`is_ws_upgrade` 改
+    poison-safe（`unwrap_or_else`）。
+  - **所有 debug trace 已移除**（io.rs / ws_session_ffi.rs / http_server_final.mojo，
+    grep `DBG|writeln!|OpenOptions|/tmp/ws` = 0）。
+  - **0 BUG / 0 警告 / 281 单测全绿**（`cargo test --release -- --test-threads=1`）。
+  - **e2e 79/79 全绿**（含 subprotocol negotiation M7、keepalive ping M10、close 码 1002/1007、
+    close+reason echo M13、合并帧 M18、NUL 文本回显、{param} 路由、鉴权 token）。
+  - **100-continue 通过**：`OK dt=0.003s`（interim `HTTP/1.1 100 Continue\r\n\r\n` + final 200），
+    无 1s 客户端 stall。
+  - **benchmark run #16 = 43,802 req/s**（vs C-only 基线 35,829 = **+22%**，
+    0 errors，6 场景全跑通），不再"不可比"（bridge.o 已下线）。
+  - **RSS 平台化**：16624→16964→16964→16972→16972→16972 kB（2500 req），无线性泄漏。
+  - **env -i 干净启动**通过（CI North Star 门禁）。
+  - **C 工作树现 2169 LOC**（http_bridge_final.c 1809 + runtime_shim.c 360，**bridge.o 已死**），
+    终态 DC3 `bridge/shim.rs` 端口 `runtime_shim.c` 后 C 清零。
+  - **累计**：15 bridge 子模块、**281 cargo 单测全绿（285 含 4 #[ignore]）、0 BUG、
+    0 警告**；e2e 79/79 绿；binary 5.1M（CI 预算 ≤6M）；ldd 仅 libc。
+  - **下一步（DC3）**：`bridge/shim.rs` 端口 `runtime_shim.c` 360 LOC（embed/stage/
+    dlopen 符号转发 + 孤儿 stage 清理 + 退出清理），C 终态归零。完成后 `find src -name '*.c'`
+    = 0，**终态 Mojo + Rust only**。
+- **状态**：🚧 进行中（**DC1 ✅ 完成 / DC2 ✅ 完成（15 个 bridge 子模块，
+  281 单测全绿（285 含 4 #[ignore]）、0 BUG、0 警告；e2e 79/79 绿；bridge.o 已下线，
+  服务纯 Rust FFI 运行）/ DC3 ⬜ 待开工（bridge/shim.rs 端口 runtime_shim.c 360 LOC）**）
 - **负责人**：oliveagle（agent 执行）
 - **上游**：`AGENTS.md`（§1 North Star / §3 架构约束 / §6 决议链，**决策-19**）、
   `docs/adr/0001~0010`（已接受决策，含 **ADR-0010 Rust bridge**）、
@@ -237,10 +286,10 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 
 | 文件 | LOC (基线→现状) | 主要职责 | → Rust 目标模块 | 状态 |
 |------|-----------------|---------|------------------|------|
-| `http_bridge_final.c` | 1774 → **1809** | socket I/O + poll 事件循环 + HTTP 解析 + keep-alive + 超时/慢连接防护 + CORS + 静态文件 + 限流 + 信号 + worker/SO_REUSEPORT 并发 + WS 会话状态镜像 | `bridge.rs`（按职责拆子模块） | 🔶 DC2 进行中（已落地 **15 子模块**（14 + io）**281 单测绿（285 含 4 #[ignore]）、0 BUG、0 警告**；I/O 主体已迁，剩 ffi.rs extern "C" 包装层 + build 切换） |
+| `http_bridge_final.c` | 1774 → **1809**（**bridge.o 已死代码，待 DC3 后删**） | socket I/O + poll 事件循环 + HTTP 解析 + keep-alive + 超时/慢连接防护 + CORS + 静态文件 + 限流 + 信号 + worker/SO_REUSEPORT 并发 + WS 会话状态镜像 | `bridge.rs`（按职责拆子模块）+ `bridge/ffi.rs`（413 LOC extern "C" 包装层） | ✅ **DC2 完成**（15 子模块 + ffi.rs 包装层；**281 单测绿（285 含 4 #[ignore]）、0 BUG、0 警告**；e2e 79/79 绿；bench +22%；build_single.sh 已切走 bridge.o，**服务纯 Rust FFI 运行**；NUL 终止修复 ×3 已收口） |
 | `ws.c` | 380 → **0（已删）** | WS 协议原语：SHA-1 / base64 / handshake / 帧解析 / 掩码 / close 码 / UTF-8 校验 | `ws.rs` | ✅ DC1 完成（行为等价 + e2e 79/79 绿 + 26 单测绿 + `build_single.sh` 接入） |
 | `runtime_shim.c` | 360 → 360 | 单 binary loader：Mojo 运行时嵌入 + 启动暂存 + dlopen 符号转发（ADR-0003 决策-14） | `shim.rs` | ⬜ DC3 待开工 |
-| **合计** | **2514 → 2169**（-13.7%；ws.c -380 已清零，KIND_RUN_CMD +35 净增） | | **0（C 清零，Phase 6 收口）** | |
+| **合计** | **2514 → 2169**（-13.7%；ws.c -380 已清零，KIND_RUN_CMD +35 净增；**bridge.o 已下线，http_bridge_final.c 待 DC3 后删**） | | **0（C 清零，DC3 后）** | |
 
 **关键观察 / 实测教训**：
 

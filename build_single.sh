@@ -125,15 +125,16 @@ if [[ -d "$SRC/static" ]]; then
 fi
 STATIC_DEFS+=(-DN_EMBED_STATIC=$n_static)
 
-echo "[3/5] Compiling C bridge + runtime shim (bridge/ws C -> Rust, ADR-0010)..."
+echo "[3/5] Compiling C runtime shim (bridge http_bridge_final.c -> Rust ffi.rs, ADR-0010 §3 决策-4)..."
 
 # Rust bridge (staticlib): ws protocol layer (DC1 done), HTTP bridge/shim (DC2/3).
 # 链接顺序: 用 --whole-archive 强制拉入全部对象 (含未来 shim 的 .init_array 构造器).
 RS_DIR="$ROOT/src/fastapi_mojo_rs"
 RS_LIB="$RS_DIR/target/release/libfastapi_mojo_rs.a"
 
-# C bridge (尚未迁 Rust 的部分): 仅保留 http_bridge_final.c + runtime_shim.c
-gcc -fPIC -O2 -Wall -c "$SRC/http_bridge_final.c" -o "$BUILD/bridge.o"
+# C bridge: http_bridge_final.c **已迁 Rust** (DC2-g io.rs + ffi.rs extern "C",
+# 285 tests 0 BUG, ADR-0010 §3 决策-4). 仅保留 runtime_shim.c (DC3 待办).
+# gcc -fPIC -O2 -Wall -c "$SRC/http_bridge_final.c" -o "$BUILD/bridge.o"   # [已迁 Rust]
 gcc -fPIC -O2 -Wall -c "$SRC/runtime_shim.c" -o "$BUILD/shim.o" \
     -DKGEN_PAYLOAD_START="${SYM_START[payload_kgen]}"   -DKGEN_PAYLOAD_END="${SYM_END[payload_kgen]}" \
     -DMSUPP_PAYLOAD_START="${SYM_START[payload_msupp]}" -DMSUPP_PAYLOAD_END="${SYM_END[payload_msupp]}" \
@@ -150,7 +151,6 @@ echo "[4/5] Linking single binary (PIE, shim constructor first)..."
 gcc -fPIE -pie -O2 -static-libgcc \
     "$BUILD/shim.o" \
     "$BUILD/server.o" \
-    "$BUILD/bridge.o" \
     -Wl,--whole-archive "$RS_LIB" -Wl,--no-whole-archive \
     "$BUILD/payload_kgen.o" \
     "$BUILD/payload_msupp.o" \

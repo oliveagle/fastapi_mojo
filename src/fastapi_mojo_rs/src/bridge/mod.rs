@@ -31,6 +31,7 @@
 //!     `cargo test --release -- --ignored --test-threads=1` 单独跑.
 
 pub mod cmd;
+pub mod ffi;
 pub mod conn;
 pub mod init_workers;
 pub mod io;

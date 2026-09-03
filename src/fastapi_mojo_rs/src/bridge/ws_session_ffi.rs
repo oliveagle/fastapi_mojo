@@ -47,10 +47,7 @@ fn ws_key_buf() -> &'static Mutex<WsKeyBuf> {
 /// 1 if active 请求是合法 RFC 6455 upgrade; 端口 C `is_ws_upgrade` (§1223-1246).
 /// 副作用: 把 Sec-WebSocket-Key 拷入 WS_KEY_BUF (供 get_ws_key_slice 读)。
 pub fn is_ws_upgrade() -> c_int {
-    let table = match conn_table().lock() {
-        Ok(g) => g,
-        Err(_) => return 0,
-    };
+    let table = conn_table().lock().unwrap_or_else(|e| e.into_inner());
     let idx = match table.active() { Some(i) => i, None => return 0 };
     let c = match table.get(idx) {
         Some(c) if c.in_use => c,
@@ -105,12 +102,19 @@ pub fn get_ws_protocol_offer_slice() -> CSlice {
                 let hdr_end = std::cmp::min(c.hdr_total, c.hdr.len());
                 let proto = get_ws_protocol(&c.hdr[..hdr_end]);
                 offer.extend_from_slice(&proto);
+                // **NUL 终止** (Mojo CStringSlice.as_bytes() 读到 NUL 为止;
+                // 无 NUL 会读越界到 Vec 多余容量的 0 字节,
+                // 导致 trim_spaces("chat\0\0...") != "chat" 误判为未提供)
+                // — 教训-12。
             }
         }
     }
+    // 收尾 NUL 在 push 后, len 不含 NUL (data-only 语义).
+    offer.push(0);
+    let n = offer.len() - 1;
     CSlice {
         ptr: offer.as_ptr() as *const c_char,
-        len: offer.len() as std::os::raw::c_long,
+        len: n as std::os::raw::c_long,
     }
 }
 
@@ -180,7 +184,9 @@ pub fn ws_conn_upgrade(fd: c_int) -> c_int {
         c.ws_tail_len = 0;
         c.last_data_ms = now_ms() as i64;
         c.last_active_ms = now_ms() as i64;
-        // copy g_path -> ws_path (Vec::extend_from_slice 自增长; 截断 MAX_PATH)
+        // copy g_path -> ws_path (Vec 自增长; 截断 MAX_PATH) + **NUL 终止**
+        // (C: `c->ws_path[pl] = 0`; Mojo CStringSlice 读到 NUL 为止, 无 NUL
+        //  会读越界 garbage — 实测 ws_path='/wsـY' 错误路由, 教训-12).
         let path_slice = request::get_path_slice();
         let n = (path_slice.len as usize).min(1024); // MAX_PATH 上限
         unsafe {
@@ -188,6 +194,7 @@ pub fn ws_conn_upgrade(fd: c_int) -> c_int {
             c.ws_path.clear();
             c.ws_path.extend_from_slice(src);
         }
+        c.ws_path.push(0); // NUL terminator (不计入 len)
         c.phase = 3;
     }
     // g_ws_event_type = 0 (C: g_ws_event_type = 0)
@@ -215,11 +222,14 @@ pub fn get_ws_path_slice() -> CSlice {
         Some(c) => c,
         None => return CSlice { ptr: std::ptr::null(), len: 0 },
     };
-    // ws_path 是 Vec<u8>; CSlice 指向其缓冲 (as_ptr 在 Vec 后续 push 时可能 realloc,
-    // 调用方须立即消费; 与 C 同样的 "static buf 复用" 约束)。
+    // ws_path 尾部有 NUL (ws_conn_upgrade push(0)); len 不含 NUL.
+    let mut n = c.ws_path.len();
+    if n > 0 && c.ws_path[n - 1] == 0 {
+        n -= 1;
+    }
     CSlice {
         ptr: c.ws_path.as_ptr() as *const c_char,
-        len: c.ws_path.len() as std::os::raw::c_long,
+        len: n as std::os::raw::c_long,
     }
 }
 

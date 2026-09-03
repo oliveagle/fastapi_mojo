@@ -93,17 +93,24 @@ pub struct CSlice {
 // 显式导入 c_long (在 raw 命名空间下)
 use std::os::raw::c_long;
 
+use super::conn::conn_table;
+
 /// 在 recv_and_parse 完成请求解析后调用, 把 method/path/query 写入全局.
 pub fn set_http_fields(method: &[u8], path: &[u8], query: &[u8], protocol_11: bool, close_after: bool, fd: i32) {
     let mut g = lock_current();
-    let mlen = method.len().min(MAX_METHOD);
+    // 调用方需预先保证 len <= MAX_*; 为防卫 在这里 min(上限-1) 预留 NUL 槽.
+    // 解析器 conn/parse.rs 已限 MAX_*-1, 生产安全; 防御走进 set_http_fields 的静态调用路径.
+    let mlen = method.len().min(MAX_METHOD - 1);
     g.method[..mlen].copy_from_slice(&method[..mlen]);
+    g.method[mlen] = 0;   // NUL 终止: C `g_method[g_method_len]=0` (Mojo CStringSlice 读到 NUL 为止)
     g.method_len = mlen;
-    let plen = path.len().min(MAX_PATH);
+    let plen = path.len().min(MAX_PATH - 1);
     g.path[..plen].copy_from_slice(&path[..plen]);
+    g.path[plen] = 0;     // NUL 终止: 避免复用 keep-alive conn 时读到上次请求 path 残留
     g.path_len = plen;
-    let qlen = query.len().min(MAX_QUERY);
+    let qlen = query.len().min(MAX_QUERY - 1);
     g.query[..qlen].copy_from_slice(&query[..qlen]);
+    g.query[qlen] = 0;    // NUL 终止: 同 path
     g.query_len = qlen;
     g.protocol_11 = protocol_11;
     g.close_after_response = close_after;
@@ -262,6 +269,23 @@ pub fn read_last_status_byte(i: usize) -> i32 {
         g.last_status[i] as i32
     } else {
         -1
+    }
+}
+
+/// 端口 C `get_body_slice` (§1230-1235): 返回 active conn 的 body slice;
+/// 无 active 或 body 未收 → 返回空 ptr (与 C `(fmc_slice){"", 0}` 语义一致).
+pub fn get_body_slice_inner() -> CSlice {
+    static EMPTY: &[u8] = b"\0";
+    let table = conn_table().lock().unwrap_or_else(|e| e.into_inner());
+    match table.active() {
+        Some(idx) => match table.get(idx) {
+            Some(c) if c.body_got > 0 && !c.body.is_empty() => CSlice {
+                ptr: c.body.as_ptr() as *const c_char,
+                len: c.body_got as c_long,
+            },
+            _ => CSlice { ptr: EMPTY.as_ptr() as *const c_char, len: 0 },
+        },
+        None => CSlice { ptr: EMPTY.as_ptr() as *const c_char, len: 0 },
     }
 }
 

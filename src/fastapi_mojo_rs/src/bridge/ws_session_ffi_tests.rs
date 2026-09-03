@@ -183,7 +183,10 @@ fn ws_conn_upgrade_moves_phase_and_saves_path() {
     let table = lock_table();
     let c = table.get(table.active().unwrap()).unwrap();
     assert_eq!(c.phase, 3);
-    assert_eq!(c.ws_path, b"/ws/counter");
+    // ws_path 尾部有 NUL 终止字节 (C: ws_path[pl]=0; Mojo CStringSlice 读到 NUL
+    // 为止, 无 NUL 会读越界 — 教训-12). 断言数据部分 == b"/ws/counter" + 尾 NUL.
+    assert_eq!(&c.ws_path[..c.ws_path.len() - 1], b"/ws/counter");
+    assert_eq!(c.ws_path.last(), Some(&0), "ws_path 必须有 NUL 终止");
     assert_eq!(c.ws_mlen, 0);
     assert_eq!(request::get_ws_event_type(), 0);
 }

@@ -58,9 +58,11 @@
   随 binary 静态链接；仅 libc/libm 等基础运行时）**
 - ❌ **禁止**（最终形态）：Python 运行时、pip 包、`.venv`、系统动态库依赖、
   **C 代码（bridge 层终态必须 Rust）**
-- ⚠️ **过渡允许**：当前迁移中间态存在 C bridge（`http_bridge_final.c` / `ws.c` /
-  `runtime_shim.c`），须按 ADR-0010 逐步由 Rust staticlib 替换，C 清零为 Phase 4
-  验收红线；历史 bootstrap 时代的 Python interop 已拆除。
+- ⚠️ **过渡允许**：迁移中间态仍存在 1 份 C bridge（`runtime_shim.c` 360 LOC，
+  单 binary loader），须按 ADR-0010 由 Rust staticlib 替换，C 清零为 Phase 4 终态
+  （**DC1 ws.c → ws.rs ✅ 已删；DC2 http_bridge_final.c → bridge/* 15 子模块 ✅
+  已迁，build_single.sh 已切走 bridge.o，服务纯 Rust FFI 运行；DC3 runtime_shim.c
+  → shim.rs ⬜ 待开工**）；历史 bootstrap 时代的 Python interop 已拆除。
 
 ### 3.2 代码约束
 
@@ -70,9 +72,10 @@
 - 当前运行期桥接是 **Rust staticlib**（`extern "C"` 导出，FFI 表面与既有 C bridge
   完全一致）：socket I/O / poll 事件循环 / CORS / 静态 / 限流 / 信号 / WS 会话状态
   / WS 协议原语 / 单 binary loader（运行时嵌入/暂存/dlopen 转发）。C 源文件正由
-  同名 Rust 模块替换：`http_bridge_final.c` → `bridge.rs`、`ws.c` → `ws.rs`（**DC1 ✅ 已完成，ws.c 已删除**）、
-  `runtime_shim.c` → `shim.rs`；Phase 0 的 `wrapper.mojo` 已拆除，未来每个新替换点
-  都需显式 bridge/adapter
+  同名 Rust 模块替换：`http_bridge_final.c` → `bridge/*` 15 子模块 + `bridge/ffi.rs`
+  extern "C" 包装层（**DC1 ws.c → ws.rs ✅ 已删；DC2 http_bridge_final.c ✅ 已迁，
+  build_single.sh 已切走 bridge.o**）、`runtime_shim.c` → `shim.rs`（⬜ DC3 待开工）；
+  Phase 0 的 `wrapper.mojo` 已拆除，未来每个新替换点都需显式 bridge/adapter
 - **build 链接守则（Rust bridge 实战教训）**：Rust staticlib 默认拉入
   `libgcc_s.so.1`（compiler-rt 内建函数如 `__udivti3`），破坏 North Star；`build_single.sh`
   必须用 `gcc -fPIE -pie -O2 -static-libgcc` 静态链接 libgcc_s，使 `ldd` 回归仅
@@ -146,9 +149,39 @@
   (C ABI) 替代全部 C bridge（`http_bridge_final.c` / `ws.c` / `runtime_shim.c` →
   Rust 模块）；FFI 表面 / 架构分层 / 单 binary 机制不变；`src/` 下 `*.c` 清零为
   Phase 4 验收红线（见 ADR-0010）
+- **已决策-20**：**DC2-h `bridge/ffi.rs` extern "C" 包装层 + build 切换 + NUL 终止修复 ×3**
+  （ADR-0010 §3 决策-4「FFI 包装延迟」兑现）：
+  1. `bridge/ffi.rs`（413 LOC）— 41 个 `#[no_mangle] pub extern "C" fn` 包装层，
+     对齐 C ABI（CSlice/fmc_slice、c_long/c_int、*const c_char），全部子模块 `as`
+     别名避免与 `extern "C" fn` 同名冲突；`create_bound_socket` 内部调
+     `io_set_listen_fd(fd)`（C 语义 `g_listen_fd=fd`），`run_command_json` 走
+     `malloc + memcpy` + `run_command_free` 走 libc free（与 C bridge 内存契约一致）。
+  2. **`build_single.sh` 已切换**：注释 `gcc -c http_bridge_final.c -o bridge.o` +
+     链接行去除 `bridge.o`，`--whole-archive librust_bridge.a` 提供同名 `extern "C"`
+     符号，无缝替换 C 实现（**bridge.o 已下线**，C 文本待 DC3 删）。
+  3. **NUL 终止修复 ×3（防御 Mojo `CStringSlice.as_bytes()` 读到 NUL 为止的硬性约束）**：
+     - `set_http_fields` 写 `g.method[mlen]=0 / g.path[plen]=0 / g.query[qlen]=0`
+       + `min(MAX_*-1)` 防 OOB（keep-alive 路径污染修复）；
+     - `ws_conn_upgrade` 写 `c.ws_path.push(0)` + slice 剥尾（WS 路由修复）；
+     - `get_ws_protocol_offer_slice` 写 `offer.push(0)` + len 不含 NUL +
+       **FFI export routing 修正**（原 `get_ws_protocol_slice` 错路由到
+       `request::get_ws_protocol_slice` 服务器选中值，正确目标是
+       `ws_session_ffi::get_ws_protocol_offer_slice` 客户端 offer，WS 子协议协商 400
+       bug 修复）；
+     - `apply_request_header` body `resize(content_length + 1)` NUL 槽（POST body
+       读越界修复）。
+  验收：0 BUG / 0 警告 / **281 cargo 单测全绿（285 含 4 #[ignore]）** / e2e 79/79 绿 /
+  bench run#16 = 43,802 req/s（**+22%** vs C-only 基线 35,829） / RSS 平台化
+  16624→16972 kB / env -i 干净启动 / binary 5.1M（CI 预算 ≤6M） / ldd 仅 libc；
+  C 工作树剩 2169 LOC（http_bridge_final.c 1809 + runtime_shim.c 360，
+  bridge.o 已死代码）。
 
 ---
 
-*最后更新：2026-09-04（决策-19：Bridge 层语言终态 = Rust（Mojo + Rust only），ADR-0010；
+*最后更新：2026-09-04（决策-20 DC2-h bridge/ffi.rs + build 切换 + NUL 修复 ×3：
+bridge.o 已下线，服务纯 Rust FFI 运行；ADR-0010 §3 决策-4「FFI 包装延迟」兑现；
+e2e 79/79 绿 / 281 单测 / bench +22% / binary 5.1M / ldd 仅 libc；
+C 仅剩 runtime_shim.c 待 DC3 迁 shim.rs；
+决策-19 Bridge 层语言终态 = Rust（Mojo + Rust only），ADR-0010；
 决策-18 WebSocket 精化，ADR-0009；决策-17 高并发 WebSocket，ADR-0008；
 决策-16 WebSocket 增强，ADR-0007）*
