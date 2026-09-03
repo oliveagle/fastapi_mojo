@@ -1,0 +1,39 @@
+# fmtool — Rust 工具链 (替代 bench.py / e2e 内的 Python socket+WS 客户端)
+#
+# 终态目标 (Goal-0001 §2.2 Track B): 仓库 `*.py` = 0; .venv 删除;
+# build/test/bench 全部走 shell + Rust 二进制。
+#
+# 工程约束 (与 fastapi_mojo_rs 保持一致, ADR-0010 §3):
+#   - 零第三方 crate (SHA-1 / base64 / UTF-8 / 帧解析 / CSV / JSON 全手写)
+#   - panic = "abort"  (避免与上下游脚本 catch 行为不一致)
+#   - opt-level = "z", lto = true, codegen-units = 1  (体积小, 启动快)
+#   - 工具链 pin 1.97.1 (与 fastapi_mojo_rs 对齐)
+#
+# 子命令:
+#   raw     <port> <hex>     send raw bytes, print status line (e2e raw_status)
+#   cont100 <port>           100-continue 探针 (e2e CC_RESULT)
+#   keepalive <port>         keep-alive + Connection:close + idle (e2e KA_RESULT)
+#   headbody <port>          HEAD /, print body byte count (e2e HEAD_BODY_BYTES)
+#   ws1..ws4 <port>          4 套 WS marker 场景 (ADR-0006/0007/0008/0009)
+#   slowloris <port> <tmp>   半发送 + 探针 (e2e slowloris guard)
+#   wsbench <port> <path> <n> <c>  WS 负载 (bench 内置客户端, 输出 hey-csv)
+#   bench    ...             完整 bench runner (Track B T1 替换 bench.py)
+
+[package]
+name = "fmtool"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+description = "Rust toolchain for fastapi_mojo (e2e + bench) — Mojo + Rust only"
+license = "MIT"
+
+[[bin]]
+name = "fmtool"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = "debuginfo"

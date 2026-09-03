@@ -18,7 +18,7 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 `libMSupportGlobals.so`、`libAsyncRTRuntimeGlobals.so`），没有静态库，
 `mojo build` 也没有 `--static`。本项目采用的机制（见
 `src/fastapi_mojo_rs/src/bridge/shim.rs`，DC3 已把 `runtime_shim.c` 全量迁 Rust，
-**终态 Mojo + Rust only，C 清零**）：
+**终态 Mojo + Rust only，C 清零 + 零 Python 工具链（决策-22）**）：
 
 1. `mojo build --emit object` 产出服务器对象（其外部依赖仅为 11 个
    `KGEN_CompilerRT_*` C API 符号 + libc + C 桥接符号）；
@@ -34,10 +34,11 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 
 ```
 .
-├── build_single.sh                # ★ 单一二进制构建脚本（推荐入口）
+├── build_single.sh                # ★ 单一二进制构建脚本（推荐入口, shell-only 定位 Mojo 运行时）
 ├── deploy.sh                      # 构建 + 自包含验证 + 输出 build/deploy/fastapi_mojo
 ├── bench_native.sh                # curl 快速基准
-├── benchmark.sh                   # 固定姿势 benchmark（唯一压测入口，AGENTS.md §4）
+├── benchmark.sh                   # 固定姿势 benchmark（唯一压测入口，AGENTS.md §4；fmtool bench）
+├── src/fmtool/                    # Rust 工具链（e2e/bench 的 socket+WS 客户端, 零第三方依赖, 决策-22）
 ├── src/fastapi_mojo/
 │   ├── http_server_final.mojo     # HTTP 服务器主程序（路由/handler/日志）
 │   ├── ws_session.mojo            # WebSocket 会话循环：子协议/保活 ping/控制帧/handler 分派 (ADR-0007)
@@ -52,7 +53,9 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │       ├── index.html
 │       └── test.json
 │   （无 C 文件：bridge 全部在 src/fastapi_mojo_rs — Rust staticlib，
-│     终态 Mojo + Rust only，决策-19）
+│     终态 Mojo + Rust only，决策-19；工具链在 src/fmtool — 决策-22）
+├── src/fastapi_mojo_rs/           # Rust bridge staticlib（替代全部 C bridge, ADR-0010）
+├── src/fmtool/                    # Rust 工具链（e2e/bench, 零 Python, 决策-22）
 ├── docs/adr/                      # 架构决策记录（含 6 条架构隔离约束声明）
 └── .beads/                        # beads-rust 任务管理
 ```
@@ -60,7 +63,8 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 ## 快速开始
 
 ```bash
-# 依赖：mojo 1.0.0（pip install modular）、gcc、binutils
+# 依赖：mojo 1.0.0（pip install modular）、gcc、binutils、cargo（build_single.sh 构建
+# Rust bridge + fmtool 工具链；运行期交付物 build/fastapi_mojo 零依赖）
 ./build_single.sh
 ./build/fastapi_mojo          # 监听 http://127.0.0.1:8000
 ```
@@ -102,7 +106,8 @@ ssh user@host '/opt/fastapi_mojo'
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，79 项检查含 WebSocket 增强/并发/精化，CI 可重复，见 .github/workflows/ci.yml）
+# 集成测试（单一 binary 端到端，79 项检查含 WebSocket 增强/并发/精化，CI 可重复；
+# 工具链 fmtool = Rust, 零 Python，见 .github/workflows/ci.yml）
 ./scripts/e2e_test.sh
 ```
 

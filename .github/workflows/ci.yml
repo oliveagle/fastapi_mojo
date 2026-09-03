@@ -167,5 +167,14 @@ jobs:
           timeout 300 cargo test --release -- --test-threads=1
           echo "PASS: cargo test --release green (single-threaded, <=300s)"
 
+      # Track B (decision-22): e2e/bench 工具链 = fmtool (Rust, 零 Python).
+      # e2e_test.sh 内部会自动 cargo build fmtool; 这里显式构建一次, 失败即早停.
+      - name: Build fmtool (Rust toolchain, Track B T1+T2)
+        run: |
+          set -e
+          cd src/fmtool
+          cargo build --release
+          ./target/release/fmtool --help >/dev/null
+
       - name: Run e2e suite (79 checks incl. WebSocket enhancements/concurrency/refinements, CI-repeatable)
         run: ./scripts/e2e_test.sh

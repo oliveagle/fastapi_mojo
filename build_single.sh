@@ -25,25 +25,55 @@ for tool in mojo gcc objcopy cargo; do
     command -v "$tool" >/dev/null || { echo "ERROR: $tool not found"; exit 1; }
 done
 
-# Locate the Mojo runtime libraries.
-# Priority: $MODULAR_LIB env (always wins) > python3 import > pip/pip3 show
-# > python3.10..3.13 import scan. No hardcoded version-specific path.
+# Locate the Mojo runtime libraries (Track B T3 — shell-only, 无 python3).
+# Priority: $MODULAR_LIB env (always wins) > 已知候选目录扫描 (site-packages).
+# 替代之前的 python3 import / pip show / python3.X scan 路径; modular pip
+# 包安装规则固定 (PEP 370 + distutils), 各用户/系统路径可直接枚举.
+#
+# 已知 modular 安装形态 (实测):
+#   $XDG_DATA_HOME/python3.X/site-packages/modular/lib     (PEP 370 user install)
+#   $HOME/.local/lib/python3.X/site-packages/modular/lib  (pip --user default)
+#   /usr/local/lib/python3.X/{dist,site}-packages/modular/lib  (system pip)
+#   /opt/conda/lib/python3.X/site-packages/modular/lib    (conda)
+#   $HOME/.modular/lib  (自解压 portable 安装, 罕见但可能)
+# 通用方法: 找名为 libKGENCompilerRTShared.so 的祖先目录 (modular 装包必带此文件).
 find_modular_lib() {
-    local d py
-    # 1) default python3
-    d="$(python3 -c 'import modular, os; d = os.path.dirname(modular.__file__) if getattr(modular, "__file__", None) else modular.__path__[0]; print(os.path.join(d, "lib"))' 2>/dev/null || true)"
-    [[ -n "$d" && -d "$d" ]] && { echo "$d"; return 0; }
-    # 2) pip show (Location -> site-packages/modular/lib)
-    for pipcmd in "python3 -m pip" "pip" "pip3"; do
-        d="$($pipcmd show modular 2>/dev/null | awk -F': *' '/^Location:/{print $2}' || true)"
-        if [[ -n "$d" && -d "$d/modular/lib" ]]; then echo "$d/modular/lib"; return 0; fi
+    local d found
+    # 1) PEP 370 + pip --user site-packages 候选
+    for base in \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/python3.13/site-packages" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/python3.12/site-packages" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/python3.11/site-packages" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/python3.10/site-packages" \
+        "$HOME/.local/lib/python3.13/site-packages" \
+        "$HOME/.local/lib/python3.12/site-packages" \
+        "$HOME/.local/lib/python3.11/site-packages" \
+        "$HOME/.local/lib/python3.10/site-packages" \
+        /usr/local/lib/python3.13/dist-packages \
+        /usr/local/lib/python3.12/dist-packages \
+        /usr/local/lib/python3.11/dist-packages \
+        /usr/local/lib/python3.10/dist-packages \
+        /usr/local/lib/python3.13/site-packages \
+        /usr/local/lib/python3.12/site-packages \
+        /usr/local/lib/python3.11/site-packages \
+        /usr/local/lib/python3.10/site-packages \
+        /usr/lib/python3.13/dist-packages \
+        /usr/lib/python3.12/dist-packages \
+        /opt/conda/lib/python3.13/site-packages \
+        /opt/conda/lib/python3.12/site-packages \
+    ; do
+        d="$base/modular/lib"
+        [[ -d "$d" && -f "$d/libKGENCompilerRTShared.so" ]] && { echo "$d"; return 0; }
     done
-    # 3) scan other interpreter versions
-    for py in python3.13 python3.12 python3.11 python3.10; do
-        command -v "$py" >/dev/null 2>&1 || continue
-        d="$("$py" -c 'import modular, os; d = os.path.dirname(modular.__file__) if getattr(modular, "__file__", None) else modular.__path__[0]; print(os.path.join(d, "lib"))' 2>/dev/null || true)"
-        [[ -n "$d" && -d "$d" ]] && { echo "$d"; return 0; }
-    done
+    # 2) 通用兜底: 找 libKGENCompilerRTShared.so 定位 (深度局限, 快)
+    #    典型地点: site-packages / dist-packages / portable 安装目录
+    found="$(find \
+        "$HOME/.local" /usr/local /opt 2>/dev/null \
+        -maxdepth 8 -type f -name libKGENCompilerRTShared.so -print -quit 2>/dev/null)"
+    if [[ -n "$found" ]]; then
+        d="$(dirname "$found")"
+        [[ -d "$d" && -f "$d/libKGENCompilerRTShared.so" ]] && { echo "$d"; return 0; }
+    fi
     return 1
 }
 
@@ -52,7 +82,9 @@ if [[ -z "${MODULAR_LIB:-}" ]]; then
 fi
 if [[ -z "${MODULAR_LIB:-}" ]]; then
     echo "ERROR: could not auto-locate the Mojo runtime library dir."
-    echo "  tried: python3 import / pip show / python3.10..3.13"
+    echo "  tried: \$XDG_DATA_HOME/site-packages, ~/.local/lib/python3.X/site-packages,"
+    echo "         /usr{,/local}/lib/python3.X/{dist,site}-packages, /opt/conda/lib/python3.X/site-packages,"
+    echo "         and a bounded find for libKGENCompilerRTShared.so under ~/.local /usr/local /opt."
     echo "  fix:   MODULAR_LIB=/path/to/site-packages/modular/lib ./build_single.sh"
     exit 1
 fi

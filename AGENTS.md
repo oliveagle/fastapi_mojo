@@ -34,7 +34,7 @@
 |------|------|------|
 | Phase 0: Wrapper 引导 | ✅ 完成 | Mojo 薄壳调 Python FastAPI（已拆除，历史阶段） |
 | Phase 1: 核心组件 Mojo 化 | ✅ 完成 | HTTP server（C FFI 桥接）/ JSON / Router / 参数解析 全部原生 |
-| Phase 2: 去 Python 化 | ✅ 完成 | 零 Python 运行期依赖（.venv 仅保留给 benchmark 工具链） |
+| Phase 2: 去 Python 化 | ✅ 完成 | 零 Python 运行期依赖；**Track B 工具链也已清零**（决策-22：`*.py`=0、`.venv` 删除、fmtool 替代 bench.py/e2e python 客户端） |
 | Phase 3: 单 Binary 交付 | ✅ 已达成 | `./build_single.sh` 产出 `build/fastapi_mojo`，ldd 仅 libc |
 | Phase 4: 去 C 化（Rust bridge）| ✅ **完成（Mojo + Rust only）** | `ws.c`（✅ 已删）/ `http_bridge_final.c`（✅ 已迁 Rust）/ `runtime_shim.c`（✅ 已迁 `bridge/shim.rs`，DC3）→ Rust staticlib（ADR-0010）；**`find src -name '*.c'` = 0，C 清零达成** |
 
@@ -138,7 +138,7 @@
 - **已决策-9 (C5)**：Mojo HTTP 服务器 — ✅ 达成（socket 桥接 + Mojo 原生协议层；
   Mojo 1.0.0 无网络模块的约束经桥接绕过；桥接语言终态 = Rust，ADR-0010）
 - **已决策-10**：不自造 JSON 序列化，直接包 orjson — ✅ **已重审并替换**：json.mojo 原生线性时间序列化（orjson 路径已删除）
-- **已决策-11**：.venv 环境隔离 — ✅ **服务器侧已移除**（bootstrap 结束）；.venv 仅保留给 benchmark 工具链（bench.py），非运行期依赖
+- **已决策-11**：.venv 环境隔离 — ✅ **已全部移除**（Track B 决策-22 达成）：服务器侧 + benchmark 工具链均不再需要 Python；仓库 `*.py` = 0，`.venv` 目录已删除
 - **已决策-12**：异常 → JSON 响应（orjson 序列化）— ✅ **已替换**：错误响应由 json.mojo 原生构造
 - **已决策-13**：**项目本标 = Mojo 单 Binary 零依赖部署**（本文件 §1）
 - **已决策-14**：单一二进制实现机制 = 运行时嵌入 + 启动暂存 + dlopen 符号转发（见 ADR-0003）；构建入口 `./build_single.sh`，部署 `./deploy.sh`；shim 将迁 Rust（ADR-0010）
@@ -209,7 +209,39 @@
 
 ---
 
-*最后更新：2026-09-04（**决策-21 DC3 `bridge/shim.rs` 端口 `runtime_shim.c` + C 清零达成**：
+- **已决策-22**：**Track B 工具链全链路去 Python（e2e + bench + build 全部达成）** —
+  `fmtool`（`src/fmtool/` 独立 Rust crate，零第三方依赖，panic="abort"，opt-level="z"，
+  与 fastapi_mojo_rs 同 pin 1.97.1）替代原 e2e/bench 的 Python socket + WS 客户端：
+  1. **`scripts/e2e_test.sh`**（T2）: 0 处 `python3` 执行调用（原 17 处）；shell
+     `head -c … | tr '\0' x` 生成大 payload；`printf … | od -An -tx1 -v | tr -d ' \n'`
+     生成畸形字节 hex（**od 必须 `-v`**，否则 17KB 重复行被 `*` 压缩导致 hex 损坏）；
+     `fmtool raw/cont100/keepalive/headbody/ws1..ws4/slowloris` 替代原 Python 客户端；
+     e2e 79/79 全绿（实测 ~23s，零 Python）。
+  2. **`benchmark.sh`**（T1）: `git rm bench.py`，改调 `fmtool bench`；内置 Rust WS
+     负载（`wsbench` 子命令独立输出 hey-csv 同构行；e2e 与 bench 共用 `ws.rs`
+     handshake + 帧解析 + SHA-1/base64/掩码/xorshift PRNG）；hey csv 解析 + 统计 +
+     JSON/Markdown 输出 + **JSONL 历史**（`docs/reports/auto/benchmark.jsonl`，
+     替代原 SQLite `benchmark.db`，零第三方依赖）；实测 6 场景 0 errors，
+     get_root_10k_100c ≈ 39.5k req/s（无回归）。
+  3. **`build_single.sh`**（T3）: shell-only auto-detect `$MODULAR_LIB`
+     （PEP 370 + pip --user + system + conda + bounded `find` 兜底，`python3 -c
+     'import modular'` 路径删除）。
+  4. **`.venv/` 删除** + `docs/reports/auto/benchmark.db` `git rm`（SQLite 历史停更，
+     JSONL 接管）。
+  5. **`src/fmtool` 子 crate**（pure std）：`net.rs` TCP helpers / `ws.rs`
+     （SHA-1/base64/xorshift/WS 帧）/ `csv.rs` 极小 CSV 解析（hey csv 适配）/
+     `json.rs` 手写最小 JSON 解析+序列化（scenarios 输入 + 自有 JSON/Markdown 输出）/
+     `e2e.rs`（10 个 e2e 子命令）/ `bench.rs`（server 生命周期 / hey 调起 / 统计 /
+     JSON/Markdown / JSONL 历史）；`fmtool` ldd 仅 libc+libgcc_s（**dev tool，非运行期
+     交付物**，libgcc_s 可接受；`build/fastapi_mojo` ldd 仍仅 libc）。
+  6. **CI**: e2e step 自动 build fmtool（`scripts/e2e_test.sh` 内 `cargo build --release`）；
+     `Export MODULAR_LIB` step 保留（CI ubuntu setup-python 装 modular 到
+     `/opt/hostedtoolcache/…` 不在 auto-detect 候选，属工具链安装合法用法，
+     "CI 里 Mojo 安装仍可借 python-pip"）；`git grep python3` 仅剩路径字符串/注释。
+  验收：e2e 79/79 绿 / bench 0 errors / ldd 仍仅 libc / env -i 干净启动 /
+  `find . -name "*.py"`（excl `.git docs`）= 0 / `.venv` 不存在 / `src/` 下 `*.c` = 0 /
+  `build/fastapi_mojo` 仍 5.2M。
+*最后更新：2026-09-04（**决策-22 Track B 工具链全链路去 Python 达成**：fmtool 替代 bench.py + e2e python 客户端、`.venv`/`benchmark.db` 删除、JSONL 历史接管；决策-21 DC3 
 `find src -name '*.c'` = 0，**终态 Mojo + Rust only**；e2e 79/79 绿 / 281 单测 /
 bench run#18 = 43,878 req/s（+22%） / RSS 平台化 / binary 5.2M / ldd 仅 libc /
 orphan sweep 22→0；决策-20 DC2-h bridge/ffi.rs + NUL 修复 ×3；决策-19 Bridge 层
