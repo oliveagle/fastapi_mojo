@@ -5,7 +5,8 @@ bench.py — 统一的 FastAPI-Mojo benchmark runner（唯一入口，禁止手�
 职责：
   1. 启动被测服务器（默认 build/fastapi_mojo，--server-cmd 可覆盖，--port 可指定端口）
   2. 预热
-  3. 按场景配置跑 hey 压测（csv 逐请求输出）
+  3. 按场景配置压测：HTTP 场景跑 hey（csv 逐请求输出）；WS 场景
+     (url 以 ws:// 开头) 用内置 stdlib 负载客户端（echo 往返逐条计时）
   4. 解析 csv，计算统一统计量（吞吐、延迟分位、错误数等）
   5. 每次运行自动写入 SQLite（docs/reports/auto/benchmark.db）长期跟踪
   6. 输出统一格式 JSON（--json 指定路径，默认 stdout）
@@ -217,6 +218,128 @@ class Server:
 
 
 # ---------------------------------------------------------------------------
+# WS 负载（内置, stdlib only）— hey 不支持 WebSocket, WS 场景由此承担。
+# 输出与 hey csv 行同构 (response-time/offset 秒, status-code), 复用 summarize。
+# ---------------------------------------------------------------------------
+def run_ws(port, path, n, c, msg_len=16):
+    """c 个线程并发连接 ws://127.0.0.1:<port><path>（echo 端点），
+    共完成 n 次 send-echo 往返（每线程均分份额）。
+    返回逐往返行列表（hey csv 同构格式）。"""
+    import os
+    import socket
+    import struct
+    import threading
+
+    KEY = "dGhlIHNhbXBsZSBub25jZQ=="  # RFC 6455 示例 key（固定, 可复现）
+
+    def make_frame(payload):
+        h = bytearray([0x81])  # FIN + text
+        m = os.urandom(4)
+        nl = len(payload)
+        if nl < 126:
+            h.append(0x80 | nl)
+        elif nl <= 0xFFFF:
+            h += bytes([0x80 | 126]) + struct.pack(">H", nl)
+        else:
+            h += bytes([0x80 | 127]) + struct.pack(">Q", nl)
+        h += m
+        return bytes(h) + bytes(b ^ m[i % 4] for i, b in enumerate(payload))
+
+    def recv_exact(s, want):
+        buf = b""
+        while len(buf) < want:
+            chunk = s.recv(want - len(buf))
+            if not chunk:
+                raise ConnectionError("EOF")
+            buf += chunk
+        return buf
+
+    def recv_frame(s):
+        h = recv_exact(s, 2)
+        op = h[0] & 0x0F
+        nl = h[1] & 0x7F
+        if nl == 126:
+            nl = struct.unpack(">H", recv_exact(s, 2))[0]
+        elif nl == 127:
+            nl = struct.unpack(">Q", recv_exact(s, 8))[0]
+        p = recv_exact(s, nl) if nl else b""
+        return op, p
+
+    def upgrade():
+        s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        s.sendall((
+            f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ).encode())
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            chunk = s.recv(4096)
+            if not chunk:
+                raise ConnectionError("EOF")
+            resp += chunk
+        status = resp.split(b"\r\n")[0].decode()
+        if not status.startswith("HTTP/1.1 101"):
+            raise ConnectionError(status)
+        return s
+
+    rows = []
+    rows_lock = threading.Lock()
+    base = b"benchmark-"
+
+    def worker(wid, share):
+        t_start = time.perf_counter()
+        done = 0
+        try:
+            s = upgrade()
+            try:
+                for i in range(share):
+                    payload = base + ("%d" % i).encode()
+                    t0 = time.perf_counter()
+                    s.sendall(make_frame(payload))
+                    op, p = recv_frame(s)
+                    dt = time.perf_counter() - t0
+                    ok = (op == 0x1 and p == payload)
+                    with rows_lock:
+                        rows.append({
+                            "response-time": "%.6f" % dt,
+                            "offset": "%.6f" % (t0 - t_start),
+                            "status-code": "200" if ok else "500",
+                        })
+                    done += 1
+                    if not ok:
+                        break
+            finally:
+                try:
+                    s.sendall(make_frame(struct.pack(">H", 1000)))
+                except Exception:
+                    pass
+                s.close()
+        except Exception:
+            # 未完成的份额按 hey 失败请求同构补 000 行（保证 len(rows) == n）
+            t_fail = time.perf_counter() - t_start
+            with rows_lock:
+                for _ in range(share - done):
+                    rows.append({
+                        "response-time": "0.000000",
+                        "offset": "%.6f" % t_fail,
+                        "status-code": "000",
+                    })
+        # msg_len 仅作消息长度参考, 实际载荷 base+序号
+        del msg_len
+
+    threads = []
+    for i in range(c):
+        share = n // c + (1 if i < n % c else 0)
+        t = threading.Thread(target=worker, args=(i, share))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(timeout=300)
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # hey 执行与 csv 解析
 # ---------------------------------------------------------------------------
 def run_hey(hey_bin, url, n, c, timeout_ms=600000, method="GET", data=None):
@@ -390,12 +513,23 @@ def main():
 
         results = []
         for sc in scenarios:
-            print(f"[bench] 场景 {sc['name']}: {sc['n']} 请求 / 并发 {sc['c']} ...",
-                  file=sys.stderr)
+            url = sc["url"]
             method = sc.get("method", "GET")
             data = sc.get("data", None)
-            rows = run_hey(args.hey, sc["url"], sc["n"], sc["c"], method=method, data=data)
-            summary = summarize(rows, sc["n"], sc["c"], sc["url"])
+            if url.startswith("ws://"):
+                # WS 场景: 内置负载客户端 (echo 往返), 输出 hey csv 同构行
+                rest = url[len("ws://"):]
+                hostport, ppath = rest.split("/", 1)
+                wpath = "/" + ppath
+                wport = int(hostport.rsplit(":", 1)[1]) if ":" in hostport else args.port
+                print(f"[bench] 场景 {sc['name']}: {sc['n']} echo 往返 / "
+                      f"并发 {sc['c']} (WS {wpath}) ...", file=sys.stderr)
+                rows = run_ws(wport, wpath, sc["n"], sc["c"])
+            else:
+                print(f"[bench] 场景 {sc['name']}: {sc['n']} 请求 / 并发 {sc['c']} ...",
+                      file=sys.stderr)
+                rows = run_hey(args.hey, url, sc["n"], sc["c"], method=method, data=data)
+            summary = summarize(rows, sc["n"], sc["c"], url)
             summary["name"] = sc["name"]
             results.append(summary)
             print(f"[bench]   -> {summary['requests_per_sec']} req/s, "
