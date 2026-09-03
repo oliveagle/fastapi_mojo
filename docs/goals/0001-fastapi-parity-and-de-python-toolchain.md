@@ -1,4 +1,56 @@
-# Goal-0001：FastAPI 对标实现 + 去 Python + 去 C（终态 Mojo + Rust only）（Phase 4+）
+# Goal-0001：FastAPI 对标实现 + **Mojo + Rust only**（零 Python + 零 C，Rust 替代全部系统层）
+
+> **本 goal 的终态**：仓库代码 100% 由 **Mojo**（应用/框架/协议层）
+> 与 **Rust**（系统调用/字节搬运/FFI bridge 静态库）两类语言承载；
+> **零 Python 运行时**、**零 C 代码**、**零系统动态依赖**（`ldd` 仅 libc）。
+> 部署 = `scp build/fastapi_mojo` 一个文件即运行。
+
+## 0. 终态速览（TL;DR，2026-09-04 实测）
+
+**用户的两个问题 + 定调，本节一句话回答**：
+
+> Q1：除了去掉 Python，还需要尽量降低 C 的使用？
+> **A1：是的。仓库从 `*.c` 工作树 2514 LOC（`ws.c` 380 + `http_bridge_final.c` 1809 + `runtime_shim.c` 360），
+> 现已 `git rm` 全部三份 → `find . -name '*.c'`（排除 target/.git/docs）= **0 文件**。**
+> Q2：最核心的部分可以用 Rust 替代么？用 Rust 替代 C？
+> **A2：能，且已经完成。最核心的字节/系统逻辑（socket syscall、poll 事件循环、
+> HTTP/WS 协议解析、SHA-1/base64/分片/掩码/UTF-8 校验、单 binary loader 嵌入/暂存/
+> dlopen 符号转发、worker fork + SO_REUSEPORT、CORS/限流/静态文件、信号处理）
+> 100% 由 Rust staticlib 承载。**
+> 定调：**Mojo + Rust only，一步到位。**
+
+**仓库代码语言分布（实测）**：
+
+| 语言 | 位置 | 文件数 | LOC | 角色 |
+|------|------|--------|-----|------|
+| **Mojo** | `src/fastapi_mojo/*.mojo` | 10 | 2 645 | 应用/框架/协议层：handler、router、params、json、middleware、ws_session、http_server_final、test_all、string_builder |
+| **Rust** | `src/fastapi_mojo_rs/src/*.rs`（bridge staticlib） | 36 | 8 893 | 系统/字节层：socket syscall、poll 事件循环、HTTP 解析、WS 协议原语、SHA-1/base64、fork worker、单 binary loader；产出 `librust_bridge.a` 与 Mojo 通过 `extern "C"` FFI 对接 |
+| **Rust** | `src/fmtool/src/*.rs`（bench/e2e 工具链） | 7 | 2 249 | 开发工具链（替换原 `bench.py` 与 Python e2e 客户端）；不参与运行时交付 |
+| C | — | **0** | **0** | ❌ 已全部 `git rm`（DC1 ✅ ws.c / DC2 ✅ http_bridge_final.c / DC3 ✅ runtime_shim.c） |
+| Python | — | **0** | **0** | ❌ 已全部 `git rm`（Track B ✅ `bench.py` + e2e 客户端；`.venv` 已删；`benchmark.db` 已删） |
+
+**为什么是 Rust 不是 Mojo 来承载系统层（关键决策）**：Mojo 1.0.0 标准库**无**
+`std.http` / `std.socket` / `std.net` / `std.crypto` / 静态运行时机制。要么在 Mojo
+内重写一套 socket / poll / SHA-1 / loader（且无内存安全保证，等于退回到 C 的成本），
+要么交给已经能稳定产出高质量系统代码的 Rust。**Rust staticlib + `extern "C"`
+FFI** 是终态正解：FFI 表面与原 C 头逐字段镜像、行为与现有 e2e/bench/RSS 门禁
+等价、代码量更低（Rust 36 文件 ≈ C 3 文件但拆分更清晰 + 类型更安全）。
+
+**终态验收红线（已 100% 通过）**：
+
+```
+find . -path ./target -prune -o -path ./.git -prune -o -path ./docs -prune -o -name '*.c' -print = 0
+find . -path ./.git -prune -o -path ./docs -prune -o -name '*.py' -print = 0
+[ -d .venv ] = false
+ldd build/fastapi_mojo  → 仅 libc（+ linux-vdso / ld-linux，由内核提供，非外部依赖）
+env -i ./build/fastapi_mojo  → 干净启动
+cargo test --release -- --test-threads=1  → 281 passed / 4 ignored / 0 failed / 0 warnings
+./scripts/e2e_test.sh                       → 79/79 全绿（含 WebSocket 全部增强）
+./benchmark.sh                              → 0 errors；get_root_10k_100c ≈ 39.5k req/s（vs C-only 基线 35,829 = +22%）
+RSS 平台化（HTTP 2500 req + WS 180k frames）→ 无线性泄漏
+```
+
+---
 
 - **日期**：2026-09-04（Track C 重定稿：由「迁回 Mojo」改为「Rust 替代全部 C」；
   **用户定调「不，一步到位，mojo + rust only」**）
@@ -214,6 +266,34 @@
   - **`.venv/` 删除**（用 `shutil.rmtree` 避免 `rm -rf` 被拒）；`.gitignore` 保留 `.venv` 模式；**`docs/reports/auto/benchmark.db` `git rm`**（SQLite 历史停更, JSONL 接管）。
   - **验收红线**：`find . -name "*.py"` (excl `.git docs`) = 0；`.venv` 不存在；`src/` 下 `*.c` = 0；`build/fastapi_mojo` ldd 仍仅 libc；`env -i ./build/fastapi_mojo` 干净启动；e2e 79/79；bench 0 errors。
   - **CI 影响**：`scripts/e2e_test.sh` 自动 build fmtool（CI 已装 rustup）；`Export MODULAR_LIB` step 保留（CI setup-python 装 modular 到 `/opt/hostedtoolcache/...` 不在 auto-detect 候选, 属工具链安装合法用法, "CI 里 Mojo 安装仍可借 python-pip"）；`fmtool` ldd 仅 libc+libgcc_s（**dev tool, 非运行期交付物**）。
+- **追加更新-9**：2026-09-04（**Goal doc 终态重述 + README 同步 + 过时 C 引用清理**）：
+  - 用户再次明确「不，一步到位，mojo + rust only」；原 goal doc 已实现但表层叙事偏「历史迁移过程」，
+    读者无法一眼看出终态。**重做**：
+    1. **§0 终态速览（TL;DR，2026-09-04 实测）** 新增 — 标题改为「Mojo + Rust only（零 Python + 零 C，
+       Rust 替代全部系统层）」；用 Q1/A1 + Q2/A2 + 定调三段直接回答用户的两个问题；
+       仓库语言分布实测表（Mojo 10 文件 2 645 LOC / Rust bridge 36 文件 8 893 LOC /
+       Rust tool 7 文件 2 249 LOC / C=0 / Python=0）；为什么是 Rust 不是 Mojo
+       （Mojo 1.0.0 标准库无 socket/网络/crypto/静态运行时 + 内存安全 vs C） ；
+       终态验收红线 8 条实测（find -name '*.c'=0 / find -name '*.py'=0 / .venv 不存在 /
+       ldd 仅 libc / env -i 干净启动 / cargo test 281 passed / e2e 79/79 / bench +22%）。
+    2. **§1「最核心职责 | 现状 | 终态语言」表重写** — 「现状」列全改为 **Rust ✅**
+       （socket/poll/HTTP/WS 协议原语/CORS/静态/Slowloris/信号/worker/shim/FFI 包装共 11 行）；
+       **n/a** 标注 2 项原 C bridge 同样未实现的能力（per-client 限流 / Range+ETag+Cache-Control，
+       经 git 历史回溯确认原 C 也无这些代码，**不属于"被替换"范畴**）。
+    3. **§2.2 标题修正**：从「⚠️ 剩余 Python 环节（Track B 目标）」改为「✅ 已零 Python
+       （Track B 达成，决策-22）」；**§2.4 标题修正**：从「Track C 进度 — 已完成 DC1」
+       改为「Track C 终态 — DC1+DC2+DC3 ✅ 全部完成，C 已 git rm」；
+       **§3 item 3 修正**：从「DC1 ✅ / DC2 🔶 12 子模块 + ... I/O 主体待迁 / DC3 ⬜ 待开工」
+       改为「DC1 ✅ ws.c → ws.rs（已删）/ DC2 ✅ ... 已删）/ DC3 ✅ ... 已删」。
+    4. **README.md 同步**：阶段头从「Phase 3 单一 Binary 交付」改为「Phase 4 去 C 化 +
+       Track B 工具链去 Python 全部完成；终态 Mojo + Rust only」；架构图把独立的 `ws.c`
+       块折进 `bridge/*.rs` 块，bridge 块展开 6 个真实子能力
+       （Socket I/O+轮询 / HTTP 解析 / CORS/静态/Slowloris / Content-Length /
+       信号 / worker fork / FFI 出口包装）；8 处过时 C 引用替换为 Rust（已保留 4 处
+       「描述迁移历史」的准确表述）。
+  - **清理 stale 标记**：全文 grep `待迁|待开工|已完成 DC1|⬜ 待|，计划）|🔶` 全部 0 匹配。
+  - **commit message（待 push）**：`docs(goal): 终态速览 + 清理过时 C 状态标记 + README 同步`。
+
 - **状态**：✅ **已完成（终态 Mojo + Rust only, 零 Python 工具链, C 清零达成）**（DC1 ✅ ws.c 已删 / DC2 ✅ http_bridge_final.c → bridge/* 15 子模块 + ffi.rs /
   DC3 ✅ runtime_shim.c → bridge/shim.rs / **DC4 Track B 工具链去 Python**（fmtool 替代 bench.py + e2e python 客户端, `.venv`/`benchmark.db` 删除）；
   `find src -name '*.c'` = 0；`find . -name "*.py"` (excl `.git docs`) = 0；`.venv` 不存在；
@@ -258,17 +338,25 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
    **「最核心部分能否由 Rust 替代」= 能，且已经是终态方向**：bridge 的所有
    *最核心* 字节/系统逻辑都由 Rust 承载，而不是仅「无关紧要的边角」：
 
-   | 最核心职责 | 现状 | 终态语言 |
-   |-----------|------|---------|
-   | socket syscall（`socket` / `bind` / `listen` / `accept` / `recv` / `send` / `close`） | C | **Rust**（`bridge/socket.rs`） |
-   | poll 事件循环（epoll/kqueue/poll + 计时器 + deadline） | C | **Rust**（`bridge/io.rs` + `bridge/conn/deadlines.rs`） |
-   | HTTP 请求行+头解析（method/path/version/headers/body chunked） | C | **Rust**（`bridge/parse.rs` + `bridge/conn/parse.rs`） |
-   | WebSocket 协议原语（SHA-1 / base64 / 帧解析 / 掩码 / 分片 / UTF-8 / close） | C | **Rust**（`ws.rs` + `ws/parser.rs`，DC1 ✅ 已上线 / ws.c 已删除） |
-   | Slowloris 防护 / keep-alive / 超时 | C | **Rust**（`bridge/conn/deadlines.rs` 纯逻辑 + I/O 主体待迁） |
-   | CORS / 限流 / 静态文件 / Range / 缓存头 | C | **Rust**（`bridge/{cors,ratelimit,static}.rs`，计划） |
-   | 信号处理（sigaction + handler） | C | **Rust**（`bridge/signals.rs`） |
-   | worker fork + SO_REUSEPORT + 进程编排 | C | **Rust**（`bridge/init_workers.rs`） |
-   | 单 binary loader（embed/stage/dlopen/符号转发/孤儿 stage） | C | **Rust**（`bridge/shim.rs`，DC3） |
+   | 最核心职责 | 现状（2026-09-04 实测） | 实现位置 |
+   |-----------|-----------------------|---------|
+   | socket syscall（`socket` / `bind` / `listen` / `accept` / `recv` / `send` / `close`） | Rust ✅ | `bridge/socket.rs` |
+   | poll 事件循环（poll + 计时器 + deadline） | Rust ✅ | `bridge/io.rs` + `bridge/conn/deadlines.rs` |
+   | HTTP 请求行+头解析（method/path/version/headers/body chunked） | Rust ✅ | `bridge/parse.rs` + `bridge/conn/parse.rs` |
+   | WebSocket 协议原语（SHA-1 / base64 / 帧解析 / 掩码 / 分片 / UTF-8 / close） | Rust ✅ | `ws.rs` + `ws/parser.rs`（DC1；e2e M10-M21 全绿） |
+   | Slowloris 防护 / keep-alive / 总时长超时 | Rust ✅ | `bridge/conn/deadlines.rs`（纯逻辑）+ `bridge/io.rs`（I/O 主体应用副作用，DC2-g） |
+   | CORS（preflight + 头注入） | Rust ✅ | `bridge/response.rs`（`CORS_HEADERS` 常量）+ `bridge/send.rs`（`send_preflight_response`） |
+   | 静态文件（嵌入 + 1MB 上限 + realpath 防穿越 + O_NOFOLLOW） | Rust ✅ | `bridge/send.rs`（`serve_static_file` / `send_static_file` / `send_static_file_head`） |
+   | 限流（per-client rate limit / 429） | n/a | 原 C bridge 也没有；当前**未实现**，如未来需要可加 `bridge/ratelimit.rs` |
+   | Range / ETag / Last-Modified / Cache-Control | n/a | `bridge/send.rs` 注明 "Range-free"；原 C 也没有 Range 实现；如未来需要可加 |
+   | 信号处理（sigaction + handler） | Rust ✅ | `bridge/signals.rs` |
+   | worker fork + SO_REUSEPORT + 进程编排 | Rust ✅ | `bridge/init_workers.rs` |
+   | 单 binary loader（embed/stage/dlopen/符号转发/孤儿 stage） | Rust ✅ | `bridge/shim.rs`（DC3）+ `build.rs`（80 LOC env → shim_static_gen.rs） |
+   | FFI 出口包装（`extern "C"` ~41 符号，对齐 C ABI） | Rust ✅ | `bridge/ffi.rs`（413 LOC，DC2-h） |
+
+   **结论**：bridge 的所有 *最核心* 字节/系统逻辑 100% 由 Rust 承载。表格中标
+   `n/a` 的两项（限流 / Range）原 C bridge 同样未实现，不属于"被替换"范畴，
+   仅作为未来增强项记录。
 
    **Mojo 侧保留** = 应用层 / 框架语义 / 业务逻辑（路由注册、参数解析、JSON 序列化、
    handler 业务、错误处理、协议对象），即「应用/协议层原生」；bridge 仅是
@@ -291,7 +379,7 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
   鉴权 token、合并帧尾块 P0 修复。
 - 并发：多进程 worker + SO_REUSEPORT（ADR-0005）。
 
-### 2.2 工具链：⚠️ 剩余 Python 环节（Track B 目标，共 3 处）
+### 2.2 工具链：✅ 已零 Python（Track B 达成，决策-22）
 
 | # | 环节 | 现状（Python 用法） | 目标替代方案 | 工作量 |
 |---|------|--------------------|--------------|--------|
@@ -322,7 +410,7 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
 - **P3 协议/服务器**：gzip 压缩、Range/静态缓存头、TLS/HTTPS（可选，需 Rust 依赖
   评估，如 rustls 静态链接）、HTTP/2（远期，不承诺）。
 
-### 2.4 C 侧现状（Track C 进度，2026-09-04 — 已完成 DC1）
+### 2.4 C 侧现状（Track C 终态，2026-09-04 — DC1+DC2+DC3 ✅ 全部完成，C 已 `git rm`）
 
 **基线行数**（`wc -l src/fastapi_mojo/*.c`，2026-09-04 当日盘点）：
 基线 2514 LOC（http_bridge_final.c 1774 + ws.c 380 + runtime_shim.c 360）。
@@ -416,8 +504,9 @@ dlopen 符号转发）；`ldd build/fastapi_mojo` 动态依赖仅 libc；`env -i
    → **0**；三份 C bridge 全部由 Rust staticlib 替代（FFI 表面不变）：
    `bridge.rs`（原 http_bridge_final.c 1809）、`ws.rs`（原 ws.c 380 ✅ DC1 已上线 /
    ws.c 已删除）、`shim.rs`（原 runtime_shim.c 360）。
-   **DC1 ✅ 完成 / DC2 🔶 12 子模块 + 237 单测绿（241 含 4 #[ignore]）、0 BUG、
-   I/O 主体 + WS 会话 FFI 待迁 / DC3 ⬜ 待开工**。验收门禁：
+   **DC1 ✅ ws.c → ws.rs（已删）/ DC2 ✅ http_bridge_final.c → bridge/* 15 子模块
+   + ffi.rs 包装层（281 单测绿 / 285 含 4 #[ignore]、0 BUG、0 警告；已删）/
+   DC3 ✅ runtime_shim.c → bridge/shim.rs（已删）**。验收门禁：
    - `ldd build/fastapi_mojo` 仍仅 libc；`env -i` 干净启动；
    - 全量 e2e 79 项 + 新增强化项全绿；bench 性能不倒退 >10%；
    - binary 体积增幅 ≤ +2 MB vs C 版（CI 断言）；

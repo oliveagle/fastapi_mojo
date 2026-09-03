@@ -5,9 +5,9 @@
 
 用 **Mojo** 实现一套 FastAPI 的实验仓库。
 
-**当前阶段：Phase 3 — 单一 Binary 交付（已达成）**
+**当前阶段：Phase 4 — 去 C 化（Rust bridge，决策-19/20/21）+ Track B 工具链去 Python（决策-22）全部完成；终态 Mojo + Rust only（零 Python + 零 C）**
 
-- ✅ Mojo 原生 HTTP 服务器（C FFI socket 桥接 + Mojo 路由/参数/JSON）
+- ✅ Mojo 原生 HTTP 服务器（**Rust staticlib FFI socket 桥接** + Mojo 路由/参数/JSON，决策-19）
 - ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
@@ -21,7 +21,7 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 **终态 Mojo + Rust only，C 清零 + 零 Python 工具链（决策-22）**）：
 
 1. `mojo build --emit object` 产出服务器对象（其外部依赖仅为 11 个
-   `KGEN_CompilerRT_*` C API 符号 + libc + C 桥接符号）；
+   `KGEN_CompilerRT_*` C API 符号 + libc + Rust bridge `extern "C"` 符号）；
 2. 3 个运行时 .so 用 `objcopy -I binary` 作为数据嵌入可执行文件；
 3. 进程启动时（`main` 之前的 C constructor）把运行时暂存到私有临时目录
    （`/dev/shm` 或 `/tmp`），`dlopen` 并绑定这 11 个符号的转发函数；
@@ -180,7 +180,7 @@ curl http://127.0.0.1:8000/test.json
 ## 依赖
 
 - [Mojo](https://docs.modular.com/mojo/) 1.0.0（`pip install modular`）
-- GCC（编译 C 桥接 + shim）
+- GCC（链接 Rust staticlib + objcopy 嵌入 Mojo 运行时 payload）
 - binutils（objcopy 嵌入运行时）
 - 运行期：仅 glibc 基础运行时。实际 `ldd` 输出为 `libc.so.6` + 系统 `linux-vdso.so.1` / `ld-linux-x86-64.so.2`（内核/加载器组件）；**不依赖** libm / libstdc++ / libgcc_s / Python / .venv
 
@@ -198,12 +198,15 @@ curl http://127.0.0.1:8000/test.json
 │  └── 静态文件 / CORS / 限流 / 日志                     │
 ├────────────────────────────────────────────────────────┤
 │  bridge/*.rs（Rust staticlib，随 binary 静态打包）      │
-│  ├── Socket I/O（read/parse 完整 body）                │
-│  ├── UTF-8 校验（非法请求 400）                        │
-│  ├── Content-Length 限流（413，先检查后截断）          │
-│  └── 信号处理（SIGINT/SIGTERM 优雅关闭）               │
+│  ├── Socket I/O + poll 事件循环（accept/read/parse）   │
+│  ├── HTTP 请求行+头解析（method/path/version/headers） │
+│  ├── CORS / 静态文件 / Slowloris 防护                  │
+│  ├── Content-Length 上限（413，先检查后截断）          │
+│  ├── 信号处理（SIGINT/SIGTERM 优雅关闭）               │
+│  ├── worker fork + SO_REUSEPORT + 进程编排             │
+│  └── FFI 出口包装（bridge/ffi.rs，~41 extern "C" 符号）│
 ├────────────────────────────────────────────────────────┤
-│  ws.c（WebSocket RFC 6455 协议原语）                   │
+│  ws.rs（WebSocket RFC 6455 协议原语，Rust 全手写）      │
 │  ├── 握手 (SHA-1 + base64 Sec-WebSocket-Accept)        │
 │  │        + subprotocol 回显 (RFC 6455 §4.1)           │
 │  ├── 状态化帧解析 (掩码/7|16|64-bit/分片重组, 非阻塞)  │
@@ -221,21 +224,21 @@ curl http://127.0.0.1:8000/test.json
 
 ## 架构决策记录（ADR）
 
-- **ADR-0001**：Mojo 替换 Python 策略（C1~C4 已落地，C5 经 C FFI 达成）
+- **ADR-0001**：Mojo 替换 Python 策略（C1~C4 已落地，C5 **bridge 层**早期经 C FFI 达成，决策-19 起由 Rust staticlib 替代，DC1+DC2+DC3 全部完成）
 - **ADR-0002**：项目本标 = 单一二进制零依赖部署
 - **ADR-0003**：单一二进制实现机制（运行时嵌入 + 暂存 + dlopen shim）
 - **ADR-0004**：用户路由注册机制（Handler 类型 + 单点 dispatch，user code = data）
 - **ADR-0005**：并发模型（多进程 worker + SO_REUSEPORT，nginx pre-fork）
-- **ADR-0006**：WebSocket (RFC 6455) 支持（C FFI 协议层 + /ws echo 端点）
+- **ADR-0006**：WebSocket (RFC 6455) 支持（Rust 协议层 `ws.rs` 全手写 + /ws echo 端点）
 - **ADR-0007**：WebSocket 增强（多端点路由 + 子协议协商 + 服务端保活 ping + close/UTF-8 校验）
-- **ADR-0008**：高并发 WebSocket（poll 循环驱动 + FIFO 事件队列 + 控制帧/保活 C 层自动处理）
+- **ADR-0008**：高并发 WebSocket（poll 循环驱动 + FIFO 事件队列 + 控制帧/保活 bridge 层自动处理）
 - **ADR-0009**：WebSocket 精化（合并帧丢失修复 + `{param}` 路由 + 鉴权 + 内存/背压加固）
 
 决策链：已决策-5~13 见 `docs/adr/0001-mojo-replacement-strategy/` 与 `AGENTS.md` §6。
 
 ## 路线图
 
-- [x] C FFI 桥接（socket I/O）
+- [x] Rust staticlib 桥接（socket I/O / HTTP 解析 / WS 协议 / shim loader，决策-19）
 - [x] JSON 序列化（线性时间）
 - [x] 模式匹配路由
 - [x] 参数解析（UTF-8 安全）
@@ -245,7 +248,7 @@ curl http://127.0.0.1:8000/test.json
 - [x] 请求 ID 追踪
 - [x] 中间件（request_id / logging / timing）
 - [x] **单一二进制打包（Phase 3，本标达成）**
-- [x] WebSocket 支持（RFC 6455，C FFI 协议层 ws.c + /ws echo 端点，ADR-0006）
+- [x] WebSocket 支持（RFC 6455，Rust 协议层 `ws.rs` + /ws echo 端点，ADR-0006；ws.c 已删）
 - [x] WebSocket 增强（多端点路由 /ws /ws/counter /ws/chat + 子协议协商 + 服务端保活 ping + close 码/UTF-8 校验，ADR-0007）
 - [x] 高并发 WebSocket（多 WS 会话与 HTTP 并发、空闲不阻塞 dispatch，ADR-0008）
 - [x] WebSocket 精化（合并帧不丢失、`{param}` 路由、token 鉴权、内存/背压加固，ADR-0009）
