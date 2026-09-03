@@ -12,7 +12,10 @@
 # 设计: 新增"路由" = 纯数据 (register_routes, 核心零改动);
 #       新增"处理器行为" = 1 个 kind 常量 + run_handler 1 个 elif (唯一扩展点).
 
+from std.ffi import external_call, CStringSlice
+from string_builder import span_to_str, next_codepoint_len
 from params_query import ParsedParams
+from params_json import parse_body_json
 
 
 # ---------- 处理器行为常量 (零参 def) ----------
@@ -40,6 +43,24 @@ def KIND_ROUTES() -> Int:
 def KIND_TEMPLATE() -> Int:
     """模板渲染: data 里的 {占位符} 用参数填充; 占位符缺失则省略该字段 (hello)."""
     return 4
+
+
+def KIND_HTML() -> Int:
+    """直接以 data["html"] 作为 text/html body 返回 (GET / 等动态前端路由).
+    区别于 KIND_STATIC (返回 JSON): KIND_HTML 由 dispatch 检测后走 send_html_response
+    (Content-Type: text/html; charset=utf-8). 适合 control-plane / dashboard 类应用."""
+    return 5
+
+
+def KIND_RUN_CMD() -> Int:
+    """执行 data["cmd"] shell 命令, 捕获 stdout/stderr + 进程退出码 + timeout.
+    返回 JSON: {"rc":N,"ok":bool,"out":"..","err":"..","timeout":bool}.
+    data["timeout_ms"] 可选 (默认 15000). cmd 中的 {key} 由 path/query 参数填充;
+    缺失参数 -> 占位符保留为字面量 (方便上层 debug).
+
+    用于运营面板 (cron 重启 / 配置切换 / 子进程调用 / SSH 包装脚本) 等
+    "HTTP 路由 = 一次 shell 命令" 的场景. run_command_json 在 C 桥实现."""
+    return 6
 
 
 # ---------- WebSocket 处理器行为 (ADR-0007) ----------
@@ -133,6 +154,39 @@ def render_template(tpl: String, ctx: Dict[String, String]) raises -> Tuple[Bool
     return (True, out)
 
 
+def substitute_params(tpl: String, ctx: Dict[String, String]) raises -> String:
+    """填充 {key} -> ctx[key]; 缺失键 -> 保留 '{key}' 字面量 (KIND_RUN_CMD 用:
+    让缺失参数可被命令自身读取, 避免静默填空掩盖 typo). 无 {key} -> 原样返回.
+    UTF-8 safe: 非 '{{' 路径按整个 codepoint 前进 (旧版逐字节 i+=1 在多字节
+    CJK 模板上崩溃 'not a codepoint boundary')."""
+    var out = String("")
+    var i = 0
+    var n = tpl.byte_length()
+    while i < n:
+        # tpl[byte=i] 仅在 codepoint 边界安全; '{' 是 1 字节 ASCII, 直接比字节
+        var cur = tpl[byte=i]
+        if cur == '{':
+            var j = i + 1
+            while j < n and not (tpl[byte=j] == '}'):
+                j += 1
+            if j < n:
+                var key = String(tpl[byte=i + 1 : j])
+                if key in ctx:
+                    out += ctx[key]
+                else:
+                    out += String(tpl[byte=i : j + 1])
+                i = j + 1
+            else:
+                var cplen0 = next_codepoint_len(tpl, i)
+                out += String(tpl[byte=i : i + cplen0])
+                i += cplen0
+        else:
+            var cplen = next_codepoint_len(tpl, i)
+            out += String(tpl[byte=i : i + cplen])
+            i += cplen
+    return out^
+
+
 # ---------- 单一 dispatch 扩展点 ----------
 
 def run_handler(handler: Handler,
@@ -202,6 +256,57 @@ def run_handler(handler: Handler,
             var rendered = render_template(handler.data[k], ctx)
             if rendered[0]:
                 resp[k] = rendered[1]
+        return ("200 OK", resp^)
+
+    # HTML: 由 dispatch 检测后走 send_html_response (Content-Type: text/html).
+    # 这里仍返回 dict ({"html": body}); dispatch 用 kind 决定走哪条发送路径.
+    elif handler.kind == KIND_HTML():
+        var resp = Dict[String, String]()
+        resp["html"] = handler.data["html"]
+        return ("200 OK", resp^)
+
+    # RUN_CMD: 调 C 桥 run_command_json (shell + timeout + stdout/stderr 捕获)
+    # 命令模板的 {key} 由 path/query 参数填充 (缺失 -> 占位符保留).
+    elif handler.kind == KIND_RUN_CMD():
+        var cmd = handler.data["cmd"]
+        var ctx = Dict[String, String]()
+        for k in path_params:
+            ctx[k] = path_params[k]
+        for k in query.values:
+            ctx[k] = query.values[k]
+        for k in body.values:
+            ctx[k] = body.values[k]
+        var final_cmd = cmd  # fall back to raw template on substitution error
+        try:
+            final_cmd = substitute_params(cmd, ctx)
+        except e:
+            pass
+        var timeout_ms: Int = 15000
+        if "timeout_ms" in handler.data:
+            var tmo_str = handler.data["timeout_ms"]
+            timeout_ms = atol(String(tmo_str))
+        # C 桥: 返回 fmc_slice = CStringSlice(ptr, len), span_to_str -> Mojo String.
+        var slice = external_call["run_command_json", CStringSlice[origin_of(String(""))]](
+            final_cmd.as_c_string_slice(), Int64(timeout_ms))
+        var json_str = span_to_str(slice.as_bytes())
+        # 释放 C 侧 malloc 内存
+        _ = external_call["run_command_free", NoneType](slice)
+        # parse_body_json 把 {"rc":N,...} 解析成 dict (kind=10 不解析嵌套,
+        # 但 RUN_CMD 返回的是顶层 dict, 足以满足 control-plane 调用方).
+        var parsed = parse_body_json(json_str)
+        var resp = Dict[String, String]()
+        for k in parsed.values:
+            resp[k] = parsed.values[k]
+        # 当 run_command_json 返回非 JSON (例如 spawn 失败) 时, 提供降级字段
+        if "rc" not in resp:
+            resp["rc"] = "-1"
+            resp["ok"] = "false"
+            if "err" not in resp:
+                resp["err"] = json_str
+        # 控制面板需要的额外上下文 (前端 JS 用 d.code/d.ok/d.out/d.err; rc 与 code 同义)
+        if "rc" in resp:
+            resp["code"] = resp["rc"]
+        resp["cmd"] = final_cmd
         return ("200 OK", resp^)
 
     else:

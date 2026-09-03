@@ -93,6 +93,8 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
 
 // ws.c 协议原语 (显式 bridge, ADR-0006/0007/0008)
 #define WS_MAX_MSG (1024 * 1024)
@@ -1584,4 +1586,224 @@ long send_static_file(int fd, const char *path) {
 
 long send_static_file_head(int fd, const char *path) {
     return serve_static_file(fd, path, 0);
+}
+
+
+/* =========================================================================
+ * Generic capability (Session 253al / control-plane via fastapi_mojo):
+ *   - send_html_response: send raw HTML with text/html content type (for
+ *     KIND_HTML routes — the default dispatch sends application/json).
+ *   - run_command_json / run_command_free: run a shell command capturing
+ *     stdout+stderr with a timeout, returning a malloc'd JSON string
+ *     {"rc":N,"ok":bool,"out":"..","err":"..","timeout":bool} as an fmc_slice.
+ *     Used by KIND_RUN_CMD routes (operational dashboards: run bash/python).
+ * ========================================================================= */
+
+long send_html_response(int fd, const char *status, const char *body) {
+    return send_response(fd, status, "text/html; charset=utf-8",
+                         body, (int)strlen(body), 1, NULL);
+}
+
+/* Read a pipe fd fully (non-blocking), appending to a growable buffer.
+ * Returns bytes appended or -1 on error. */
+static long drain_fd(int fd, char **buf, long *cap, long *used) {
+    long got = 0;
+    for (;;) {
+        if (*used + 8192 + 1 > *cap) {
+            long newcap = (*cap == 0) ? 65536 : *cap * 2;
+            char *nb = realloc(*buf, (size_t)newcap);
+            if (!nb) return -1;
+            *buf = nb;
+            *cap = newcap;
+        }
+        ssize_t n = read(fd, *buf + *used, (size_t)(*cap - *used - 1));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            return -1;
+        }
+        if (n == 0) break;  /* EOF */
+        *used += n;
+        got += n;
+    }
+    return got;
+}
+
+fmc_slice run_command_json(const char *cmd, long timeout_ms) {
+    /* Default output cap: 256 KiB per stream (defensive; prevents a runaway
+     * child from exhausting the server process). */
+    const long MAX_OUT = 256L * 1024L;
+
+    int out_pipe[2], err_pipe[2];
+    if (cmd == NULL || cmd[0] == 0) {
+        char *m = malloc(64); if (!m) return (fmc_slice){"{}", 2};
+        int n = snprintf(m, 64, "{\"rc\":-1,\"ok\":false,\"err\":\"empty cmd\"}");
+        return (fmc_slice){ m, (long)n };
+    }
+    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
+        char *m = malloc(64); if (!m) return (fmc_slice){"{}", 2};
+        int n = snprintf(m, 64, "{\"rc\":-1,\"ok\":false,\"err\":\"pipe failed\"}");
+        return (fmc_slice){ m, (long)n };
+    }
+
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        char *m = malloc(64); if (!m) return (fmc_slice){"{}", 2};
+        int n = snprintf(m, 64, "{\"rc\":-1,\"ok\":false,\"err\":\"fork failed\"}");
+        return (fmc_slice){ m, (long)n };
+    }
+    if (pid == 0) {
+        /* child */
+        dup2(out_pipe[1], 1);
+        dup2(err_pipe[1], 2);
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        /* Run with sh -c like Python subprocess.run(shell=True). */
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+
+    /* parent */
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+    int fl_out = fcntl(out_pipe[0], F_GETFL, 0);
+    int fl_err = fcntl(err_pipe[0], F_GETFL, 0);
+    fcntl(out_pipe[0], F_SETFL, fl_out | O_NONBLOCK);
+    fcntl(err_pipe[0], F_SETFL, fl_err | O_NONBLOCK);
+
+    char *out_buf = NULL; long out_cap = 0, out_used = 0;
+    char *err_buf = NULL; long err_cap = 0, err_used = 0;
+    int out_eof = 0, err_eof = 0;
+    int timed_out = 0;
+
+    long deadline = (timeout_ms > 0) ? timeout_ms : 15000;
+    long start = gettimeofday_ms();
+
+    while (!(out_eof && err_eof)) {
+        long elapsed = gettimeofday_ms() - start;
+        if (elapsed >= deadline) { timed_out = 1; break; }
+        int wait_ms = (int)(deadline - elapsed);
+        if (wait_ms < 1) wait_ms = 1;
+
+        struct pollfd pfds[2];
+        int nfds = 0;
+        if (!out_eof) { pfds[nfds].fd = out_pipe[0]; pfds[nfds].events = POLLIN; pfds[nfds].revents = 0; nfds++; }
+        if (!err_eof) { pfds[nfds].fd = err_pipe[0]; pfds[nfds].events = POLLIN; pfds[nfds].revents = 0; nfds++; }
+        int pr = poll(pfds, (nfds_t)nfds, wait_ms);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            /* poll timeout — could be child still running or just no data; keep polling until deadline */
+            int status = 0;
+            pid_t w = waitpid(pid, &status, WNOHANG);
+            if (w == pid) {
+                /* child finished but we may still need to drain remaining pipe data */
+            }
+            continue;
+        }
+        int idx = 0;
+        if (!out_eof && (pfds[idx].revents & (POLLIN | POLLHUP))) {
+            long g = drain_fd(out_pipe[0], &out_buf, &out_cap, &out_used);
+            if (g < 0) break;
+            if (g == 0 && (pfds[idx].revents & POLLHUP)) out_eof = 1;
+        }
+        idx++;
+        if (!err_eof && (pfds[idx].revents & (POLLIN | POLLHUP))) {
+            long g = drain_fd(err_pipe[0], &err_buf, &err_cap, &err_used);
+            if (g < 0) break;
+            if (g == 0 && (pfds[idx].revents & POLLHUP)) err_eof = 1;
+        }
+    }
+
+    if (timed_out) {
+        kill(pid, SIGKILL);
+    }
+    /* drain any remaining (post-timeout) data then close */
+    drain_fd(out_pipe[0], &out_buf, &out_cap, &out_used);
+    drain_fd(err_pipe[0], &err_buf, &err_cap, &err_used);
+    close(out_pipe[0]);
+    close(err_pipe[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    int rc = -1;
+    if (WIFEXITED(status)) rc = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status)) rc = 128 + WTERMSIG(status);
+
+    if (out_buf) out_buf[out_used] = 0;
+    if (err_buf) err_buf[err_used] = 0;
+    if (out_used > MAX_OUT) out_used = MAX_OUT, out_buf[MAX_OUT] = 0;
+    if (err_used > MAX_OUT) err_used = MAX_OUT, err_buf[MAX_OUT] = 0;
+
+    /* Build JSON {"rc":..,"ok":..,"out":"..","err":"..","timeout":..} */
+    long cap = 64 + out_used * 6 + err_used * 6 + 64;
+    char *body = malloc((size_t)cap + 32);
+    if (!body) {
+        free(out_buf); free(err_buf);
+        char *m = malloc(64); if (!m) return (fmc_slice){"{}", 2};
+        int n = snprintf(m, 64, "{\"rc\":-1,\"ok\":false,\"err\":\"oom\"}");
+        return (fmc_slice){ m, (long)n };
+    }
+    long o = 0;
+    o += (long)snprintf(body + o, (size_t)(cap - o),
+                        "{\"rc\":%d,\"ok\":%s,\"timeout\":%s,\"out\":\"",
+                        rc, rc == 0 ? "true" : "false", timed_out ? "true" : "false");
+    if (out_buf) {
+        long n = json_escape_cstr(out_buf, body + o, (int)(cap - o));
+        if (n >= 0) o += n;
+    }
+    o += (long)snprintf(body + o, (size_t)(cap - o), "\",\"err\":\"");
+    if (err_buf) {
+        long n = json_escape_cstr(err_buf, body + o, (int)(cap - o));
+        if (n >= 0) o += n;
+    }
+    o += (long)snprintf(body + o, (size_t)(cap - o), "\"}");
+    free(out_buf);
+    free(err_buf);
+
+    return (fmc_slice){ body, o };
+}
+
+void run_command_free(const char *ptr) {
+    if (ptr) free((void *)ptr);
+}
+
+
+/* Read a file from the active static dir (embedded or on-disk) into a malloc'd
+ * slice. Used by KIND_HTML routes that need to inject dynamic content into a
+ * static front-end page (control-plane). Path traversal guarded (no leading /).
+ * Caller frees with run_command_free(). */
+fmc_slice read_embedded_file(const char *name) {
+    if (!name || !name[0] || name[0] == '/') return (fmc_slice){ "", 0 };
+    if (strstr(name, "..") != NULL) return (fmc_slice){ "", 0 };
+    char full[MAX_PATH + MAX_STATIC_DIR + 16];
+    snprintf(full, sizeof full, "%s/%s", g_static_dir, name);
+    FILE *f = fopen(full, "rb");
+    if (!f) return (fmc_slice){ "", 0 };
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0 || sz > MAX_FILE_SIZE) { fclose(f); return (fmc_slice){ "", 0 }; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return (fmc_slice){ "", 0 }; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = 0;
+    return (fmc_slice){ buf, (long)rd };
+}
+
+/* getenv wrapper returning a slice (empty when unset). */
+fmc_slice c_getenv(const char *name) {
+    const char *v = name ? getenv(name) : NULL;
+    size_t n = v ? strlen(v) : 0;
+    char *buf = malloc(n + 1);
+    if (!buf) return (fmc_slice){ "", 0 };
+    if (v) memcpy(buf, v, n + 1);
+    else buf[0] = 0;
+    return (fmc_slice){ buf, (long)n };
 }

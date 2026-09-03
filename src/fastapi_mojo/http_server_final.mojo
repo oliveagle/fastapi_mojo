@@ -8,7 +8,7 @@
 from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
-from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET
 from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
@@ -116,39 +116,11 @@ def register_routes(mut router: Router) raises:
     router.add_ws_route("/ws/private", ws_private_h)
 
 
-def main() raises:
-    print("=== Mojo HTTP Server v1.8 ===")
-
-    external_call["set_static_dir", NoneType]("./static".as_c_string_slice())
-    external_call["set_max_body_size", NoneType](1048576)
-
-    var router = Router()
-    register_routes(router)   # 用户代码 = 数据 (ADR-0004)
-    print("Routes: " + String(router.route_count()))
-
-    var mw_chain = MiddlewareChain()
-    mw_chain.add(Middleware("request_id"))
-    mw_chain.add(Middleware("logging"))
-    mw_chain.add(Middleware("timing"))
-    print("Middleware: request_id, logging, timing")
-
-    # Worker processes (ADR-0005): FASTAPI_MOJO_WORKERS=N (default 1 = single
-    # process). Must run before create_bound_socket (SO_REUSEPORT binding).
-    external_call["init_workers", NoneType]()
-
-    # Listen port: CLI --port N > FASTAPI_MOJO_PORT env > 8000 (C side).
-    var port = external_call["get_configured_port", Int]()
-    var sfd = external_call["create_bound_socket", Int](port)
-    if sfd < 0:
-        print("ERROR: bind failed on port " + String(port))
-        external_call["bridge_fail", NoneType]()
-        return
-    var worker_id = external_call["get_worker_id", Int]()
-    if worker_id > 0:
-        print("Worker #" + String(worker_id) + " (multi-worker mode, ADR-0005)")
-    print("Listening on http://127.0.0.1:" + String(port))
-    print("Press Ctrl+C to stop")
-
+def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
+    """HTTP event loop (poll + dispatch + WS), reusable across applications.
+    Routes come from the caller-supplied router (cp_app.mojo plugs in app routes).
+    Returns when a shutdown signal is received.
+    """
     var start_time = external_call["gettimeofday_ms", Int]()
     var req_num = 0
 
@@ -326,6 +298,26 @@ def main() raises:
                     status_line = result[0]
                     resp_data = result[1].copy()
 
+                # KIND_HTML: 直接以 text/html 发送 (动态前端页 / 运营面板).
+                # 走 send_html_response (Content-Type: text/html), 不再包 JSON.
+                if route_result.handler.kind == KIND_HTML():
+                    var html_body = ""
+                    if "html" in resp_data:
+                        html_body = resp_data["html"]
+                    var duration_ms = mw_timing(mw_chain, start_ms)
+                    if is_head:
+                        _ = external_call["send_html_response", Int](
+                            cfd, status_line.as_c_string_slice(), html_body.as_c_string_slice())
+                    else:
+                        _ = external_call["send_html_response", Int](
+                            cfd, status_line.as_c_string_slice(), html_body.as_c_string_slice())
+                    mw_logging(mw_chain, req_id, method, path, query, status_line, duration_ms)
+                    if external_call["get_close_after_response", Int]() != 0:
+                        external_call["conn_done", NoneType](cfd, False)
+                    else:
+                        external_call["conn_done", NoneType](cfd, True)
+                    continue
+
                 resp_data["method"] = method
                 resp_data["path"] = path
                 resp_data["handler"] = route_result.handler.name
@@ -373,3 +365,38 @@ def main() raises:
 
     external_call["server_shutdown", NoneType]()
     print("Server stopped gracefully.")
+
+def main() raises:
+    print("=== Mojo HTTP Server v1.8 ===")
+
+    external_call["set_static_dir", NoneType]("./static".as_c_string_slice())
+    external_call["set_max_body_size", NoneType](1048576)
+
+    var router = Router()
+    register_routes(router)   # 用户代码 = 数据 (ADR-0004)
+    print("Routes: " + String(router.route_count()))
+
+    var mw_chain = MiddlewareChain()
+    mw_chain.add(Middleware("request_id"))
+    mw_chain.add(Middleware("logging"))
+    mw_chain.add(Middleware("timing"))
+    print("Middleware: request_id, logging, timing")
+
+    # Worker processes (ADR-0005): FASTAPI_MOJO_WORKERS=N (default 1 = single
+    # process). Must run before create_bound_socket (SO_REUSEPORT binding).
+    external_call["init_workers", NoneType]()
+
+    # Listen port: CLI --port N > FASTAPI_MOJO_PORT env > 8000 (C side).
+    var port = external_call["get_configured_port", Int]()
+    var sfd = external_call["create_bound_socket", Int](port)
+    if sfd < 0:
+        print("ERROR: bind failed on port " + String(port))
+        external_call["bridge_fail", NoneType]()
+        return
+    var worker_id = external_call["get_worker_id", Int]()
+    if worker_id > 0:
+        print("Worker #" + String(worker_id) + " (multi-worker mode, ADR-0005)")
+    print("Listening on http://127.0.0.1:" + String(port))
+    print("Press Ctrl+C to stop")
+
+    serve_forever(router, mw_chain)
