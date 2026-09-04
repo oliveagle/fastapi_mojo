@@ -356,12 +356,30 @@
      clippy `-D warnings --tests` **0 警告**；e2e **133/133 全绿**（v0.5.0 118 + F9 6 + F10a 5
      + F10b 4 = 133）；bench 6 场景 0 errors；ldd 仅 libc；env -i 干净启动；binary **2.7M**
      （≤4.2M）。
+- **已决策-29**：**F11 BackgroundTasks（v0.5.1，进程内队列）**：
+  1. **语义对齐 FastAPI/Starlette**：Starlette `BackgroundTask(func, *args)` 在响应已
+     flush 后在同一 event loop await func；本实现响应已 flush 后同步执行 shell 命令
+     （复用 `run_command_json` FFI，fork+poll+timeout 已在 bridge/cmd.rs），客户端已收到响应。
+  2. **API（声明式，延续 handler.data 模式）**：
+     - `data["_background"] = "cmd1\ncmd2"`（换行分隔，命令内不允许含换行）
+     - `data["_background_timeout_ms"] = "2000"`（单条命令 timeout，默认 2000ms）
+     - `data["_background_log"] = "false"`（默认 true：`[bg]` 日志输出 stdout/stderr/rc）
+  3. **实现**：`_run_background` helper + dispatch 主 JSON 分支 hook（响应已 flush 后、
+     conn_done 前）；不 fork/zombie —— 同步执行符合 Starlette 语义，pre-fork 多 worker +
+     SO_REUSEPORT 隔离 worker 阻塞，timeout 防无限挂。命令切分按 `\n`（与 SSE `|` /
+     header `,` 分隔约定一致）。
+  4. **demo**：`/bg-write` 响应立即返回（HTTP_TIME 0.3ms），后台 `date` 写 /tmp/bg_test.log。
+  5. **质量门禁实测**：e2e **136/136**（+3：响应立即 / bg 命令在响应后执行 / server log 含 `[bg]`）；
+     cargo test 287 单测 / 0 BUG；clippy `-D warnings --tests` 0 警告；bench 0 errors；
+     ldd 仅 libc；binary 2.7M（≤4.2M）。
+
 *最后更新：2026-09-04（**决策-24 v0.5.0 发布（Goal-0002 F1-F8 全部达成）**：
 类型化参数 + HTTPException + Request/Response + 嵌套 JSON + OpenAPI + SSE +
 /metrics + 结构化 access log + binary 瘦身 5.5M → 2.8M；e2e **118/118 全绿** /
 cargo test **284 单测 / 0 警告 / 0 BUG** / bench 0 errors / ldd 仅 libc /
 RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
 决策-25 结构化 access log (FASTAPI_MOJO_ACCESS_LOG=json)；
+决策-29 F11 BackgroundTasks (响应后同步执行声明命令);
 决策-28 F10 Header/Cookie/Form 参数注入 (F10a Cookie + F10b Form; 决策-27 F9 SSE status_code + extra 头 (上游 0.140.13 对齐 + 修复 v0.5.0 静默丢弃);
 决策-26 binary strip 5.5M → 2.8M (-49%)；决策-22 Track B 去 Python；
 决策-23 质量门禁；决策-21 终态 Mojo + Rust only；决策-20 DC2-h；
