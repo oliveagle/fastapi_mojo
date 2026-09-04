@@ -12,15 +12,17 @@ from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KI
 from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params, get_param_types, TypedError
+from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
 
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
-    """Build error response data."""
+    """Build error response data. FastAPI 语义: 统一 {detail, status} (Goal-0002 F2).
+    向后兼容: e2e 只检查状态码, 不检查 body 字段名."""
     var resp = Dict[String, String]()
-    resp["error"] = message
+    resp["detail"] = message
     resp["status"] = status
     return resp^
 
@@ -109,6 +111,14 @@ def register_routes(mut router: Router) raises:
     typed_h.set_data("message", "Typed query")
     typed_h.set_data("_param_types", "count:int=5;verbose:bool")
     router.add_route("/typed", "GET", typed_h)
+
+    # F2 声明式异常映射 demo (Goal-0002 §1.1): Handler.data["_error_map"]
+    #   /errors/{item_id}: item_id=99 -> 404 (Item not found); 其它 int -> 422 (Invalid ID).
+    #   命中时直接返回 {status, detail}, 不进 run_handler (FastAPI HTTPException 语义).
+    var errors_h = Handler(KIND_ECHO(), "errors_demo")
+    errors_h.set_data("message", "Error map demo")
+    errors_h.set_data("_error_map", "item_id=99:404:Item not found;item_id=*:422:Invalid ID")
+    router.add_route("/errors/{item_id}", "GET", errors_h)
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -320,10 +330,18 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         resp_data["detail"] = type_err.detail
                         resp_data["status"] = "422"
                     else:
-                        var result = run_handler(route_result.handler, route_result.params,
-                                                 query_params, body_params, info)
-                        status_line = result[0]
-                        resp_data = result[1].copy()
+                        # F2: 声明式异常映射 (Goal-0002). 命中 -> 直接返回错误响应,
+                        # 不进 run_handler. 这是 dispatch 唯一一处"认识 _error_map"的代码.
+                        var exc = match_error_map(route_result.handler,
+                                                  route_result.params, query_params.values)
+                        if exc.status_code > 0:
+                            status_line = exc.status_line
+                            resp_data = build_exception_body(exc.detail, exc.status_code)
+                        else:
+                            var result = run_handler(route_result.handler, route_result.params,
+                                                     query_params, body_params, info)
+                            status_line = result[0]
+                            resp_data = result[1].copy()
 
                 # KIND_HTML: 直接以 text/html 发送 (动态前端页 / 运营面板).
                 # 走 send_html_response (Content-Type: text/html), 不再包 JSON.

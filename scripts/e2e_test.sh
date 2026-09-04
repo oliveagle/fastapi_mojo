@@ -7,6 +7,7 @@
 # 构建 (如缺), 启动服务器, 断言真实 HTTP/WS 行为:
 #   - 9 个路由 (200 + body 内容)
 #   - F1 类型化参数: int/bool/422 + detail 字段 (Goal-0002)
+#   - F2 声明式异常映射: _error_map + 统一 detail 错误体 (Goal-0002)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
@@ -221,6 +222,17 @@ expect_code "typed query with bool ok" "200" "http://127.0.0.1:$PORT/typed?verbo
 expect_code "typed query default count ok" "200" "http://127.0.0.1:$PORT/typed?verbose=false&count=20"
 expect_code "typed query int bad -> 422" "422" "http://127.0.0.1:$PORT/typed?count=abc&verbose=true"
 expect_code "typed query missing required -> 422" "422" "http://127.0.0.1:$PORT/typed"
+
+echo "== unified error body + error_map (Goal-0002 F2) =="
+# 声明式异常映射: _error_map = "item_id=99:404:Item not found;item_id=*:422:Invalid ID"
+expect_code "error_map item_id=99 -> 404" "404" "$BASE/errors/99"
+expect_body_contains "error_map 404 detail" "\"detail\": \"Item not found\"" "$BASE/errors/99"
+expect_body_contains "error_map 404 status field" "\"status\": \"404\"" "$BASE/errors/99"
+expect_code "error_map wildcard -> 422" "422" "$BASE/errors/42"
+expect_body_contains "error_map wildcard detail" "\"detail\": \"Invalid ID\"" "$BASE/errors/42"
+# 404 统一格式 (FastAPI 语义: detail 字段, 替换 error 字段)
+expect_body_contains "404 unified detail field" "\"detail\": \"Route not found\"" "$BASE/nope"
+
 
 echo "== error paths =="
 expect_code "GET /nope -> 404" 404 "$BASE/nope"
