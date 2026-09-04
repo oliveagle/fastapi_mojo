@@ -373,12 +373,32 @@
      cargo test 287 单测 / 0 BUG；clippy `-D warnings --tests` 0 警告；bench 0 errors；
      ldd 仅 libc；binary 2.7M（≤4.2M）。
 
+- **已决策-30**：**UPX 压缩评估（v0.5.1 G3 调研，结论 = 不进默认构建，仅作可选手动部署）**：
+  1. **实测数据**（UPX 5.2.1，`-9` best 压缩）：
+     - **2,850,696 B → 1,011,584 B（-64.5%，1.01 MB）**
+     - 启动时间：13-16ms baseline → 22-29ms compressed（**+10ms，+65%**，一次性 UPX 解压成本）
+     - e2e 136/136 全绿（功能无差异）
+     - **致命问题**：`ldd build/fastapi_mojo` 输出 `not a dynamic executable`，
+       破坏 CI 的 North Star ldd 门禁（CI `.github/workflows/ci.yml` 要求 `libc.so` 行）。
+  2. **决策**：**不进入 `./build_single.sh` 默认构建**。新增 `./compress_upx.sh` 作为可选
+     手动部署脚本（仅当手动部署到磁盘极紧张场景），备份原文件到 `build/fastapi_mojo.pre-upx`。
+  3. **理由**：
+     - ldd 门禁是 North Star 核心验收（AGENTS.md §1 零依赖本标），不可妥协。
+     - +10ms 启动对单 binary 服务器（启动一次、长期运行）无感，但 ldd 门禁是硬约束。
+     - 1.01 MB 已经足够小（远低于"4.2M 目标 76% 余量"），无强需求做 UPX。
+     - 可选部署路径保留：用户在 CI 之外手动 `./compress_upx.sh` 仍可拿到 1MB binary。
+  4. **替代方案对比**：
+     - **strip（当前默认）**：5.5M → 2.7M（-49%），ldd 仍正常工作（已采纳，决策-26）。
+     - **UPX**：2.7M → 1.0M（额外 -64%），但 ldd 失效。性价比不抵破坏 CI 门禁。
+     - 未来如需进一步压缩：考虑 `--gc-sections`（裁剪未用节，~10-30KB），不破坏 ldd。
+
 *最后更新：2026-09-04（**决策-24 v0.5.0 发布（Goal-0002 F1-F8 全部达成）**：
 类型化参数 + HTTPException + Request/Response + 嵌套 JSON + OpenAPI + SSE +
 /metrics + 结构化 access log + binary 瘦身 5.5M → 2.8M；e2e **118/118 全绿** /
 cargo test **284 单测 / 0 警告 / 0 BUG** / bench 0 errors / ldd 仅 libc /
 RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
 决策-25 结构化 access log (FASTAPI_MOJO_ACCESS_LOG=json)；
+决策-30 UPX 评估 (不进默认; ldd 门禁失效 vs 1MB 体积收益不划算);
 决策-29 F11 BackgroundTasks (响应后同步执行声明命令);
 决策-28 F10 Header/Cookie/Form 参数注入 (F10a Cookie + F10b Form; 决策-27 F9 SSE status_code + extra 头 (上游 0.140.13 对齐 + 修复 v0.5.0 静默丢弃);
 决策-26 binary strip 5.5M → 2.8M (-49%)；决策-22 Track B 去 Python；
