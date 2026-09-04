@@ -15,6 +15,8 @@ from params_typed import validate_params, get_param_types, TypedError
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import nest_dict, nest_list, nest_raw, parse_response_headers
 from openapi import generate_openapi, swagger_ui_html
+from streaming import build_sse_body, sse_event_count
+from handler import KIND_SSE
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
@@ -180,6 +182,12 @@ def register_routes(mut router: Router) raises:
     tags_h.set_data("tags", nest_list(tag_items))
     tags_h.set_data("meta", nest_dict(meta_d))
     router.add_route("/tags", "GET", tags_h)
+
+    # F5 SSE 一次性推送 demo (Goal-0002 §1.1). 事件用 | 分隔 (避免与 data 内 , 冲突).
+    var sse_h = Handler(KIND_SSE(), "sse_demo")
+    sse_h.set_data("_stream_events", "hello\nworld|second event|multi\nline\nevent")
+    sse_h.set_data("_response_headers", "Cache-Control: no-cache")
+    router.add_route("/sse", "GET", sse_h)
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -441,6 +449,33 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                                      query_params, body_params, info)
                             status_line = result[0]
                             resp_data = result[1].copy()
+
+                            # F5: SSE 一次性推送 (跳过 run_handler, 直接构造 SSE body).
+                            if route_result.handler.kind == KIND_SSE():
+                                var events_csv = ""
+                                if "_stream_events" in route_result.handler.data:
+                                    events_csv = route_result.handler.data["_stream_events"]
+                                var sse_body = build_sse_body(events_csv)
+                                var sse_extra = ""
+                                if "_response_headers" in route_result.handler.data:
+                                    var sse_hdrs = parse_response_headers(route_result.handler)
+                                    if len(sse_hdrs) > 0:
+                                        sse_extra = "\r\n".join(sse_hdrs)
+                                if sse_extra != "":
+                                    # send_sse_response 不支持 extra, 退化: 用 send_simple_response_extra + 替换 content-type 不可能.
+                                    # 这里简化: 只发 SSE body, 跳过 extra 头 (Cache-Control 暂不输出).
+                                    _ = external_call["send_sse_response", Int](
+                                        cfd, sse_body.as_c_string_slice())
+                                else:
+                                    _ = external_call["send_sse_response", Int](
+                                        cfd, sse_body.as_c_string_slice())
+                                var sse_dur = mw_timing(mw_chain, start_ms)
+                                mw_logging(mw_chain, req_id, method, path, query, "200 OK (sse)", sse_dur)
+                                if external_call["get_close_after_response", Int]() != 0:
+                                    external_call["conn_done", NoneType](cfd, False)
+                                else:
+                                    external_call["conn_done", NoneType](cfd, True)
+                                continue
 
                 # KIND_HTML: 直接以 text/html 发送 (动态前端页 / 运营面板).
                 # 走 send_html_response (Content-Type: text/html), 不再包 JSON.

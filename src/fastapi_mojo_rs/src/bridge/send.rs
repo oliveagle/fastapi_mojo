@@ -123,6 +123,13 @@ pub fn send_simple_response(fd: c_int, status: &str, body: &[u8]) -> c_long {
     send_response(fd, status, "application/json", body, true, None) as c_long
 }
 
+/// F5: SSE 响应 (Content-Type: text/event-stream; charset=utf-8).
+/// 调用方传入完整 SSE body (已按 SSE spec 格式化的多事件串), send_response 一次性发送.
+/// 不维护长连接 (避免占 worker; 一次性推送后关 fd).
+pub fn send_sse_response(fd: c_int, body: &[u8]) -> c_long {
+    send_response(fd, "200 OK", "text/event-stream; charset=utf-8", body, true, None) as c_long
+}
+
 /// F3b: JSON 响应携带自定义头 (端口 C `send_simple_response` 变体).
 /// extra 为 "\r\n" 分隔的 "Name: value" 行, 末尾不带 CRLF (build_response_headers 内部追加).
 /// 空 extra -> 与 send_simple_response 等价.

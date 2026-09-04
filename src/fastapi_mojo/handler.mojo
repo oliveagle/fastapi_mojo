@@ -83,6 +83,13 @@ def KIND_WS_GREET() -> Int:
     return 102
 
 
+def KIND_SSE() -> Int:
+    """F5: SSE 流式响应. handler.data["_stream_events"] = "msg1|msg2|msg3" 声明要推送的事件.
+    dispatch 一次性按 SSE spec 推送所有事件后关连接 (不维护长连接).
+    参考 FastAPI 0.140.12 修复: format_sse_event 按行切分 (data 字段内换行 -> 多个 data: 行)."""
+    return 200
+
+
 # ---------- Handler 类型 ----------
 
 struct Handler:

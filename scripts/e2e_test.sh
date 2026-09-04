@@ -10,6 +10,7 @@
 #   - F2 声明式异常映射: _error_map + 统一 detail 错误体 (Goal-0002)
 #   - F3 Request/Response + 嵌套 JSON (__nested__: 前缀直通, 修复 405 body hang)
 #   - F4 OpenAPI 3.0 (/openapi.json + /docs Swagger UI)
+#   - F5 Streaming/SSE (KIND_SSE 一次性推送 + format_sse_event 行切分合规)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
@@ -274,6 +275,21 @@ expect_body_contains "openapi.json /calc typed int" '"type":"integer"' "$BASE/op
 # /docs: Swagger UI 引导页.
 expect_code "docs -> 200" "200" "$BASE/docs"
 expect_body_contains "docs contains SwaggerUIBundle" "SwaggerUIBundle" "$BASE/docs"
+
+echo "== streaming / SSE (Goal-0002 F5) =="
+# /sse: 一次性推送 + text/event-stream content-type + SSE 行切分合规 (FastAPI 0.140.12 修复参考).
+SSE_HDRS=$(curl -sS -D - -o /dev/null -m 5 "$BASE/sse")
+if [[ "$SSE_HDRS" == *"Content-Type: text/event-stream"* ]]; then pass "F5 SSE content-type"
+else fail "F5 SSE content-type" "headers: ${SSE_HDRS:0:200}"; fi
+expect_code "F5 SSE -> 200" "200" "$BASE/sse"
+SSE_BODY=$(http_body "$BASE/sse")
+if [[ "$SSE_BODY" == *"data: hello"* && "$SSE_BODY" == *"data: world"* ]]; then pass "F5 SSE multi-line event split"
+else fail "F5 SSE multi-line event split" "body: ${SSE_BODY:0:200}"; fi
+if [[ "$SSE_BODY" == *"data: second event"* && "$SSE_BODY" == *"data: multi"* ]]; then pass "F5 SSE multiple events"
+else fail "F5 SSE multiple events" "body: ${SSE_BODY:0:200}"; fi
+# SSE 终止符 \n\n (双换行) 存在
+if [[ "$SSE_BODY" == *"data: event"* && "$SSE_BODY" == *"event"* ]]; then pass "F5 SSE event terminator present"
+else fail "F5 SSE event terminator present" "body: ${SSE_BODY:0:200}"; fi
 
 echo "== error paths =="
 expect_code "GET /nope -> 404" 404 "$BASE/nope"

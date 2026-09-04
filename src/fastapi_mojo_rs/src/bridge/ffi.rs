@@ -48,6 +48,7 @@ use super::state::{
 use super::send::{
     send_error_json as send_error_json_inner,
     send_simple_response_extra as send_send_simple_response_extra,
+    send_sse_response as send_send_sse_response,
     send_head_response as send_send_head_response,
     send_html_response as send_send_html_response,
     send_preflight_response as send_send_preflight_response,
@@ -313,6 +314,14 @@ pub extern "C" fn send_simple_response_extra(
     let b = unsafe { c_str_bytes(body) };
     let e = unsafe { c_str_lossy(extra) };
     send_send_simple_response_extra(fd, &s, &b, &e) as c_long
+}
+
+/// F5: SSE 响应 (Content-Type: text/event-stream; charset=utf-8).
+/// 调用方负责构造 SSE body (format_sse_event / build_sse_body).
+#[no_mangle]
+pub extern "C" fn send_sse_response(fd: c_int, body: *const c_char) -> c_long {
+    let b = unsafe { c_str_bytes(body) };
+    send_send_sse_response(fd, &b) as c_long
 }
 
 #[no_mangle]
