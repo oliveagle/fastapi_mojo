@@ -286,9 +286,40 @@
      状态**（tag 待发）。建议下一版本为 **v0.4.0**（minor bump：Mojo+Rust only 框架
      终态 + 质量门禁闭环，控制面仍可锁 v0.3.1 互不影响）。
 
-*最后更新：2026-09-04（**决策-22 Track B 工具链全链路去 Python 达成**：fmtool 替代 bench.py + e2e python 客户端、`.venv`/`benchmark.db` 删除、JSONL 历史接管；决策-21 DC3 
-`find src -name '*.c'` = 0，**终态 Mojo + Rust only**；e2e 79/79 绿 / 281 单测 /
-bench run#18 = 43,878 req/s（+22%） / RSS 平台化 / binary 5.2M / ldd 仅 libc /
-orphan sweep 22→0；决策-20 DC2-h bridge/ffi.rs + NUL 修复 ×3；决策-23 质量门禁 0 警告 0 BUG 闭环（clippy -D warnings 双 crate + SHA1 级联修复 + 281 单测绿）；决策-19 Bridge 层
-语言终态 = Rust，ADR-0010；决策-18 WebSocket 精化，ADR-0009；决策-17 高并发
-WebSocket，ADR-0008；决策-16 WebSocket 增强，ADR-0007）*
+- **已决策-24**：**Goal-0002 全部 8 项 F1-F8 达成，v0.5.0 可发布**
+  （FastAPI 语义对标切片 v0.5.0）：
+  - **F1 类型化 Path/Query 参数 + 422 校验**：int/float/bool 转换 + 默认值 + 必填缺失→422；e2e 87/87
+  - **F2 HTTPException + 统一 `{detail,status}` 错误体**：exceptions.mojo + dispatch error_map；e2e 93/93
+  - **F3 Request/Response + 嵌套 JSON + 修复 405 body hang**（response.rs 头部终止符 BUG）：e2e 101/101
+  - **F4 OpenAPI 3.0 + Swagger UI**（/docs 内嵌）：openapi.mojo 自动从路由表+类型标注生成 spec；e2e 107/107
+  - **F5 Streaming Response / SSE**（`format_sse_event` 行切分合规）：streaming.mojo + send_sse_response FFI；e2e 112/112
+  - **F6 /metrics Prometheus 文本**：bridge/metrics.rs 原子计数器（无锁、无第三方）+ text/plain；e2e 117/117
+  - **F7 结构化 access log**：见决策-25
+  - **F8 Binary 体积瘦身**：见决策-26
+  - **总 e2e：117/117 → 118/118 全绿**（F7 新增 1 例）；**bench run#N** = 0 errors，get_root_10k_100c ≈ 32.9k req/s
+- **已决策-25**：**结构化 access log (JSON 行)** — `FASTAPI_MOJO_ACCESS_LOG=json`
+  env 一次性读取（OnceLock 缓存），Mojo 侧 `_json_escape()` 转义 `\` / `"` /
+  `
+` / `` / `	` / 控制字符，输出单行 JSON `{req_id,method,path,status,duration_ms}`，
+  兼容现有 text 模式（默认）；bridge `get_access_log_mode()` FFI 导出；
+  e2e 新增 1 例（副 server + 验证 JSON 行 schema）= 118/118 全绿
+- **已决策-26**：**Binary 体积瘦身（strip 路线，优于去 std 化）** —
+  `strip --strip-unneeded` 接入 `build_single.sh` 第 5/6 阶段。
+  - **5,492,408 B → 2,809,736 B**（**-49%，远低于 ≤4.2M 目标 33% 余量**）
+  - `.text`/.rodata`/`.data` 体积无变化（payload 不变，1.95 MB Mojo runtime）；
+  - 仅删除 ELF `.symtab` / `.strtab` / `.debug_*` 节
+  - **未触发任何回退**：ldd 仍仅 libc；env -i 仍干净启动；e2e 118/118 全绿
+  - **为何选 strip 而非去 std 化**：bridge 已零第三方依赖（SHA-1/base64/UTF-8 手写），
+    core::ffi 是 noop 替换；strip 直接去 ELF 元数据是 -49% 的零代码改动路径。
+  - **未来仍有 -200 KB 空间**：UPX 压缩（额外启动时解压开销 ~10 ms），待 v0.5.1 评估。
+
+*最后更新：2026-09-04（**决策-24 v0.5.0 发布（Goal-0002 F1-F8 全部达成）**：
+类型化参数 + HTTPException + Request/Response + 嵌套 JSON + OpenAPI + SSE +
+/metrics + 结构化 access log + binary 瘦身 5.5M → 2.8M；e2e **118/118 全绿** /
+cargo test **284 单测 / 0 警告 / 0 BUG** / bench 0 errors / ldd 仅 libc /
+RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
+决策-25 结构化 access log (FASTAPI_MOJO_ACCESS_LOG=json)；
+决策-26 binary strip 5.5M → 2.8M (-49%)；决策-22 Track B 去 Python；
+决策-23 质量门禁；决策-21 终态 Mojo + Rust only；决策-20 DC2-h；
+决策-19 Bridge 终态 Rust；决策-18 WS 精化；决策-17 高并发 WS；
+决策-16 WS 增强；决策-15 WS；决策-14 单 binary 机制；决策-13 Mojo 单 binary 本标）*

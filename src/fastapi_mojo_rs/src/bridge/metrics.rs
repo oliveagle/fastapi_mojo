@@ -4,7 +4,8 @@
 //!   - requests_total: 处理过的 HTTP 请求总数 (recv_and_parse 返回后).
 //!   - active_conns: 当前活跃连接数 (alloc/close 增量).
 //!   - uptime_seconds: 进程启动至今秒数 (派生, 调用时算).
-//! 输出格式: Prometheus 文本 (OpenMetrics), 每行 <name> <value>.
+//!
+//! 输出格式: Prometheus 文本 (OpenMetrics), 每行 `<name> <value>`.
 //!
 //! 设计: 跨 worker 汇总 —— 每个 worker 进程持有独立计数器, /metrics 端点返回
 //! 本进程的实时值. 多 worker 模式下 Prometheus scrape 需配置 worker label
