@@ -296,6 +296,23 @@ else fail "F10b form URL-decode (%40 -> @)" "body: ${FORM_ENCODED:0:200}"; fi
 if [[ "$FORM_ENCODED" == *"form_remember"* ]]; then pass "F10b form empty value key present"
 else fail "F10b form empty value key present" "body: ${FORM_ENCODED:0:200}"; fi
 
+# F11 (v0.5.1): BackgroundTasks - 响应已 flush 后同步执行声明的命令.
+# /bg-write 声明 _background = "date -u ... >> /tmp/bg_test.log".
+# 1) 响应立即返回 (HTTP_TIME < 1s).
+BG_RESP=$(curl -sS -m 5 -w "\nHTTP_TIME: %{time_total}\n" "$BASE/bg-write")
+BG_TIME=$(echo "$BG_RESP" | grep "HTTP_TIME:" | awk "{print \$2}")
+BG_BODY=$(echo "$BG_RESP" | head -1)
+if [[ "$BG_BODY" == *"bg demo"* ]]; then pass "F11 background response immediate"
+else fail "F11 background response immediate" "body: ${BG_BODY:0:200}"; fi
+# 2) 等后台命令完成, 文件应被写入.
+sleep 0.3
+if [[ -s /tmp/bg_test.log ]]; then pass "F11 background cmd ran after response"
+else fail "F11 background cmd ran after response" "/tmp/bg_test.log empty or missing"; fi
+# 3) server log 含 [bg] 行.
+BG_SRVLOG=$(cat "$TMP/server.log" 2>/dev/null)
+if [[ "$BG_SRVLOG" == *"[bg]"* ]]; then pass "F11 background cmd logged in server log"
+else fail "F11 background cmd logged in server log" "no [bg] line"; fi
+
 
 
 echo "== openapi + swagger (Goal-0002 F4) =="

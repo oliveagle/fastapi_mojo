@@ -81,6 +81,63 @@ def inject_form_fields(mut params: Dict[String, String], form_fields_csv: String
         params["form_" + name] = v
 
 
+def _run_background(handler: Handler, req_id: String, method: String,
+                       path: String, query: String) raises:
+    """F11 (v0.5.1): BackgroundTasks - 响应已发送后同步执行声明的命令.
+    data["_background"] = "cmd1\ncmd2" (换行分隔, 命令内不允许含换行).
+    data["_background_timeout_ms"] = "2000" (单条命令 timeout, 默认 2000ms).
+    data["_background_log"] = "false" (默认 true: 失败命令日志输出 stdout/stderr/rc).
+    对齐 FastAPI/Starlette BackgroundTasks 语义:
+      - Starlette: 响应已 flush 后 await BackgroundTask(func) 在同一 event loop.
+      - 我们: 响应已 flush 后同步执行 shell 命令 (复用 run_command_json FFI).
+        pre-fork 多 worker + SO_REUSEPORT 隔离 worker 阻塞; timeout 防无限挂.
+        不 fork/zombie: 同步执行符合 Starlette 语义, 客户端已收到响应.
+    """
+    if "_background" not in handler.data:
+        return
+    var cmds_raw = handler.data["_background"]
+    if cmds_raw == "":
+        return
+    var timeout_ms: Int = 2000
+    if "_background_timeout_ms" in handler.data:
+        var tmo_str = handler.data["_background_timeout_ms"]
+        try:
+            timeout_ms = atol(String(tmo_str))
+        except e:
+            timeout_ms = 2000
+    var do_log = True
+    if "_background_log" in handler.data:
+        do_log = handler.data["_background_log"] != "false"
+
+    # 按 '\n' 分隔 (命令天然不含换行, 与现有 SSE 用 '|' / header 用 ',' 一致).
+    var n = cmds_raw.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(cmds_raw[byte=i]) == 10)  # '\n'
+        if is_sep:
+            if i > start:
+                var cmd = String(cmds_raw[byte=start:i])
+                # trim leading/trailing whitespace
+                var b = 0
+                var e = cmd.byte_length()
+                while b < e and (ord(cmd[byte=b]) == 32 or ord(cmd[byte=b]) == 9):
+                    b += 1
+                while e > b and (ord(cmd[byte=e - 1]) == 32 or ord(cmd[byte=e - 1]) == 9):
+                    e -= 1
+                if e > b:
+                    var final_cmd = String(cmd[byte=b:e])
+                    var slice = external_call["run_command_json", CStringSlice[origin_of(String(""))]](
+                        final_cmd.as_c_string_slice(), Int64(timeout_ms))
+                    var out = span_to_str(slice.as_bytes())
+                    _ = external_call["run_command_free", NoneType](slice)
+                    if do_log:
+                        print("[bg] req=" + req_id + " " + method + " " + path + " cmd=" + final_cmd
+                              + " out=" + out[byte=0:min(out.byte_length(), 200)])
+            start = i + 1
+        i += 1
+
+
 def _parse_form_body(body: String) -> Dict[String, String]:
     """Parse application/x-www-form-urlencoded body: key1=val1&key2=val2.
     每个 key/value 做 url_decode (percent + '+')."""
@@ -302,6 +359,13 @@ def register_routes(mut router: Router) raises:
     form_h.set_data("_form_fields", "username,password,remember")
     form_h.set_data("message", "form demo")
     router.add_route("/login", "POST", form_h)
+
+    # F11 (v0.5.1): BackgroundTasks demo. _background = 响应后同步执行的命令列表 (\n 分隔).
+    # demo: GET /bg-write -> 响应后把 req_id 写到 /tmp/bg_<req_id>.txt (shell date 同步)
+    var bg_h = Handler(KIND_ECHO(), "bg_write")
+    bg_h.set_data("_background", "date -u +%Y-%m-%dT%H:%M:%SZ >> /tmp/bg_test.log")
+    bg_h.set_data("message", "bg demo")
+    router.add_route("/bg-write", "GET", bg_h)
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -688,6 +752,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
 
 
                 mw_logging(mw_chain, req_id, method, path, query, status_line, duration_ms)
+
+                # F11: BackgroundTasks 在响应已 flush 后同步执行声明的命令
+                # (对齐 Starlette BackgroundTask 语义, 客户端已收到响应).
+                _run_background(route_result.handler, req_id, method, path, query)
 
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
