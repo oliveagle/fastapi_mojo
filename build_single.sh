@@ -201,7 +201,10 @@ gcc -fPIE -pie -O2 -static-libgcc \
     -o "$OUT" \
     -ldl -lm
 
-echo "[5/5] Verifying dynamic dependencies..."
+echo "[5/6] Stripping symbol table + debug info (F8: 5.5M -> 2.8M)..."
+strip --strip-unneeded "$OUT"
+
+echo "[6/6] Verifying dynamic dependencies..."
 echo "--- ldd $OUT ---"
 ldd "$OUT"
 echo
