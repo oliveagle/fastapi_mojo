@@ -22,6 +22,7 @@
 //!
 //! FFI 包装延迟: 同 `signals.rs`, 待 `bridge.o` 下线时统一加 `extern "C"`.
 
+use std::os::raw::c_int;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::sync::Mutex;
 
@@ -210,4 +211,17 @@ pub(crate) fn reset_for_test() {
     *G_STATIC_DIR.lock().unwrap() = const_init_dir();
     *G_EMBEDDED_STATIC_DIR.lock().unwrap() = [0u8; MAX_STATIC_DIR];
     *G_LAST_STATUS.lock().unwrap() = [0u8; MAX_LAST_STATUS];
+}
+
+/// F7: access log 模式. 0 = text (默认), 1 = JSON.
+/// env 一次性读取 + OnceLock 缓存 (与现有 init_timeouts_from_env 一致模式).
+pub fn get_access_log_mode() -> c_int {
+    use std::sync::OnceLock;
+    static MODE: OnceLock<c_int> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        match std::env::var("FASTAPI_MOJO_ACCESS_LOG") {
+            Ok(v) if v.eq_ignore_ascii_case("json") => 1,
+            _ => 0,
+        }
+    })
 }

@@ -42,6 +42,7 @@ use super::request::{
     read_last_status_byte as req_read_last_status_byte, CSlice,
 };
 use super::state::{
+    get_access_log_mode as state_get_access_log_mode,
     set_embedded_static_dir as state_set_embedded_static_dir,
     set_max_body_size as state_set_max_body_size,
     set_static_dir as state_set_static_dir,
@@ -181,6 +182,12 @@ pub extern "C" fn set_static_dir(dir: *const c_char) {
 pub extern "C" fn set_embedded_static_dir(dir: *const c_char) {
     let s = unsafe { c_str_lossy(dir) };
     state_set_embedded_static_dir(if s.is_empty() { None } else { Some(s.as_str()) });
+}
+
+/// C: `int get_access_log_mode(void)` — F7 access log 模式 (0=text, 1=json)
+#[no_mangle]
+pub extern "C" fn get_access_log_mode() -> c_int {
+    state_get_access_log_mode()
 }
 
 // =====================================================================

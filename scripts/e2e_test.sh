@@ -484,6 +484,41 @@ else fail "50 concurrent curls: all 200" "$CONC_FAILS non-200 responses"; fi
 echo "== liveness =="
 expect_code "server alive after attacks -> 200" 200 "$BASE/health"
 
+# --- access log ---------------------------------------------------------------
+# F7: structured JSON access log via FASTAPI_MOJO_ACCESS_LOG=json.
+# Spins up a second server on a second port (since the main server is text-mode)
+# and verifies a single request produces a JSON line on stderr/stdout.
+echo "== access log (F7) =="
+ACL_PORT=$((PORT + 100))
+ACL_LOG="$TMP/access_json.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+    FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_ACCESS_LOG=json \
+    "$BIN" --port "$ACL_PORT" \
+    > "$ACL_LOG" 2>&1 ) &
+ACL_PID=$!
+ACL_READY=0
+for _ in $(seq 1 30); do
+    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$ACL_PORT/health"; then
+        ACL_READY=1; break
+    fi
+    sleep 0.3
+done
+if [[ "$ACL_READY" == 1 ]]; then
+    curl -s -o /dev/null "http://127.0.0.1:$ACL_PORT/health"
+    sleep 0.2
+    if grep -qE '\{"req_id":".+","method":"GET","path":"/health","status":"200 OK"' "$ACL_LOG"; then
+        pass "F7 JSON access log line emitted"
+    else
+        fail "F7 JSON access log line emitted" "log: $(tail -3 "$ACL_LOG")"
+    fi
+else
+    fail "F7 access log: second server did not start" "see $ACL_LOG"
+fi
+kill -TERM "$ACL_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$ACL_PID" 2>/dev/null
+
 # --- summary ---------------------------------------------------------------------
 
 echo

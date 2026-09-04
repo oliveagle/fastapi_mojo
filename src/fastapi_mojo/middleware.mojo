@@ -70,10 +70,56 @@ def mw_timing(chain: MiddlewareChain, start_ms: Int) -> Int:
     return -1
 
 
+def _hex2(v: Int) -> String:
+    var hexd = "0123456789abcdef"
+    var hi = (v >> 4) & 15
+    var lo = v & 15
+    return String(hexd[byte=hi:hi+1]) + String(hexd[byte=lo:lo+1])
+
+
+def _json_escape(s: String) -> String:
+    """JSON 字符串转义 (\\/"/\n/\r/\t/控制字符) — F7 access log."""
+    var out = String("")
+    for i in range(s.byte_length()):
+        var b = ord(s[byte=i])
+        if b == 34:  # '"'
+            out += '\\"'
+        elif b == 92:  # '\\'
+            out += '\\\\'
+        elif b == 10:  # '\\n'
+            out += '\\n'
+        elif b == 13:  # '\\r'
+            out += '\\r'
+        elif b == 9:   # '\\t'
+            out += '\\t'
+        elif b < 32:
+            out += '\\u00' + _hex2(b)
+        else:
+            out += String(s[byte=i])
+    return out
+
+
 def mw_logging(chain: MiddlewareChain, req_id: String, method: String,
                path: String, query: String, status: String, duration_ms: Int):
-    """钩子 after: logging 输出 [req_id] METHOD path?query → status [Nms]."""
+    """钩子 after: logging 输出 [req_id] METHOD path?query → status [Nms].
+    FASTAPI_MOJO_ACCESS_LOG=json → 单行 JSON (F7, Goal-0002).
+    """
     if not chain.has("logging"):
+        return
+    var mode = external_call["get_access_log_mode", Int]()
+    if mode == 1:
+        # JSON access log (single-line, machine-parseable).
+        var full_path = path
+        if query.byte_length() > 0:
+            full_path += "?" + query
+        var log = '{"req_id":"' + _json_escape(req_id)
+        log += '","method":"' + _json_escape(method)
+        log += '","path":"' + _json_escape(full_path)
+        log += '","status":"' + _json_escape(status) + '"'
+        if duration_ms >= 0:
+            log += ',"duration_ms":' + String(duration_ms)
+        log += '}'
+        print(log)
         return
     var log = "[" + req_id + "] " + method + " " + path
     if query.byte_length() > 0:
