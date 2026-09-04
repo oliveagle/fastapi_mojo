@@ -265,6 +265,22 @@ else fail "F3c nested dict" "body: ${TAGS_BODY:0:200}"; fi
 # 405 body 现在能完整送达 (pre-existing bug 修复). 405 路径走 expect_code 只查状态码.
 expect_code "F2 405 body delivered -> 405" "405" "$BASE/health" POST
 
+# F10 (v0.5.1): Cookie 参数注入. /cookies 声明 _reads_cookies="session_id,user_id".
+# dispatch 从 Cookie 头解析 (RFC 6265: ';' 分隔) 注入 params["cookie_<name>"].
+CK_FULL=$(curl -sS -m 5 -H "Cookie: session_id=abc123; user_id=42" "$BASE/cookies")
+if [[ "$CK_FULL" == *"cookie_session_id"* && "$CK_FULL" == *"abc123"* ]]; then pass "F10 cookie session_id read"
+else fail "F10 cookie session_id read" "body: ${CK_FULL:0:200}"; fi
+if [[ "$CK_FULL" == *"cookie_user_id"* && "$CK_FULL" == *"\"42\""* ]]; then pass "F10 cookie user_id read"
+else fail "F10 cookie user_id read" "body: ${CK_FULL:0:200}"; fi
+CK_PARTIAL=$(curl -sS -m 5 -H "Cookie: session_id=xyz" "$BASE/cookies")
+if [[ "$CK_PARTIAL" == *"cookie_session_id"* && "$CK_PARTIAL" == *"xyz"* ]]; then pass "F10 cookie partial (only session_id)"
+else fail "F10 cookie partial (only session_id)" "body: ${CK_PARTIAL:0:200}"; fi
+if [[ "$CK_PARTIAL" == *cookie_user_id* ]]; then pass "F10 cookie missing still emits key"
+else fail "F10 cookie missing -> empty string" "body: ${CK_PARTIAL:0:200}"; fi
+CK_NONE=$(curl -sS -m 5 "$BASE/cookies")
+if [[ "$CK_NONE" != *"cookie_"* ]]; then pass "F10 cookie absent when no Cookie header"
+else fail "F10 cookie absent when no Cookie header" "body: ${CK_NONE:0:200}"; fi
+
 
 
 echo "== openapi + swagger (Goal-0002 F4) =="

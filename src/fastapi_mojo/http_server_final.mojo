@@ -13,7 +13,7 @@ from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params, get_param_types, TypedError
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
-from request_response import nest_dict, nest_list, nest_raw, parse_response_headers
+from request_response import _parse_cookies, nest_dict, nest_list, nest_raw, parse_response_headers
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE
@@ -22,6 +22,48 @@ from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder,
 from ws_session import run_ws_upgrade, handle_ws_data
 
 
+def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: String) raises:
+    """F10 (v0.5.1): 把 _reads_cookies 声明的 cookie 名按名从 Cookie 头解析, 注入 params.
+    key 前缀 cookie_<name>; 缺失 -> 空串. 与 inject_request_headers 同一模式.
+    调用一次 extract_request_header("Cookie") 拿整段 Cookie 头, 然后本地 parse_cookies.
+    RFC 6265 简化: ';' 分隔 '=' 切, 去空格.
+    """
+    var rc = external_call["extract_request_header", Int](
+        "Cookie".as_c_string_slice())
+    if rc != 0:
+        return
+    var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
+    var cookie_str = span_to_str(sl.as_bytes())
+    if cookie_str == "":
+        return
+    var cookies = _parse_cookies(cookie_str)
+    var n = cookie_names_csv.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = False
+        if i == n:
+            is_sep = True
+        elif ord(cookie_names_csv[byte=i]) == 44:
+            is_sep = True
+        if is_sep:
+            if i > start:
+                var name = String(cookie_names_csv[byte=start:i])
+                # trim
+                var b = 0
+                var e = name.byte_length()
+                while b < e and (ord(name[byte=b]) == 32 or ord(name[byte=b]) == 9):
+                    b += 1
+                while e > b and (ord(name[byte=e - 1]) == 32 or ord(name[byte=e - 1]) == 9):
+                    e -= 1
+                if e > b:
+                    var clean = String(name[byte=b:e])
+                    var v = String("")
+                    if clean in cookies:
+                        v = cookies[clean]
+                    params["cookie_" + clean] = v
+            start = i + 1
+        i += 1
 def inject_request_headers(mut params: Dict[String, String], header_names_csv: String):
     """F3a: 把 _reads_headers 声明的 header 名按名从 C 桥读出, 注入 params.
     key 前缀 header_<name>; 缺失 -> 空串. 保持 String-only (与现有 handler 兼容)."""
@@ -196,6 +238,13 @@ def register_routes(mut router: Router) raises:
     sse_created_h.set_data("_stream_status", "201 Created")
     sse_created_h.set_data("_response_headers", "Cache-Control: no-cache;X-Accel-Buffering: no")
     router.add_route("/sse/created", "POST", sse_created_h)
+
+    # F10 (v0.5.1): Cookie 参数注入 demo. _reads_cookies = 声明读取的 cookie 名;
+    # dispatch 从 Cookie 头解析 (RFC 6265: ';' 分隔 '=' 切) 注入 params["cookie_<name>"].
+    var cookie_h = Handler(KIND_ECHO(), "cookies")
+    cookie_h.set_data("_reads_cookies", "session_id,user_id")
+    cookie_h.set_data("message", "cookie demo")
+    router.add_route("/cookies", "GET", cookie_h)
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -467,6 +516,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                             var req_params = route_result.params.copy()
                             if "_reads_headers" in route_result.handler.data:
                                 inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
+                            if "_reads_cookies" in route_result.handler.data:
+                                inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
                             var result = run_handler(route_result.handler, req_params,
                                                      query_params, body_params, info)
                             status_line = result[0]
