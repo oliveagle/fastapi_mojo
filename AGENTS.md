@@ -241,9 +241,54 @@
   验收：e2e 79/79 绿 / bench 0 errors / ldd 仍仅 libc / env -i 干净启动 /
   `find . -name "*.py"`（excl `.git docs`）= 0 / `.venv` 不存在 / `src/` 下 `*.c` = 0 /
   `build/fastapi_mojo` 仍 5.2M。
+- **已决策-23**：**质量门禁 0 警告 0 BUG 闭环（fmtool + fastapi_mojo_rs 全量 clippy -D warnings + SHA1 级联 BUG 修复）**：
+  1. **fmtool 22→0 警告**（决策-22 后剩余 clippy lint）：
+     - 前序 47 处 `io::Error::new(ErrorKind::Other, x)` → `io::Error::other(x)` 已完成；
+     - 本轮补齐 22 条 —— redundant_closure x7（main.rs `|p| e2e::fn(p)` → `e2e::fn`）+
+       vec![] 替代 push x2 + explicit_counter_loop x2 + match→unwrap_or_default +
+       type alias x2（`WsConnectResult` / `HandshakeResult`）+ is_multiple_of +
+       div_ceil（base64 容量）+ iter_mut enumerate（SHA1）+ match→? + strip_prefix +
+       Display format + `let mut root` → `let root`。
+  2. **fastapi_mojo_rs 69→0 警告**（首次对 bridge crate 跑 clippy 暴露的存量）：
+     - **lib 根 `#![allow(clippy::not_unsafe_ptr_arg_deref)]` 38 条**：本 crate 的 `pub` 函数
+       绝大多数是 `#[no_mangle] extern "C"` 导出（~40 个，与原 C bridge 同名对齐），
+       指针有效性由 Mojo C ABI 调用契约保证；按 FFI glue 标准做法（libc / nix 等同模式）
+       在 lib 根 allow 而非逐函数标 `unsafe`（后者会污染 50+ 个 Rust 单测调用点）。
+     - doc 注释 x13（mod.rs/send.rs 列表项续行缩进 + io.rs sys_recv/sys_accept 返回码
+       改 backtick inline code + response.rs/request.rs 边界修正）；
+     - impl Default for ConnTable/WsEventQueue/WsParser（避免重写 new() 逻辑）；
+     - 机械：is_ascii_uppercase / while_let→for / `c"..."` 字面量（shim.rs:327）/
+       `add(len)` 替代 `offset(len as isize)` / range contains x3 / collapsible_if x2 /
+       needless_range_loop x2；测试 3 条（needless_borrow / `<= MAX-1` → `< MAX` /
+       expect(&format!) 拆局部变量）。
+  3. **🔴 SHA1 顺序依赖 BUG（实测 catch + 修复）**：clippy 让 SHA1 `w[16..80]` 循环
+     改 iter_mut 时遇到借用冲突，本想用预计算 + 回写绕过（`new_w[k] = w[i-3] ^ ...`
+     全用旧 w），跑测试立刻 FAIL —— `sha1_abc` / `sha1_fox` / `sha1_empty` /
+     `compute_accept_rfc6455_example` / `ws_session_begin_sends_101` 共 5 个测试红。
+     **根因**：w[i] 依赖 w[i-3]，而 i ≥ 19 时 w[i-3] 是**刚算的新值**，原预计算用旧
+     值导致语义丢失。**修复**：级联预计算，每次 w[i-3] 优先读 new_w（已算）否则 w（未算）；
+     `if k >= 3 { new_w[k-3] } else { w[k+13] }`（k = i-16），保持原算法语义同时满足
+     borrow checker。**5 测试重测全绿**。**教训**：clippy 重构会改变算法"算法等价"
+     假设 → 必须用真实向量测试覆盖（RFC 6455 known vectors、abc/fox/empty）。
+  4. **验收门禁实测**：
+     - `cargo clippy --release --tests -D warnings` 双 crate = **0 警告** ✅
+     - `cargo test --release -- --test-threads=1` (fastapi_mojo_rs) = **281 passed / 0 failed / 4 ignored**（0.22s）
+     - `cargo build --release --tests -D warnings` = 0 警告 ✅
+     - `./scripts/e2e_test.sh` = **79/79 全绿** ✅
+     - `./benchmark.sh` = 6 场景 **0 errors**；get_root_10k_100c ≈ 39.4k req/s
+       （vs Rust-only 基线 43.9k 噪声内 / vs C-only 基线 35.8k = +10%；无退化）
+     - `ldd build/fastapi_mojo` 仅 libc；`env -i ./build/fastapi_mojo` 干净启动 health 200
+     - RSS 平台化 17024→17064→17080→17080→**17080 kB**（1000 req，round3 起稳定 +0 kB，
+       无线性泄漏）
+     - `pgrep -x fastapi_mojo = 0`（无孤儿 server）
+  5. **质量闭环意义**：clippy -D warnings + cargo test + e2e + bench + RSS + ldd + env-i
+     七门禁全部实测达成；本 goal 北极星（Mojo + Rust only 单 binary 零依赖）= **可发布
+     状态**（tag 待发）。建议下一版本为 **v0.4.0**（minor bump：Mojo+Rust only 框架
+     终态 + 质量门禁闭环，控制面仍可锁 v0.3.1 互不影响）。
+
 *最后更新：2026-09-04（**决策-22 Track B 工具链全链路去 Python 达成**：fmtool 替代 bench.py + e2e python 客户端、`.venv`/`benchmark.db` 删除、JSONL 历史接管；决策-21 DC3 
 `find src -name '*.c'` = 0，**终态 Mojo + Rust only**；e2e 79/79 绿 / 281 单测 /
 bench run#18 = 43,878 req/s（+22%） / RSS 平台化 / binary 5.2M / ldd 仅 libc /
-orphan sweep 22→0；决策-20 DC2-h bridge/ffi.rs + NUL 修复 ×3；决策-19 Bridge 层
+orphan sweep 22→0；决策-20 DC2-h bridge/ffi.rs + NUL 修复 ×3；决策-23 质量门禁 0 警告 0 BUG 闭环（clippy -D warnings 双 crate + SHA1 级联修复 + 281 单测绿）；决策-19 Bridge 层
 语言终态 = Rust，ADR-0010；决策-18 WebSocket 精化，ADR-0009；决策-17 高并发
 WebSocket，ADR-0008；决策-16 WebSocket 增强，ADR-0007）*
