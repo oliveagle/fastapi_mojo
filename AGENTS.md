@@ -335,13 +335,34 @@
      env -i 干净启动；binary **2.7M**（≤4.2M 目标）；RSS 平台化 3 rounds 无线性泄漏。
 
 
+
+- **已决策-28**：**F10 Header/Cookie/Form 参数注入（v0.5.1，对标矩阵 P3 缺口闭环）**：
+  1. **F10a Cookie 参数（dispatch 接线 `_reads_cookies`）**：v0.5.0 已实现 `_parse_cookies` +
+     `_collect_reads` 但 dispatch 从未调用（dead code）。本改动新增 `inject_request_cookies`
+     并接线到 dispatch（`_reads_cookies` CSV → `params["cookie_<name>"]`），复用
+     `extract_request_header("Cookie")` FFI（已有）+ 本地 `_parse_cookies`（RFC 6265 简化：
+     `;` 分隔 `=` 切，去前导空格）。**Bug 修复**：初版 `start = i + 1` 放在 while-loop 顶层
+     而非 `if is_sep:` 内，导致 `start` 始终 > `i`、`i > start` 永远 false，注入空跑。
+     移到 `if is_sep:` 内并加显式 if/elif 替代 `or` 短路后修复。
+  2. **F10b Form 参数（application/x-www-form-urlencoded body 解析）**：新增 `inject_form_fields`
+     + `_parse_form_body`（`&` 分隔 `=` 切，复用 `url_decode` 处理 `%XX` + `+` → space）；
+     与 `inject_request_cookies` 同模式（CSV split → dict lookup）。兼容裸 key（无 `=`，值空串，
+     FastAPI 一致）与 URL-encoded 值（`pass%40word` → `pass@word`）。
+  3. **F3a Header 参数**：v0.5.0 已实现 `inject_request_headers`（`_reads_headers` CSV →
+     `params["header_<name>"]`），无需新增。
+  4. **demo + 路由**：`/cookies`（GET，Cookie 演示）+ `/login`（POST，Form 演示）+ 既有
+     `/ctx`（GET，Header 演示）。三者覆盖 P3 缺口。
+  5. **质量门禁实测**：Rust bridge **287 单测 / 0 BUG**（F10 复用既有 helpers，无新单测）；
+     clippy `-D warnings --tests` **0 警告**；e2e **133/133 全绿**（v0.5.0 118 + F9 6 + F10a 5
+     + F10b 4 = 133）；bench 6 场景 0 errors；ldd 仅 libc；env -i 干净启动；binary **2.7M**
+     （≤4.2M）。
 *最后更新：2026-09-04（**决策-24 v0.5.0 发布（Goal-0002 F1-F8 全部达成）**：
 类型化参数 + HTTPException + Request/Response + 嵌套 JSON + OpenAPI + SSE +
 /metrics + 结构化 access log + binary 瘦身 5.5M → 2.8M；e2e **118/118 全绿** /
 cargo test **284 单测 / 0 警告 / 0 BUG** / bench 0 errors / ldd 仅 libc /
 RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
 决策-25 结构化 access log (FASTAPI_MOJO_ACCESS_LOG=json)；
-决策-27 F9 SSE status_code + extra 头 (上游 0.140.13 对齐 + 修复 v0.5.0 静默丢弃);
+决策-28 F10 Header/Cookie/Form 参数注入 (F10a Cookie + F10b Form; 决策-27 F9 SSE status_code + extra 头 (上游 0.140.13 对齐 + 修复 v0.5.0 静默丢弃);
 决策-26 binary strip 5.5M → 2.8M (-49%)；决策-22 Track B 去 Python；
 决策-23 质量门禁；决策-21 终态 Mojo + Rust only；决策-20 DC2-h；
 决策-19 Bridge 终态 Rust；决策-18 WS 精化；决策-17 高并发 WS；
