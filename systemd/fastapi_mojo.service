@@ -1,0 +1,59 @@
+# systemd unit — fastapi_mojo (G3-v0.6 production).
+#
+# 安装:
+#   1. sudo cp build/fastapi_mojo /usr/local/bin/fastapi_mojo
+#   2. sudo cp systemd/fastapi_mojo.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now fastapi_mojo
+#   5. sudo systemctl status fastapi_mojo
+#
+# 日志: journalctl -u fastapi_mojo -f
+# 验证: curl http://localhost:8000/health
+#
+# 注:
+#   - User=fastapi (需 sudo useradd -r -s /sbin/nologin fastapi)
+#   - 二进制路径写死, 升级时 sudo systemctl restart fastapi_mojo
+#   - 单 binary 监听 0.0.0.0:8000 (默认); 如需 unix socket, 见下方注释.
+
+[Unit]
+Description=fastapi_mojo single-binary HTTP/WS server (Mojo + Rust)
+Documentation=https://github.com/oliveagle/fastapi_mojo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fastapi
+Group=fastapi
+WorkingDirectory=/var/lib/fastapi_mojo
+ExecStart=/usr/local/bin/fastapi_mojo --host 0.0.0.0 --port 8000 --workers 0
+# 环境变量 (可选):
+Environment=FASTAPI_MOJO_ACCESS_LOG=json
+Environment=FASTAPI_MOJO_RECV_TIMEOUT=5
+Environment=FASTAPI_MOJO_IDLE_TIMEOUT=30
+# 资源限制 / 重启策略:
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+# 硬化 (single binary 无 shell, 多余但保险):
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# 日志: stdout/stderr 走 journal (journalctl -u fastapi_mojo).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fastapi_mojo
+
+[Install]
+WantedBy=multi-user.target

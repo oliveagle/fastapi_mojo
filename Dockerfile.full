@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.7
+# Dockerfile.full — fastapi_mojo CI multi-stage build (G3-v0.6).
+#
+# 完整 multi-stage 构建: 容器内 Mojo + Rust toolchain -> single binary -> runtime.
+# 与 Dockerfile (预构建) 不同: 本文件让 docker build 自包含, 不依赖 host.
+# 容器内 bookworm (glibc 2.36) 构建 → binary 链接 GLIBC_2.36 → distroless 可跑.
+#
+# 用法 (仅当 CI 需要 in-container build):
+#   docker build -f Dockerfile.full -t fastapi_mojo:dev .
+#
+# ⚠️  Mojo 1.0.0 pip 包名是 `mojo==1.0.0` (NOT `modular`). modular 是旧包名,
+#     0.10.1 已从 PyPI 下线. mojo 1.0.0 wheel 是 manylinux_2_34_x86_64,
+#     bookworm (glibc 2.36) 兼容.
+# ⚠️  rust:1.81-bookworm 自带 python3.11 但无 pip3, 需 apt 安装 python3-pip.
+#     若网络/镜像源问题导致安装失败, 回退到 Dockerfile (host build).
+
+# ---------- Stage 1: toolchain builder ----------
+FROM rust:1.81-bookworm AS builder
+
+ARG MOJO_VERSION=1.0.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gcc g++ libc6-dev make cmake perl binutils file pkg-config python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Mojo 运行时 (pip 包 `mojo`; 装到 /usr/local, 与系统 python3.11 绑定).
+RUN pip3 install --break-system-packages --no-cache-dir mojo==${MOJO_VERSION} 2>&1 | tail -3
+
+# 拷贝源码 (单独 layer 缓存).
+WORKDIR /src
+COPY build_single.sh /src/build_single.sh
+COPY src/ /src/src/
+COPY scripts/ /src/scripts/
+
+# 构建 (在容器内, Mojo + Rust + gcc + objcopy 都可用).
+RUN ./build_single.sh && \
+    ldd build/fastapi_mojo | tee /tmp/ldd.txt && \
+    test -s build/fastapi_mojo
+
+# ---------- Stage 2: runtime (distroless, glibc 2.36) ----------
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+COPY --from=builder /src/build/fastapi_mojo /usr/local/bin/fastapi_mojo
+USER nonroot:nonroot
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/fastapi_mojo"]
+CMD ["--host", "0.0.0.0", "--port", "8000", "--workers", "0"]

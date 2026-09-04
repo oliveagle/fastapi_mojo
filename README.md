@@ -99,6 +99,38 @@ scp build/deploy/fastapi_mojo user@host:/opt/fastapi_mojo/
 ssh user@host '/opt/fastapi_mojo'
 ```
 
+### 生产部署（Docker / systemd / nginx）
+
+三种方式，全部基于同一 single binary（零外部运行时依赖）：
+
+```bash
+# 方式 1: Docker (ubuntu:24.04 + 预构建 binary)
+docker build -t fastapi_mojo:dev .              # 预构建 binary -> 镜像
+docker compose up -d                            # 或 docker-compose (/dev/shm tmpfs exec 自动配置)
+curl http://localhost:8080/health
+
+# 直接 docker run (务必给 /dev/shm 加 exec; Docker 默认 noexec 会导致 Mojo
+#  runtime staging 失败并 fallback 到 /tmp, 服务能跑但会打 dlopen warning):
+docker run --rm -d --tmpfs /dev/shm:rw,exec,size=128m \
+    -p 8080:8000 --name fastapi_mojo fastapi_mojo:dev
+
+# 方式 2: systemd 服务 (production host)
+sudo cp build/fastapi_mojo /usr/local/bin/fastapi_mojo
+sudo cp systemd/fastapi_mojo.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now fastapi_mojo
+journalctl -u fastapi_mojo -f
+
+# 方式 3: nginx 反向代理 (TLS 终结 + WebSocket upgrade)
+#   完整配置见 docs/deploy-nginx.md (SSE 需 proxy_buffering off; WS 需 Connection: upgrade)
+```
+
+- `Dockerfile` — 预构建 binary 进 ubuntu:24.04 (glibc 2.39, 镜像 ~33MB);
+  `Dockerfile.full` — 容器内完整 multi-stage build (bookworm + mojo==1.0.0 pip,
+  binary 链接 glibc 2.36 → 可装进 distroless cc-debian12; `mojo==1.0.0` 包名,
+  旧 `modular==0.10.1` 已从 PyPI 下线)
+- `docker-compose.yml` — 端口映射 + `/dev/shm:exec` tmpfs + JSON access log + restart 策略
+- `systemd/fastapi_mojo.service` — 硬化 unit（NoNewPrivileges / ProtectSystem / LimitNOFILE）
+- `docs/deploy-nginx.md` — nginx 反代 + SSE + WebSocket 常见坑对照表
 ### 测试
 
 ```bash

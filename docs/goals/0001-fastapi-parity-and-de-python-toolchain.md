@@ -385,6 +385,67 @@ RSS 平台化（HTTP 2500 req + WS 180k frames）→ 无线性泄漏
     `{req_id,method,path,status,duration_ms}`（决策-25）；e2e 新增 1 例 = 118/118。
   - **发布**：tag **v0.5.0** annotated 于 main HEAD，commit 7ba923f（docs-goal F1-F8
     全部达成），release notes 包含所有 F 项 commit hash、实测数字、门禁全绿快照。
+  - **追加更新-12**：2026-09-04（**G3-v0.6 生产化交付 + 上游 FastAPI 维护期 + 后续可优化清单**）：
+    - **G3-v0.6 生产化交付物**（决策-31）：
+      - `Dockerfile`（ubuntu:24.04 + nonroot，~33MB，host glibc 2.39 binary 直跑）+
+        `Dockerfile.full`（`mojo==1.0.0` pip + bookworm + rust 工具链，容器内
+        链接 glibc 2.36，备选 distroless 路径）+ `docker-compose.yml`（`/dev/shm:exec`
+        tmpfs + JSON access log + restart）+ `systemd/fastapi_mojo.service`（硬化
+        unit：NoNewPrivileges / ProtectSystem / LimitNOFILE）+ `docs/deploy-nginx.md`
+        （反代 + SSE `proxy_buffering off` + WS `Connection: upgrade`）+ README
+        「生产部署」段落（三种方式 + glibc 兼容性说明）。
+      - 实测门禁：**e2e 136/136 / cargo test 287 passed / clippy 0 warnings /
+        docker build + run + curl /health 200 / nginx -t syntax ok / systemd-analyze
+        verify ok / docker compose config 合法**。
+    - **关键修复（glibc + Mojo 安装路径）**：
+      1. host 构建的 binary 链接了 **GLIBC_2.39** 符号（Rust std 引入 pidfd_spawnp /
+         pidfd_getpid），distroless cc-debian12 (glibc 2.36) 跑不动 → 选 ubuntu:24.04
+         runtime 妥协（distroless 路径改由 Dockerfile.full 在 bookworm 容器内构建）。
+      2. Dockerfile.full 原 `pip install modular==0.10.1` 是错的 — **Mojo 1.0.0
+         包名是 `mojo==1.0.0`**（modular 是旧名，0.10.1 已从 PyPI 下线），
+         wheel 是 `py3-none-manylinux_2_34_x86_64`，bookworm 兼容。修后 builder
+         用 `python:3.12-bookworm`（自带 pip3）避免 apt 装 python3-pip。
+      3. Docker 默认 /dev/shm 挂 `noexec`，Mojo runtime dlopen 失败回退到 /tmp
+         （功能正常但有 warning）→ compose 显式 `tmpfs: /dev/shm:rw,exec,size=128m`
+         消除 warning，staging 走 RAM（更快）。
+    - **上游 FastAPI 状态（2026-09-04 复查）**：最新发布仍为 **0.141.1**（2026-07-29），
+      距 v0.5.0 发布时的上次检查**已一个月零新 release**。上游进入维护期：`0.140.x`
+      与 `0.141.x` 系列均为 bugfix / docs / security 更新，无新 API 能力需要纳入
+      Track A 范围。SSE spec 合规已在 v0.5.0 后 F9 阶段（commit `a3cc5ad`）对齐
+      0.140.13 PR #15937（status_code + extra 头）。后续仅当 0.142.x / 0.143.x
+      出现新 API 时再做增量对标评估。
+    - **后续可优化方向**（按 ROI 排序，待 goal 立项 / `br` task 跟踪）：
+      1. **WebSocket per-message-deflate（RFC 7692）**：压缩 WS 帧 payload，对
+         chat 类长连接节省带宽 60-80%；Mojo 1.0.0 无 deflate，需 Rust bridge 承载。
+         e2e：M22-M25（deflate negotiate / context takeover / 服务端压缩帧 / 客户端校验）。
+      2. **依赖注入（Depends）**：Goal-0002 已推迟。Mojo 1.0.0 无闭包，dispatch
+         模型需重新设计：候选方案 = 「类型+数据+单点 dispatch」延续 + DI container
+         显式构造（避免隐式闭包）。需先立 ADR + prototype。
+      3. **multipart / UploadFile**：Goal-0002 P5.2 推迟项。Rust bridge 已有 chunked
+         read，C ABI 扩 `parse_multipart_chunked()` + Mojo 侧 `multipart.mojo`
+         拼 boundary；e2e 至少 5 项（小文件 / 大文件 / 多文件 / 中文名 / 内存阈值）。
+      4. **嵌套 JSON Schema 校验（F1 增强）**：当前类型化参数仅 int/float/bool/
+         string；嵌套 object/array 类型注解 + schema 校验能拉满 FastAPI Body 对标。
+      5. **TLS/HTTPS 终结（rustls 静态链接）**：评估 rustls 二进制开销（+200-400KB）
+         + cipher suite 选择；上线后 nginx 反代可去掉 SSL 一层。需 ADR 评审纯 Rust
+         TLS 静态依赖。
+      6. **CI 多平台（aarch64 + x86_64）**：当前仅 linux/amd64；Apple Silicon / ARM
+         server 跑不了。需补 aarch64 测试 + Docker multi-arch build。
+      7. **OpenTelemetry exporter（生产可观测）**：`/metrics` 已 Prometheus 文本，
+         但 traces 当前缺；OTel gRPC 出口需 HTTP/2，先 stub 内存 trace buffer。
+      8. **WS 子协议矩阵扩展**：当前 /ws echo + counter + chat（3 个）；加
+         /ws/jsonrpc / /ws/graphql-ws / /ws/grpc-web 适配更多上游客户端。
+      9. **JSON 序列化 Rust 化（深度优化）**：当前 json.mojo 已线性时间，但
+         大 body（>1MB）仍占 Mojo 调度。Rust 侧手写 + FFI 暴露
+         `serialize_value_json_v2()` 可作为 opt-in 加速。
+      10. **Starlette/ASGI 兼容层（远期）**：让用户既可用 fastapi_mojo 原生 DSL，
+         又能 import starlette 风格 handler。设计重，需先调研 ASGI 3.0 spec。
+      11. **HTTP/2（远期）**：Rust h2 / hyper 评估；当前 curl/浏览器多数仍
+         HTTP/1.1，优先级低。
+      12. **UPX 重新评估（决策-30 挂起）**：当前 UPX 压缩 2.85MB→1.01MB（-64.5%）
+         但 ldd 输出 "not a dynamic executable" 破坏 CI North Star 门禁。可选：
+         CI 旁路断言（UPX 跳过 ldd 检查）或重写 CI 门禁为 readelf 替代。
+
 
 - **说明**：本文件是 `docs/goals/` 下**第一个** goal 文件。仓库此前无 goals 目录；
   本 goal 在既有 ADR 决策链与各 ADR `tasks.md` 的「后续」清单基础上向前推进。

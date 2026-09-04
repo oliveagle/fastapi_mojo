@@ -1,0 +1,38 @@
+# docker-compose.yml — fastapi_mojo production deployment (G3-v0.6).
+#
+# 用法:
+#   docker compose up -d          # build + start on :8080
+#   curl http://localhost:8080/health
+#   docker compose logs -f
+#   docker compose down
+#
+# WebSocket: 单 binary 原生支持 /ws (无需 nginx upgrade 转发); nginx 反代场景
+#  见 docs/deploy-nginx.md.
+#
+# ⚠️  /dev/shm 必须 mount 为 exec (Docker 默认 noexec, 否则 dlopen Mojo
+#     runtime .so 失败, fallback 到 /tmp, 服务仍可运行但会有 warning):
+#     tmpfs: /dev/shm:rw,exec,size=128m
+# ⚠️  distroless cc-debian12 不支持 host glibc 2.39 binary. Dockerfile 默认
+#     runtime = ubuntu:24.04 (glibc 2.39 匹配 host 编译的 binary).
+
+services:
+  fastapi_mojo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fastapi_mojo:latest
+    container_name: fastapi_mojo
+    restart: unless-stopped
+    ports:
+      - "8080:8000"          # host:8080 -> container:8000
+    tmpfs:
+      - /dev/shm:rw,exec,size=128m    # Mojo runtime .so staging (DLOPEN + mmap PROT_EXEC)
+    environment:
+      # 可选的运行时 env (见 AGENTS.md / README):
+      # FASTAPI_MOJO_RECV_TIMEOUT=5
+      # FASTAPI_MOJO_IDLE_TIMEOUT=5
+      FASTAPI_MOJO_ACCESS_LOG: "json"
+    command: ["--host", "0.0.0.0", "--port", "8000", "--workers", "0"]
+    # 资源限制 (生产建议):
+    # mem_limit: 256m
+    # cpus: 2.0
