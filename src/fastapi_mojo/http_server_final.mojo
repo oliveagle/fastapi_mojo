@@ -11,6 +11,7 @@ from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET
 from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
+from params_typed import validate_params, get_param_types, TypedError
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
@@ -95,6 +96,19 @@ def register_routes(mut router: Router) raises:
     # 验收路由 (ADR-0004 §4): 回显全部参数 — 注册 = 两行数据, 核心零改动
     router.add_route("/echo", "GET", Handler(KIND_ECHO(), "echo"))
     router.add_route("/echo", "POST", Handler(KIND_ECHO(), "echo"))
+
+    # F1 类型化参数 demo (Goal-0002 §1.1): 声明式类型标注.
+    #   /calc/{a}/{b}: a,b 必须为 int (path 参数强制必填).
+    #   /typed?count=N&verbose=true: count int=5 (query 默认值), verbose bool (可选).
+    var calc_h = Handler(KIND_ECHO(), "calc")
+    calc_h.set_data("message", "Typed calc")
+    calc_h.set_data("_param_types", "a:int;b:int")
+    router.add_route("/calc/{a}/{b}", "GET", calc_h)
+
+    var typed_h = Handler(KIND_ECHO(), "typed")
+    typed_h.set_data("message", "Typed query")
+    typed_h.set_data("_param_types", "count:int=5;verbose:bool")
+    router.add_route("/typed", "GET", typed_h)
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -293,10 +307,23 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         route_names.append(router.ws_routes[i].handler.name)
                     var info = ServerInfo("1.8.0", "request_id, logging, timing", uptime_s,
                                           req_num, route_keys, route_names)
-                    var result = run_handler(route_result.handler, route_result.params,
-                                             query_params, body_params, info)
-                    status_line = result[0]
-                    resp_data = result[1].copy()
+
+                    # F1: 类型化参数校验 (Goal-0002 §1.1). 校验失败 -> 422 + detail.
+                    # 校验通过 -> 继续 run_handler (handler 无感, ParamDict 仍是 String).
+                    # 这是 dispatch 唯一一处"认识类型化"的代码; 新增类型化路由 = 仅在
+                    # register_routes 用 set_data("_param_types", "name:type;name:type").
+                    var type_spec = get_param_types(route_result.handler)
+                    var type_err = validate_params(type_spec, route_result.params, query_params.values)
+                    if type_err.has_error:
+                        status_line = type_err.status_line
+                        resp_data = Dict[String, String]()
+                        resp_data["detail"] = type_err.detail
+                        resp_data["status"] = "422"
+                    else:
+                        var result = run_handler(route_result.handler, route_result.params,
+                                                 query_params, body_params, info)
+                        status_line = result[0]
+                        resp_data = result[1].copy()
 
                 # KIND_HTML: 直接以 text/html 发送 (动态前端页 / 运营面板).
                 # 走 send_html_response (Content-Type: text/html), 不再包 JSON.

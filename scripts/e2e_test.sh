@@ -6,6 +6,7 @@
 #
 # 构建 (如缺), 启动服务器, 断言真实 HTTP/WS 行为:
 #   - 9 个路由 (200 + body 内容)
+#   - F1 类型化参数: int/bool/422 + detail 字段 (Goal-0002)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
@@ -207,6 +208,19 @@ expect_code "GET /items/42 path-echo (ECHO kind) -> 200" 200 "$BASE/items/42"
 expect_body_contains "GET /items/42 echoes path param" '"item_id": "42"' "$BASE/items/42"
 
 # --- error paths -------------------------------------------------------------
+
+echo "== typed params (Goal-0002 F1) =="
+# /calc/{a}/{b}: a,b 必填 int (path).
+expect_code "typed path int ok" "200" "http://127.0.0.1:$PORT/calc/3/4"
+expect_code "typed path int bad -> 422" "422" "http://127.0.0.1:$PORT/calc/abc/4"
+expect_body_contains "typed 422 detail mentions int" "not a valid int" "http://127.0.0.1:$PORT/calc/abc/4"
+expect_body_contains "typed 422 has detail field" "\"detail\"" "http://127.0.0.1:$PORT/calc/abc/4"
+
+# /typed: count int=5 (query default), verbose bool 必填.
+expect_code "typed query with bool ok" "200" "http://127.0.0.1:$PORT/typed?verbose=true"
+expect_code "typed query default count ok" "200" "http://127.0.0.1:$PORT/typed?verbose=false&count=20"
+expect_code "typed query int bad -> 422" "422" "http://127.0.0.1:$PORT/typed?count=abc&verbose=true"
+expect_code "typed query missing required -> 422" "422" "http://127.0.0.1:$PORT/typed"
 
 echo "== error paths =="
 expect_code "GET /nope -> 404" 404 "$BASE/nope"

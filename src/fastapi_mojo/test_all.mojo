@@ -7,6 +7,8 @@ from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET, run_ws_message
 from params_query import parse_path_params, parse_query_params, ParsedParams, url_decode
 from params_json import parse_body_json
+from params_typed import (parse_typed_value, parse_type_spec, validate_params,
+                          set_param_type, get_param_types, TypedError)
 from string_builder import decode_utf8_bytes, StringBuilder, span_to_str, trim_spaces
 from ws_session import ws_select_subprotocol, ws_check_token
 
@@ -385,6 +387,111 @@ def test_ws() raises:
     print("WS tests passed!")
 
 
+
+def test_params_typed() raises:
+    """F1: 类型化参数校验 (Goal-0002)."""
+    print("=== Typed Params Tests ===")
+
+    # parse_typed_value: int
+    var i1 = parse_typed_value("int", "42")
+    assert i1[0] and i1[1] == "42", "int ok"
+    var i2 = parse_typed_value("int", "-7")
+    assert i2[0] and i2[1] == "-7", "int negative"
+    var i3 = parse_typed_value("int", "abc")
+    assert not i3[0], "int bad rejected"
+    var i4 = parse_typed_value("int", "3.5")
+    assert not i4[0], "int float rejected"
+
+    # parse_typed_value: float
+    var f1 = parse_typed_value("float", "3.14")
+    assert f1[0] and f1[1] == "3.14", "float ok"
+    var f2 = parse_typed_value("float", "-1.5e10")
+    assert f2[0], "float exp ok"
+    var f3 = parse_typed_value("float", "abc")
+    assert not f3[0], "float bad rejected"
+    var f4 = parse_typed_value("float", "42")
+    assert not f4[0], "float int rejected (no dot/exp)"
+
+    # parse_typed_value: bool
+    var b1 = parse_typed_value("bool", "true")
+    assert b1[0] and b1[1] == "true", "bool true"
+    var b2 = parse_typed_value("bool", "False")
+    assert b2[0] and b2[1] == "false", "bool False normalized"
+    var b3 = parse_typed_value("bool", "yes")
+    assert not b3[0], "bool bad rejected"
+
+    # parse_typed_value: string (passthrough)
+    var s1 = parse_typed_value("string", "hello world")
+    assert s1[0] and s1[1] == "hello world", "string passthrough"
+
+    # parse_type_spec
+    var ts1 = parse_type_spec("int")
+    assert ts1.base_type == "int" and not ts1.has_default(), "spec no default"
+    var ts2 = parse_type_spec("int=10")
+    assert ts2.base_type == "int" and ts2.default_value == "10", "spec with default"
+    var ts3 = parse_type_spec("bool=false")
+    assert ts3.base_type == "bool" and ts3.default_value == "false", "spec bool default"
+
+    # validate_params: path int ok
+    var spec1 = Dict[String, String]()
+    spec1["a"] = "int"
+    spec1["b"] = "int"
+    var pp1 = Dict[String, String]()
+    pp1["a"] = "3"
+    pp1["b"] = "4"
+    var e1 = validate_params(spec1, pp1, Dict[String, String]())
+    assert not e1.has_error, "path int ok"
+
+    # validate_params: path int type error -> 422
+    var pp2 = Dict[String, String]()
+    pp2["a"] = "abc"
+    pp2["b"] = "4"
+    var e2 = validate_params(spec1, pp2, Dict[String, String]())
+    assert e2.has_error, "type error detected"
+    assert e2.status_line == "422 Unprocessable Entity", "422 status"
+    assert "not a valid int" in e2.detail, "detail mentions int"
+
+    # validate_params: missing required -> 422
+    var e3 = validate_params(spec1, Dict[String, String](), Dict[String, String]())
+    assert e3.has_error and "missing required parameter" in e3.detail, "missing required"
+
+    # validate_params: query default used when absent
+    var spec2 = Dict[String, String]()
+    spec2["count"] = "int=5"
+    var e4 = validate_params(spec2, Dict[String, String](), Dict[String, String]())
+    assert not e4.has_error, "default satisfies required"
+
+    # validate_params: bad default -> 422 at validate time
+    var spec3 = Dict[String, String]()
+    spec3["count"] = "int=abc"
+    var e5 = validate_params(spec3, Dict[String, String](), Dict[String, String]())
+    assert e5.has_error and "not a valid int" in e5.detail, "bad default -> 422"
+
+    # validate_params: empty spec -> no error (passthrough)
+    var e6 = validate_params(Dict[String, String](), Dict[String, String](),
+                             Dict[String, String]())
+    assert not e6.has_error, "empty spec passthrough"
+
+    # set_param_type / get_param_types round-trip
+    var h = Handler(KIND_ECHO(), "demo")
+    set_param_type(h, "a", "int")
+    set_param_type(h, "b", "bool=false")
+    var got = get_param_types(h)
+    assert len(got) == 2, "two types registered"
+    assert got["a"] == "int", "type a round-trip"
+    assert got["b"] == "bool=false", "type b round-trip"
+
+    # set_param_type rejects unknown type at registration
+    var h2 = Handler(KIND_ECHO(), "demo2")
+    var raised = False
+    try:
+        set_param_type(h2, "x", "uuid")
+    except:
+        raised = True
+    assert raised, "unknown type rejected at registration"
+
+    print("Typed params tests passed!")
+
 def main() raises:
     print("Running all tests...")
     test_json()
@@ -395,6 +502,7 @@ def main() raises:
     test_span_to_str()
     test_ws()
     test_framework()
+    test_params_typed()
 
 
     print("All tests passed!")
