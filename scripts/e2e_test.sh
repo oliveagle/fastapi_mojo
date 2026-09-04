@@ -8,6 +8,7 @@
 #   - 9 个路由 (200 + body 内容)
 #   - F1 类型化参数: int/bool/422 + detail 字段 (Goal-0002)
 #   - F2 声明式异常映射: _error_map + 统一 detail 错误体 (Goal-0002)
+#   - F3 Request/Response + 嵌套 JSON (__nested__: 前缀直通, 修复 405 body hang)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
@@ -232,6 +233,35 @@ expect_code "error_map wildcard -> 422" "422" "$BASE/errors/42"
 expect_body_contains "error_map wildcard detail" "\"detail\": \"Invalid ID\"" "$BASE/errors/42"
 # 404 统一格式 (FastAPI 语义: detail 字段, 替换 error 字段)
 expect_body_contains "404 unified detail field" "\"detail\": \"Route not found\"" "$BASE/nope"
+
+echo "== request/response + nested JSON (Goal-0002 F3) =="
+# F3a: Request 读 header. /ctx 声明 _reads_headers="X-Custom,User-Agent".
+# helper 不支持 -H, 直接用 curl 取 body 判字段.
+CTX_WITH_HDR=$(curl -sS -m 5 -H "X-Custom: hello-world" "$BASE/ctx")
+if [[ "$CTX_WITH_HDR" == *"header_X-Custom"* && "$CTX_WITH_HDR" == *"hello-world"* ]]; then
+    pass "F3a read X-Custom header"
+else fail "F3a read X-Custom header" "body: ${CTX_WITH_HDR:0:200}"; fi
+if [[ "$CTX_WITH_HDR" == *"header_User-Agent"* ]]; then pass "F3a read User-Agent"
+else fail "F3a read User-Agent" "body: ${CTX_WITH_HDR:0:200}"; fi
+
+# F3b: 自定义响应头. /ctx 声明 _response_headers="X-Handler:ctx;X-Server:fastapi_mojo".
+RESP_HDRS=$(curl -sS -D - -o /dev/null -m 5 "$BASE/ctx")
+if [[ "$RESP_HDRS" == *"X-Handler: ctx"* ]]; then pass "F3b custom resp X-Handler present"
+else fail "F3b custom resp X-Handler present" "headers: ${RESP_HDRS}"; fi
+if [[ "$RESP_HDRS" == *"X-Server: fastapi_mojo"* ]]; then pass "F3b custom resp X-Server present"
+else fail "F3b custom resp X-Server present" "headers: ${RESP_HDRS}"; fi
+
+# F3c: 嵌套 JSON. /tags 用 nest_list / nest_dict 构造.
+expect_code "F3c nested -> 200" "200" "$BASE/tags"
+TAGS_BODY=$(http_body "$BASE/tags")
+if [[ "$TAGS_BODY" == *"\"tags\": [\"a\", \"b\", \"c\"]"* ]]; then pass "F3c nested list"
+else fail "F3c nested list" "body: ${TAGS_BODY:0:200}"; fi
+if [[ "$TAGS_BODY" == *"\"meta\": {"* && "$TAGS_BODY" == *"\"role\": \"admin\""* ]]; then pass "F3c nested dict"
+else fail "F3c nested dict" "body: ${TAGS_BODY:0:200}"; fi
+
+# 405 body 现在能完整送达 (pre-existing bug 修复). 405 路径走 expect_code 只查状态码.
+expect_code "F2 405 body delivered -> 405" "405" "$BASE/health" POST
+
 
 
 echo "== error paths =="

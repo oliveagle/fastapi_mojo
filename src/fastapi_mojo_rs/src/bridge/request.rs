@@ -48,6 +48,10 @@ pub struct CurrentRequest {
     /// 上一次响应状态行 (供 /status 路由读, send_response 时更新).
     pub last_status: [u8; 32],
     pub last_status_len: usize,
+    /// F3a: 最近一次按名查询的请求 header 值 (NUL 结尾, 供 get_request_header_slice 读).
+    /// 在 conn.rs::extract_header_value_to_current 写入; 多次查询会覆盖, 串行调用安全.
+    pub hdr_value: [u8; 512],
+    pub hdr_value_len: usize,
 }
 
 impl CurrentRequest {
@@ -70,6 +74,8 @@ impl CurrentRequest {
             ws_protocol_len: 0,
             last_status: [0u8; 32],
             last_status_len: 0,
+            hdr_value: [0u8; 512],
+            hdr_value_len: 0,
         }
     }
 }
@@ -162,6 +168,8 @@ pub fn reset_request_fields() {
     g.ws_protocol_len = 0;
     g.last_status_len = 0;
     g.last_status = [0u8; 32];
+    g.hdr_value_len = 0;
+    g.hdr_value = [0u8; 512];
 }
 
 /// 更新 active fd/phase (conn_done / pump 后).
@@ -184,6 +192,27 @@ pub fn set_last_status(s: &[u8]) {
     g.last_status[..n].copy_from_slice(&s[..n]);
     g.last_status[n] = 0;
     g.last_status_len = n;
+}
+
+/// F3a: 把请求头名对应的值写入 CurrentRequest.hdr_value (供 Mojo 端读).
+/// 调用方需确保 name 与 value 来自当前 active conn 的 hdr 缓冲 (line1+headers).
+/// v 长度截断到 511 (留 NUL 槽); 空 v -> hdr_value_len=0.
+pub fn set_header_value(name: &[u8], value: &[u8]) {
+    let mut g = lock_current();
+    let n = value.len().min(511);
+    g.hdr_value[..n].copy_from_slice(&value[..n]);
+    g.hdr_value[n] = 0;
+    g.hdr_value_len = n;
+    let _ = name;  // name 当前仅作 FFI 入参语义标记; 实际值查找在 conn.rs
+}
+
+/// F3a: 读取最近一次 set_header_value 的结果.
+pub fn get_header_value_slice() -> CSlice {
+    let g = lock_current();
+    CSlice {
+        ptr: g.hdr_value.as_ptr() as *const c_char,
+        len: g.hdr_value_len as c_long,
+    }
 }
 
 /// 更新 protocol_11 (finish_header 后).

@@ -13,10 +13,41 @@ from params_query import parse_path_params, parse_query_params, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params, get_param_types, TypedError
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
+from request_response import nest_dict, nest_list, nest_raw, parse_response_headers
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
 
+
+def inject_request_headers(mut params: Dict[String, String], header_names_csv: String):
+    """F3a: 把 _reads_headers 声明的 header 名按名从 C 桥读出, 注入 params.
+    key 前缀 header_<name>; 缺失 -> 空串. 保持 String-only (与现有 handler 兼容)."""
+    var n = header_names_csv.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(header_names_csv[byte=i]) == 44)  # ','
+        if is_sep:
+            if i > start:
+                var name = String(header_names_csv[byte=start:i])
+                # trim
+                var b = 0
+                var e = name.byte_length()
+                while b < e and (ord(name[byte=b]) == 32 or ord(name[byte=b]) == 9):
+                    b += 1
+                while e > b and (ord(name[byte=e - 1]) == 32 or ord(name[byte=e - 1]) == 9):
+                    e -= 1
+                if e > b:
+                    var clean = String(name[byte=b:e])
+                    var v = String("")
+                    var rc = external_call["extract_request_header", Int](
+                        clean.as_c_string_slice())
+                    if rc == 0:
+                        var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
+                        v = span_to_str(sl.as_bytes())
+                    params["header_" + clean] = v
+            start = i + 1
+        i += 1
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
     """Build error response data. FastAPI 语义: 统一 {detail, status} (Goal-0002 F2).
@@ -119,6 +150,35 @@ def register_routes(mut router: Router) raises:
     errors_h.set_data("message", "Error map demo")
     errors_h.set_data("_error_map", "item_id=99:404:Item not found;item_id=*:422:Invalid ID")
     router.add_route("/errors/{item_id}", "GET", errors_h)
+
+    # F3 Request/Response + 嵌套 JSON demo (Goal-0002 §1.1):
+    #   /ctx: 读 X-Custom header, 回显到 JSON 字段; 设 X-Handler: ctx 响应头; data 是嵌套 dict.
+    #   /tags: tags 字段是嵌套 list.
+    var ctx_h = Handler(KIND_ECHO(), "ctx")
+    ctx_h.set_data("message", "ctx demo")
+    ctx_h.set_data("_reads_headers", "X-Custom,User-Agent")
+    ctx_h.set_data("_response_headers", "X-Handler: ctx;X-Server: fastapi_mojo")
+    router.add_route("/ctx", "GET", ctx_h)
+
+    # 嵌套 JSON demo: KIND_ECHO 自动把 resp_data 序列化, 我们构造 resp_data 注入嵌套.
+    # 但 KIND_ECHO 当前直接 dict copy 不支持嵌套. 改用 KIND_STATIC + 预构造的 body
+    # (用 nest_dict / nest_list 构造的 __nested__: 前缀字符串).
+    var tags_h = Handler(KIND_STATIC(), "tags")
+    # KIND_STATIC 直接以 handler.data 作为 JSON body 输出. 我们手工构造一个含嵌套的 dict
+    # 通过 handler.data + nest_*; 但 handler.data 是 Dict[String,String], 仍受 String 约束.
+    # 解决: 在 dispatch 里, KIND_STATIC + 包含 "__nested__:" value 的 dict 走 nest 序列化.
+    # 这里简单: tags_h.data["tags"] = nest_list(["a", "b", "c"])
+    var tag_items = List[String]()
+    tag_items.append("a")
+    tag_items.append("b")
+    tag_items.append("c")
+    var meta_d = Dict[String, String]()
+    meta_d["user"] = "1"
+    meta_d["role"] = "admin"
+    tags_h.set_data("name", "demo")
+    tags_h.set_data("tags", nest_list(tag_items))
+    tags_h.set_data("meta", nest_dict(meta_d))
+    router.add_route("/tags", "GET", tags_h)
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -338,7 +398,12 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                             status_line = exc.status_line
                             resp_data = build_exception_body(exc.detail, exc.status_code)
                         else:
-                            var result = run_handler(route_result.handler, route_result.params,
+                            # F3a: Request 读 headers (Goal-0002). 声明式 _reads_headers CSV.
+                            # 注入 route_result.params 前缀 header_<name>; handler 直读.
+                            var req_params = route_result.params.copy()
+                            if "_reads_headers" in route_result.handler.data:
+                                inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
+                            var result = run_handler(route_result.handler, req_params,
                                                      query_params, body_params, info)
                             status_line = result[0]
                             resp_data = result[1].copy()
@@ -394,11 +459,27 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         allow_str.as_c_string_slice(),
                     )
                 else:
-                    _ = external_call["send_simple_response", Int](
-                        cfd,
-                        status_line.as_c_string_slice(),
-                        body.as_c_string_slice(),
-                    )
+                    # F3b: 自定义响应头 (Goal-0002). 声明式 _response_headers = "Name:value;Name:value".
+                    # 命中 -> 用 send_simple_response_extra, 多行头用 \r\n 分隔 (build_response_headers
+                    # 内部追加末尾 CRLF).
+                    var extra = ""
+                    if "_response_headers" in route_result.handler.data:
+                        var hdrs = parse_response_headers(route_result.handler)
+                        if len(hdrs) > 0:
+                            extra = "\r\n".join(hdrs)
+                    if extra != "":
+                        _ = external_call["send_simple_response_extra", Int](
+                            cfd,
+                            status_line.as_c_string_slice(),
+                            body.as_c_string_slice(),
+                            extra.as_c_string_slice(),
+                        )
+                    else:
+                        _ = external_call["send_simple_response", Int](
+                            cfd,
+                            status_line.as_c_string_slice(),
+                            body.as_c_string_slice(),
+                        )
 
 
                 mw_logging(mw_chain, req_id, method, path, query, status_line, duration_ms)

@@ -123,6 +123,14 @@ pub fn send_simple_response(fd: c_int, status: &str, body: &[u8]) -> c_long {
     send_response(fd, status, "application/json", body, true, None) as c_long
 }
 
+/// F3b: JSON 响应携带自定义头 (端口 C `send_simple_response` 变体).
+/// extra 为 "\r\n" 分隔的 "Name: value" 行, 末尾不带 CRLF (build_response_headers 内部追加).
+/// 空 extra -> 与 send_simple_response 等价.
+pub fn send_simple_response_extra(fd: c_int, status: &str, body: &[u8], extra: &str) -> c_long {
+    let ex = if extra.is_empty() { None } else { Some(extra) };
+    send_response(fd, status, "application/json", body, true, ex) as c_long
+}
+
 /// 405 响应携带 RFC 7231 Allow 头 (端口 C `send_simple_response_allow`
 /// §1495-1503)。C 用 256B 缓冲截断 Allow; 实际方法串 < 255B, format! 不截断
 /// 亦等价。

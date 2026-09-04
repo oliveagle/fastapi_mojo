@@ -137,10 +137,11 @@ fn send_response_keepalive_false_and_extra() {
     let hs = String::from_utf8_lossy(&resp);
     assert!(hs.contains("Connection: close\r\n"));
     assert!(hs.contains("Allow: GET, POST\r\n"));
-    // ⚠️ 与 C 字节等价: extra 存在时**没有** `\r\n\r\n` 空行 — C snprintf 格式串
-    // 最后一节是单个 `\r\n`, body 直接跟在 `Allow: ...\r\n` 之后 (e2e 79/79
-    // 以此字节流通过; curl 按 Content-Length 读 body)。
-    assert!(hs.ends_with("Allow: GET, POST\r\n{}"), "body must follow Allow line directly");
+    // ✅ 修复 (2026-09-04): extra 行后必须有空行 `\r\n\r\n` 终止 header 段.
+    // 旧实现: extra 收尾只一个 CRLF, body 直接接在 Allow 行末 CRLF 之后 (缺空行),
+    // 导致接收方按 Content-Length 等待 body 永远不达 (实测 405/自定义头 body hang).
+    // 新行为: CORS + extra 行 + 收尾 CRLF + 空行 CRLF + body, 与 RFC 9112 一致.
+    assert!(hs.ends_with("Allow: GET, POST\r\n\r\n{}"), "extra 头后必须有空行, body 才能送达");
 }
 
 #[test]
@@ -303,4 +304,45 @@ fn static_file_too_large_returns_413() {
     let body = String::from_utf8_lossy(body_after_headers(&resp));
     assert!(body.contains("\"status\":\"413 Payload Too Large\""));
     teardown_static_dir(&dir);
+}
+
+#[test]
+fn send_simple_response_extra_body_present() {
+    // F3b: 带 extra 头时 body 必须完整到达 (曾复现 405/ctx 头到 body 不达).
+    let mut cp = ConnPair::new();
+    let extra = "X-Handler:ctx\r\nX-Server:fastapi_mojo";
+    let body = b"{\"detail\":\"ok\",\"status\":\"200\"}";
+    let rc = send_simple_response_extra(cp.b, "200 OK", body, extra);
+    assert_eq!(rc, 0);
+    let resp = recv_all(&mut cp);
+    let head = String::from_utf8_lossy(&resp[..find_blank_line(&resp)]);
+    assert!(head.contains("X-Handler:ctx\r\n"), "extra hdr 1 present: {head:?}");
+    assert!(head.contains("X-Server:fastapi_mojo\r\n"), "extra hdr 2 present: {head:?}");
+    assert_eq!(body_after_headers(&resp), body, "body must arrive intact");
+}
+
+#[test]
+fn send_simple_response_extra_empty_is_plain() {
+    let mut cp = ConnPair::new();
+    let rc = send_simple_response_extra(cp.b, "200 OK", b"{\"ok\":1}", "");
+    assert_eq!(rc, 0);
+    let resp = recv_all(&mut cp);
+    assert_eq!(body_after_headers(&resp), b"{\"ok\":1}");
+}
+
+#[test]
+fn debug_send_simple_response_extra_bytes() {
+    let mut cp = ConnPair::new();
+    let extra = "X-Handler:ctx\r\nX-Server:fastapi_mojo";
+    let body = b"{\"detail\":\"ok\"}";
+    let _ = send_simple_response_extra(cp.b, "200 OK", body, extra);
+    let resp = recv_all(&mut cp);
+    eprintln!("=== full response ({} bytes) ===", resp.len());
+    eprintln!("{:?}", String::from_utf8_lossy(&resp));
+    eprintln!("=== END ===");
+    eprintln!("body after blank: {:?}", body_after_headers(&resp));
+    // also dump content-length
+    if let Some(s) = String::from_utf8_lossy(&resp).find("Content-Length: ") {
+        eprintln!("Content-Length line: {:?}", &String::from_utf8_lossy(&resp)[s..s+50]);
+    }
 }

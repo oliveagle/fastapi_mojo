@@ -35,6 +35,7 @@ use super::port::current_configured_port as port_current_configured_port;
 use super::request::{
     get_body_slice_inner, get_close_after_response as req_get_close_after_response,
     get_last_status_len as req_get_last_status_len, get_method_slice as req_get_method_slice,
+    get_header_value_slice as req_get_header_value_slice,
     get_path_slice as req_get_path_slice, get_query_slice as req_get_query_slice,
     get_ws_event_type as req_get_ws_event_type, get_ws_key_slice as req_get_ws_key_slice,
     read_last_status_byte as req_read_last_status_byte, CSlice,
@@ -46,6 +47,7 @@ use super::state::{
 };
 use super::send::{
     send_error_json as send_error_json_inner,
+    send_simple_response_extra as send_send_simple_response_extra,
     send_head_response as send_send_head_response,
     send_html_response as send_send_html_response,
     send_preflight_response as send_send_preflight_response,
@@ -197,6 +199,21 @@ pub extern "C" fn get_query_slice() -> CSlice {
     req_get_query_slice()
 }
 
+/// F3a: 按名从当前请求的 header 缓冲取值, 结果写入 CurrentRequest.hdr_value.
+/// 返回 -1 = 出错 (无 active conn); 0 = ok (含 header 缺失, 此时 len=0).
+/// 调用方再调 get_header_value_slice 读结果.
+#[no_mangle]
+pub extern "C" fn extract_request_header(name: *const c_char) -> c_int {
+    let n = unsafe { c_str_bytes(name) };
+    super::conn::extract_request_header(&n) as c_int
+}
+
+/// F3a: 读取最近一次 extract_request_header 的结果 (CSlice { ptr, len }).
+#[no_mangle]
+pub extern "C" fn get_header_value_slice() -> CSlice {
+    req_get_header_value_slice()
+}
+
 /// C: `fmc_slice get_body_slice(void)` — active conn 的 body slice
 /// (无 active 或 body 未收 → 返回空 ptr, 与 C `(fmc_slice){"", 0}` 一致).
 #[no_mangle]
@@ -285,6 +302,17 @@ pub extern "C" fn send_simple_response_allow(
     let b = unsafe { c_str_bytes(body) };
     let a = unsafe { c_str_lossy(allow) };
     send_send_simple_response_allow(fd, &s, &b, &a) as c_long
+}
+
+/// F3b: JSON 响应携带自定义头 (与 send_simple_response 同款, extra 为 "\r\n" 分隔头行).
+#[no_mangle]
+pub extern "C" fn send_simple_response_extra(
+    fd: c_int, status: *const c_char, body: *const c_char, extra: *const c_char,
+) -> c_long {
+    let s = unsafe { c_str_lossy(status) };
+    let b = unsafe { c_str_bytes(body) };
+    let e = unsafe { c_str_lossy(extra) };
+    send_send_simple_response_extra(fd, &s, &b, &e) as c_long
 }
 
 #[no_mangle]

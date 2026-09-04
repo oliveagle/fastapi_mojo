@@ -250,6 +250,38 @@ pub fn conn_table() -> &'static Mutex<ConnTable> {
     CONN_TABLE.get_or_init(|| Mutex::new(ConnTable::new()))
 }
 
+/// F3a: 从当前 active conn 的 hdr 缓冲按 name 提取 header 值, 写入
+/// request::CurrentRequest.hdr_value (供 Mojo 端 get_header_value_slice 读).
+/// 找不到 / name 为空 / active_conn 不存在 -> set_header_value("", 0) (len=0).
+/// 返回 0 = ok; -1 = 出错 (无 active conn).
+pub fn extract_request_header(name: &[u8]) -> i32 {
+    use super::parse::get_header_value_ci;
+    use super::request::set_header_value;
+    if name.is_empty() {
+        set_header_value(name, b"");
+        return 0;
+    }
+    let t = conn_table().lock().unwrap_or_else(|e| e.into_inner());
+    let active_idx = match t.active() {
+        Some(i) => i,
+        None => return -1,
+    };
+    let conn = match t.get(active_idx) {
+        Some(c) => c,
+        None => return -1,
+    };
+    if conn.hdr_total == 0 {
+        set_header_value(name, b"");
+        return 0;
+    }
+    let buf = &conn.hdr[..conn.hdr_total];
+    match get_header_value_ci(buf, name) {
+        Some(v) => set_header_value(name, &v),
+        None => set_header_value(name, b""),
+    }
+    0
+}
+
 // ========== WS 事件队列 (端口 C g_ws_ev_*, §832-849) ==========
 pub struct WsEventQueue {
     fds: Vec<i32>,

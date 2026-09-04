@@ -5,6 +5,21 @@
 from string_builder import StringBuilder
 
 
+
+def _has_nested_prefix(v: String) -> Bool:
+    """True if v starts with "__nested__:" (11 bytes, raw JSON 透传标记, F3c).
+    逐字节比较避免 String slice 类型开销."""
+    if v.byte_length() <= 10:
+        return False
+    # "__nested__:" = _ _ n e s t e d _ _ :
+    return ord(v[byte=0]) == 95 and ord(v[byte=1]) == 95 and \
+           ord(v[byte=2]) == 110 and ord(v[byte=3]) == 101 and \
+           ord(v[byte=4]) == 115 and ord(v[byte=5]) == 116 and \
+           ord(v[byte=6]) == 101 and ord(v[byte=7]) == 100 and \
+           ord(v[byte=8]) == 95 and ord(v[byte=9]) == 95 and \
+           ord(v[byte=10]) == 58
+
+
 def _hex2(v: Int) -> String:
     """Two lowercase hex digits of v (0-255)."""
     var h = "0123456789abcdef"
@@ -88,14 +103,24 @@ def json_serialize_key_value(key: String, value: String) -> String:
 
 
 def json_serialize_dict(data: Dict[String, String]) raises -> String:
-    """Serialize dict to JSON (linear time)."""
+    """Serialize dict to JSON (linear time).
+
+    Nested marker (F3c, Goal-0002): if value starts with "__nested__:",
+    append the rest raw (already-formatted JSON object/array), skipping
+    json_serialize wrap. This lets handler nest Dict/List under a key.
+    """
     var items = StringBuilder()
     var first = True
     for key in data:
         if not first:
             items.append(", ")
         first = False
-        items.append(json_serialize_key_value(key, json_serialize(data[key])))
+        var v = data[key]
+        # "__nested__:" prefix detection (F3c)
+        if _has_nested_prefix(v):
+            items.append(json_serialize(key) + ": " + String(v[byte=11:v.byte_length()]))
+        else:
+            items.append(json_serialize_key_value(key, json_serialize(v)))
     return "{" + items.take() + "}"
 
 

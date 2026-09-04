@@ -74,7 +74,18 @@ pub fn build_response_headers(
     s.push_str("\r\n");
     s.push_str(CORS_HEADERS);
     s.push_str(ex);
-    s.push_str("\r\n");
+    if ex.is_empty() {
+        // 无 extra: CORS 末位已带 \r\n, 再加一个即构成空行 (\r\n\r\n).
+        s.push_str("\r\n");
+    } else {
+        // 有 extra: CORS 尾 + ex 行 + 收尾 CRLF + 空行 CRLF.
+        // 🔴 修复 (2026-09-04): 原实现只补一个 \r\n, extra 最后一行后无空行,
+        // 导致 body 被接收方视为 header 延续 (Content-Length 已声明但 body 永不
+        // "到达") — 实测 405/自定义头响应 header 到 body 不达 (curl 0/186 bytes).
+        // 补齐空行后 header 终止符正确 (\r\n\r\n).
+        s.push_str("\r\n");
+        s.push_str("\r\n");
+    }
     s.into_bytes()
 }
 
