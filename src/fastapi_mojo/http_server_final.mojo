@@ -14,6 +14,7 @@ from params_json import parse_body_json
 from params_typed import validate_params, get_param_types, TypedError
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import _parse_cookies, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers
+from std.ffi import external_call, CStringSlice  # (multipart via Rust bridge FFI)
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE
@@ -79,6 +80,58 @@ def inject_form_fields(mut params: Dict[String, String], form_fields_csv: String
         if name in pairs:
             v = pairs[name]
         params["form_" + name] = v
+
+
+def _mp_read_field(part_i: Int, field: Int) -> String:
+    """从 Rust bridge multipart 状态逐字节读取 part 字段 (field: 0=name
+    1=filename 2=content_type 3=body 4=body_b64). 纯整数 FFI 返回."""
+    var fld_len = external_call["mp_part_field_len", Int](Int64(part_i), Int64(field))
+    if fld_len <= 0:
+        return ""
+    var bytes = List[Int]()
+    for b in range(fld_len):
+        var byte = external_call["mp_part_field_byte", Int](Int64(part_i), Int64(field), Int64(b))
+        if byte < 0:
+            break
+        bytes.append(byte)
+    # decode_utf8_bytes 正确处理 UTF-8 多字节序列 (append_byte 对非 ASCII
+    # 转 U+FFFD, 会破坏中文文本字段 — 实测 form_desc 乱码).
+    return decode_utf8_bytes(bytes)
+
+
+def inject_multipart_fields(mut params: Dict[String, String]) raises:
+    """Multipart/form-data 注入 (G3-v0.7, Rust bridge 解析).
+
+    从 active conn body + Content-Type 头由 Rust bridge (mp_parse_current)
+    解析为 parts; 每个 part:
+      - 文本字段 (无 filename) -> params["form_<name>"] = <body string>
+      - 文件字段 (有 filename) -> params["file_<name>_filename"/"_size"/"_content_type"/"_body_b64"]
+    Handler 声明 `_multipart` = "true" 即启用 (与 inject_form_fields 同模式).
+
+    为何 Rust: multipart body 含任意二进制 (PNG/PDF 等), Mojo String 是 UTF-8
+    容器, span_to_str 会把 invalid 字节变 U+FFFD; [byte=...] 切片在非 codepoint
+    边界 assert. Rust bridge `&[u8]` 字节切片天然无此约束, 完全保 binary 完整.
+    对齐 ADR-0010 字节逻辑归 Rust 原则.
+    """
+    var n_parts = external_call["mp_parse_current", Int]()
+    if n_parts <= 0:
+        return
+    for i in range(n_parts):
+        # 逐字节读取 part 字段 (field: 0=name 1=filename 2=ct 3=body 4=b64).
+        # 纯整数 FFI 返回, 规避 Mojo CStringSlice 对 Rust CSlice 的 ABI 解析歧义.
+        var name = _mp_read_field(i, 0)
+        if name == "":
+            continue
+        var filename = _mp_read_field(i, 1)
+        if filename == "":
+            # 文本字段: raw body (UTF-8 安全; 文件字段不经过此分支)
+            params["form_" + name] = _mp_read_field(i, 3)
+        else:
+            params["file_" + name + "_filename"] = filename
+            params["file_" + name + "_content_type"] = _mp_read_field(i, 2)
+            var b64 = _mp_read_field(i, 4)
+            params["file_" + name + "_body_b64"] = b64
+            params["file_" + name + "_size"] = String(b64.byte_length())
 
 
 def _run_background(handler: Handler, req_id: String, method: String,
@@ -359,6 +412,15 @@ def register_routes(mut router: Router) raises:
     form_h.set_data("_form_fields", "username,password,remember")
     form_h.set_data("message", "form demo")
     router.add_route("/login", "POST", form_h)
+
+    # G3-v0.7 (2026-09-04): multipart/UploadFile demo (Goal-0002 P5.2 推迟项).
+    # _multipart = "true" 声明接收 multipart/form-data; dispatch 自动解析:
+    #   文本字段 -> form_<name>; 文件字段 -> file_<name>_filename/_size/_content_type/_body_b64.
+    var up_h = Handler(KIND_ECHO(), "upload")
+    up_h.set_data("_multipart", "true")
+    up_h.set_data("message", "multipart upload demo")
+    router.add_route("/upload", "POST", up_h)
+
 
     # F11 (v0.5.1): BackgroundTasks demo. _background = 响应后同步执行的命令列表 (\n 分隔).
     # demo: GET /bg-write -> 响应后把 req_id 写到 /tmp/bg_<req_id>.txt (shell date 同步)
@@ -641,6 +703,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                 inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
                             if "_form_fields" in route_result.handler.data:
                                 inject_form_fields(req_params, route_result.handler.data["_form_fields"], body_str)
+                            if "_multipart" in route_result.handler.data and route_result.handler.data["_multipart"] == "true":
+                                inject_multipart_fields(req_params)
                             var result = run_handler(route_result.handler, req_params,
                                                      query_params, body_params, info)
                             status_line = result[0]

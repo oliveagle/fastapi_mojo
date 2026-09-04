@@ -67,6 +67,12 @@ use super::signals::{
 };
 use super::socket::create_bound_socket as sock_create_bound_socket;
 use super::time_util::now_ms as time_now_ms;
+use super::multipart::{
+    parse_current as mp_parse_current_inner,
+    get_part_count as mp_get_part_count_inner,
+    get_part_field_len as mp_get_part_field_len_inner,
+    get_part_field_byte as mp_get_part_field_byte_inner,
+};
 use super::io::ws_pump_now as io_ws_pump_now;
 use super::ws_session_ffi::{
     get_ws_path_slice as wsf_get_ws_path_slice, get_ws_ping_max as wsf_get_ws_ping_max,
@@ -80,7 +86,9 @@ use super::ws_session_ffi::{
 };
 
 extern "C" {
+    #[allow(dead_code)]
     fn malloc(size: usize) -> *mut c_void;
+    #[allow(dead_code)]
     fn free(ptr: *mut c_void);
 }
 
@@ -496,4 +504,39 @@ pub extern "C" fn run_command_free(ptr: *const c_char) {
     if !ptr.is_null() {
         unsafe { free(ptr as *mut c_void); }
     }
+}
+
+// =====================================================================
+// 9. multipart (mp_*) — G3-v0.7 文件上传 (multipart/form-data, Rust bridge)
+// =====================================================================
+// 字节逻辑归 Rust 承载 (binary body / invalid UTF-8 文件内容不损毁):
+//   mp_parse_current(): 读 active conn 的 body + Content-Type, 解析 multipart,
+//                       返回 part 数 (i64; -1 = 非 multipart 或失败, Mojo 端按
+//                       Int(int64) 读取, 避免 c_int(-1) 零扩展为 uint64 巨大值
+//                       导致 n_parts<=0 误判的整型 ABI 陷阱 -- 教训-13).
+//   mp_part_count()/mp_part_{name,filename,content_type,body_b64}():
+//                       按索引读上次解析结果 (CSlice 指向 thread_local buf;
+//                       调用方须在下次 mp_* 调用前消费).
+// Mojo 侧在 dispatch 的 inject_multipart_fields 中调用.
+
+#[no_mangle]
+pub extern "C" fn mp_parse_current() -> c_long {
+    mp_parse_current_inner() as c_long
+}
+
+#[no_mangle]
+pub extern "C" fn mp_part_count() -> c_long {
+    mp_get_part_count_inner() as c_long
+}
+
+// 逐字节访问器 (纯整数返回, 无 CStringSlice ABI 歧义).
+// field: 0=name 1=filename 2=content_type 3=body 4=body_b64
+#[no_mangle]
+pub extern "C" fn mp_part_field_len(i: c_int, field: c_int) -> c_long {
+    mp_get_part_field_len_inner(i as usize, field) as c_long
+}
+
+#[no_mangle]
+pub extern "C" fn mp_part_field_byte(i: c_int, field: c_int, idx: c_long) -> c_long {
+    mp_get_part_field_byte_inner(i as usize, field, idx) as c_long
 }

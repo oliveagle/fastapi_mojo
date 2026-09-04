@@ -46,6 +46,7 @@ pub mod signals;
 pub mod socket;
 pub mod ws_session_ffi;
 pub mod state;
+pub mod multipart;
 pub mod time_util;
 
 #[cfg(test)]

@@ -51,6 +51,59 @@ use super::time_util::now_ms;
 use super::ws_session_ffi::{get_ws_ping_max, ws_send_close};
 use crate::bridge::conn::Conn;
 use crate::ws::{ws_parser_feed, ws_reply_close_buf, ws_write_message};
+/// CT = multipart/form-data -> 跳过 body UTF-8 校验 (RFC 2046/RFC 7578 允许
+/// 任意二进制 part body). 找到 "content-type: multipart/form-data" 即返回 true.
+fn hdr_is_multipart(c: &super::conn::Conn) -> bool {
+    let hdr = &c.hdr[..c.hdr_total];
+    let needle = b"content-type:";
+    let mut i = 0;
+    while i + needle.len() < hdr.len() {
+        if i == 0 || hdr[i - 1] == b'\n' {
+            let mut ok = true;
+            for j in 0..needle.len() {
+                let c1 = hdr[i + j];
+                let c2 = needle[j];
+                let l1 = if c1.is_ascii_uppercase() { c1 + 32 } else { c1 };
+                let l2 = if c2.is_ascii_uppercase() { c2 + 32 } else { c2 };
+                if l1 != l2 {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                let mut j = i + needle.len();
+                while j < hdr.len() && (hdr[j] == b' ' || hdr[j] == b'\t') {
+                    j += 1;
+                }
+                let val_start = j;
+                while j < hdr.len() && hdr[j] != b'\r' && hdr[j] != b'\n' {
+                    j += 1;
+                }
+                let val = &hdr[val_start..j];
+                let mp = b"multipart/form-data";
+                if val.len() >= mp.len() {
+                    let mut match_mp = true;
+                    for k in 0..mp.len() {
+                        let c1 = val[k];
+                        let c2 = mp[k];
+                        let l1 = if c1.is_ascii_uppercase() { c1 + 32 } else { c1 };
+                        if l1 != c2 {
+                            match_mp = false;
+                            break;
+                        }
+                    }
+                    if match_mp {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+
 
 // ========== Linux 常量 ==========
 const MSG_DONTWAIT: c_int = 0x40;
@@ -211,7 +264,7 @@ fn apply_request_header(c: &mut Conn, hdr: super::conn::parse::RequestHeader) ->
 
     if c.body_got >= hdr.content_length {
         // body 已齐: UTF-8 校验
-        if !bridge_parse::utf8_valid(&c.body[..c.body_got]) {
+        if !hdr_is_multipart(c) && !bridge_parse::utf8_valid(&c.body[..c.body_got]) {
             send_error_json(c.fd, "400 Bad Request", "Invalid UTF-8 in request body");
             c.reset_for_close();
             return -1;
@@ -295,7 +348,7 @@ pub fn pump_conn(c: &mut Conn, max_body_size: i32) -> i32 {
     if n <= 0 {
         if n == 0 {
             // EOF mid-body: 客户端走 pre-v11 行为, 接受短 body (而不是 hang).
-            if c.body_got > 0 && !bridge_parse::utf8_valid(&c.body[..c.body_got]) {
+            if c.body_got > 0 && !hdr_is_multipart(c) && !bridge_parse::utf8_valid(&c.body[..c.body_got]) {
                 send_error_json(c.fd, "400 Bad Request", "Invalid UTF-8 in request body");
                 c.reset_for_close();
                 return -1;
@@ -313,7 +366,7 @@ pub fn pump_conn(c: &mut Conn, max_body_size: i32) -> i32 {
     c.last_data_ms = now_ms() as i64;
     if c.body_got >= c.cl {
         // body 已齐: UTF-8 校验
-        if !bridge_parse::utf8_valid(&c.body[..c.body_got]) {
+        if !hdr_is_multipart(c) && !bridge_parse::utf8_valid(&c.body[..c.body_got]) {
             send_error_json(c.fd, "400 Bad Request", "Invalid UTF-8 in request body");
             c.reset_for_close();
             return -1;

@@ -585,6 +585,68 @@ kill -TERM "$ACL_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$ACL_PID" 2>/dev/null
 
+# --- multipart / UploadFile (G3-v0.7, Rust bridge, 决策-32) --------------------
+# /upload 声明 _multipart="true": 文本字段 -> form_<name>; 文件字段 ->
+# file_<name>_filename/_size/_content_type/_body_b64. body 任意二进制 (NUL/0xFF)
+# 经 Rust &[u8] 解析 + base64 注入 Mojo, 中文文本字段走 decode_utf8_bytes.
+echo "== multipart (G3-v0.7) =="
+MP_DIR="$TMP/mp"
+mkdir -p "$MP_DIR"
+
+# MP1: 文本字段 + 小文件 (text/plain). b64 动态计算, 逐字节比对.
+printf 'Hello e2e multipart!\n' > "$MP_DIR/a.txt"
+EXP_A=$(base64 -w0 "$MP_DIR/a.txt")
+MP1=$(curl -sS -m 5 -X POST -F 'title=Doc Title' -F 'file=@'"$MP_DIR/a.txt"';type=text/plain' "$BASE/upload")
+if [[ "$MP1" == *'"form_title": "Doc Title"'* ]]; then pass "MP1 form text field read"
+else fail "MP1 form text field read" "body: ${MP1:0:160}"; fi
+if [[ "$MP1" == *'"file_file_filename": "a.txt"'* ]]; then pass "MP1 file filename read"
+else fail "MP1 file filename read" "body: ${MP1:0:160}"; fi
+if [[ "$MP1" == *'"file_file_body_b64": "'"$EXP_A"'"'* ]]; then pass "MP1 file body base64 roundtrip"
+else fail "MP1 file body base64 roundtrip" "want=$EXP_A body: ${MP1:0:160}"; fi
+
+# MP2: 中文 UTF-8 文本字段 (decode_utf8_bytes 路径, 非 append_byte).
+MP2=$(curl -sS -m 5 -X POST -F 'desc=多字段混合' -F 'title=x' "$BASE/upload")
+if [[ "$MP2" == *'多字段混合'* ]]; then pass "MP2 Chinese UTF-8 text field preserved"
+else fail "MP2 Chinese UTF-8 text field preserved" "body: ${MP2:0:160}"; fi
+
+# MP3: 多文件 + 多文本字段同请求.
+printf 'file-one-body' > "$MP_DIR/one.bin"
+printf 'file-two-body' > "$MP_DIR/two.bin"
+MP3=$(curl -sS -m 5 -X POST -F 'k1=v1' -F 'k2=v2' \
+  -F 'f1=@'"$MP_DIR/one.bin"';type=application/octet-stream' \
+  -F 'f2=@'"$MP_DIR/two.bin"';type=application/octet-stream' "$BASE/upload")
+if [[ "$MP3" == *'"form_k1": "v1"'* && "$MP3" == *'"form_k2": "v2"'* ]]; then pass "MP3 two text fields"
+else fail "MP3 two text fields" "body: ${MP3:0:200}"; fi
+if [[ "$MP3" == *'"file_f1_filename": "one.bin"'* && "$MP3" == *'"file_f2_filename": "two.bin"'* ]]; then pass "MP3 two files parsed"
+else fail "MP3 two files parsed" "body: ${MP3:0:200}"; fi
+
+# MP4: 二进制 body 逐字节保真 (NUL + 0xFF + 全 0..255).
+perl -e 'print pack("C*", 0..255)' > "$MP_DIR/raw.bin"
+EXP_RAW=$(base64 -w0 "$MP_DIR/raw.bin")
+MP4=$(curl -sS -m 5 -X POST -F 'raw=@'"$MP_DIR/raw.bin"';type=application/octet-stream' "$BASE/upload")
+if [[ "$MP4" == *'"file_raw_body_b64": "'"$EXP_RAW"'"'* ]]; then pass "MP4 binary 0..255 body preserved via base64"
+else fail "MP4 binary 0..255 body preserved via base64" "want_len=${#EXP_RAW} body: ${MP4:0:120}"; fi
+if [[ "$MP4" == *'"file_raw_size": "344"'* ]]; then pass "MP4 file_size = b64 length (344)"
+else fail "MP4 file_size = b64 length (344)" "body: ${MP4:0:120}"; fi
+
+# MP5: 大文件 (300KB, 内存阈值内) -> 200 + size 正确.
+perl -e 'srand(42); print pack("C*", map { int(rand(256)) } 1..(300*1024))' > "$MP_DIR/large.bin"
+MP5=$(curl -sS -m 10 -X POST -F 'big=@'"$MP_DIR/large.bin"';type=application/octet-stream' "$BASE/upload")
+EXP5=$(base64 -w0 "$MP_DIR/large.bin")
+if [[ "$MP5" == *'"file_big_body_b64": "'"$EXP5"'"'* ]]; then pass "MP5 large 300KB file body roundtrip"
+else fail "MP5 large 300KB file body roundtrip" "b64_len_want=${#EXP5} body: ${MP5:0:120}"; fi
+
+# MP6: 中文文件名 (UTF-8 filename 经 decode_utf8_bytes).
+printf 'cn-content' > "$MP_DIR/cn.txt"
+MP6=$(curl -sS -m 5 -X POST -F 'doc=@'"$MP_DIR/cn.txt"';filename=测试文件.txt;type=text/plain' "$BASE/upload")
+if [[ "$MP6" == *'测试文件.txt'* ]]; then pass "MP6 Chinese filename preserved"
+else fail "MP6 Chinese filename preserved" "body: ${MP6:0:160}"; fi
+
+# MP7: multipart Content-Type 但 body 非 multipart (坏 boundary) -> 不崩, 200 + 无 file_* 字段.
+MP7=$(curl -sS -m 5 -X POST -H 'Content-Type: multipart/form-data; boundary=none' --data-binary 'not a multipart body' "$BASE/upload")
+if [[ "$MP7" == *'"message": "multipart upload demo"'* && "$MP7" != *'"file_'* ]]; then pass "MP7 malformed multipart -> 200 no file fields (no crash)"
+else fail "MP7 malformed multipart -> 200 no file fields (no crash)" "body: ${MP7:0:160}"; fi
+
 # --- summary ---------------------------------------------------------------------
 
 echo
