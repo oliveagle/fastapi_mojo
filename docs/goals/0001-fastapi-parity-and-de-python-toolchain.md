@@ -369,6 +369,23 @@ RSS 平台化（HTTP 2500 req + WS 180k frames）→ 无线性泄漏
 - **上游**：`AGENTS.md`（§1 North Star / §3 架构约束 / §6 决议链，**决策-19**）、
   `docs/adr/0001~0010`（已接受决策，含 **ADR-0010 Rust bridge**）、
   `docs/migrate_mojo/todo.md`（bootstrap 时代历史规划，已废弃，仅参考）
+- **追加更新-11**：2026-09-04（**Goal-0002 全部 F1-F8 达成 + v0.5.0 发布**）：
+  - **上游 FastAPI**：最新版 = **0.141.1**（2026-07-29），与 bootstrap 参考版一致，
+    **无新功能**需要纳入本 goal 范围（已逐一核对 0.141.1 release notes —
+    0.141.x 均为 bugfix/docs/security 更新，不影响 F1-F8 语义对标）。
+  - **v0.5.0 范围**：Goal-0002 T1-T9 全部 ✅（类型化参数 422 / HTTPException /
+    Request-Response + 嵌套 JSON / OpenAPI + Swagger UI / SSE / /metrics /
+    结构化 access log / Binary 瘦身 / 发布）。
+  - **验收实测**（v0.5.0 最后门禁）：e2e **118/118** / cargo test **284 passed / 0 failed**
+    / clippy `-D warnings` 双 crate **0 警告** / bench 6 场景 **0 errors**，
+    `get_root_10k_100c` ≈ **32.9k req/s**（vs C-only 基线 35.8k = **-8.1%**，**<10% 容差**）。
+  - **Binary 体积**：**5,492,408 → 2,809,736 B（-49%）**（strip --strip-unneeded
+    接入 build_single.sh 第 5/6 阶段；远低于 ≤4.2M 目标 33% 余量；决策-26）。
+  - **结构化 access log**：`FASTAPI_MOJO_ACCESS_LOG=json` env 开关，单行 JSON
+    `{req_id,method,path,status,duration_ms}`（决策-25）；e2e 新增 1 例 = 118/118。
+  - **发布**：tag **v0.5.0** annotated 于 main HEAD，commit 7ba923f（docs-goal F1-F8
+    全部达成），release notes 包含所有 F 项 commit hash、实测数字、门禁全绿快照。
+
 - **说明**：本文件是 `docs/goals/` 下**第一个** goal 文件。仓库此前无 goals 目录；
   本 goal 在既有 ADR 决策链与各 ADR `tasks.md` 的「后续」清单基础上向前推进。
   **Track C 方向定稿**：去 C 的终态不是「迁回 Mojo」，而是 **Rust staticlib 替代
