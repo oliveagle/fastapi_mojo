@@ -281,6 +281,21 @@ CK_NONE=$(curl -sS -m 5 "$BASE/cookies")
 if [[ "$CK_NONE" != *"cookie_"* ]]; then pass "F10 cookie absent when no Cookie header"
 else fail "F10 cookie absent when no Cookie header" "body: ${CK_NONE:0:200}"; fi
 
+# F10b (v0.5.1): Form 参数注入. /login 声明 _form_fields="username,password,remember".
+# dispatch 检测 POST body 是 x-www-form-urlencoded 时解析并注入 params["form_<name>"].
+FORM_RESP=$(curl -sS -m 5 -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=alice&password=secret123&remember=on" "$BASE/login")
+if [[ "$FORM_RESP" == *"form_username"* && "$FORM_RESP" == *"alice"* ]]; then pass "F10b form username read"
+else fail "F10b form username read" "body: ${FORM_RESP:0:200}"; fi
+if [[ "$FORM_RESP" == *"form_password"* && "$FORM_RESP" == *"secret123"* ]]; then pass "F10b form password read"
+else fail "F10b form password read" "body: ${FORM_RESP:0:200}"; fi
+FORM_ENCODED=$(curl -sS -m 5 -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=bob&password=pass%40word&remember=" "$BASE/login")
+if [[ "$FORM_ENCODED" == *"pass@word"* ]]; then pass "F10b form URL-decode (%40 -> @)"
+else fail "F10b form URL-decode (%40 -> @)" "body: ${FORM_ENCODED:0:200}"; fi
+if [[ "$FORM_ENCODED" == *"form_remember"* ]]; then pass "F10b form empty value key present"
+else fail "F10b form empty value key present" "body: ${FORM_ENCODED:0:200}"; fi
+
 
 
 echo "== openapi + swagger (Goal-0002 F4) =="

@@ -9,11 +9,11 @@ from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET
-from params_query import parse_path_params, parse_query_params, ParsedParams
+from params_query import parse_path_params, parse_query_params, url_decode, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params, get_param_types, TypedError
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
-from request_response import _parse_cookies, nest_dict, nest_list, nest_raw, parse_response_headers
+from request_response import _parse_cookies, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE
@@ -64,6 +64,55 @@ def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: S
                     params["cookie_" + clean] = v
             start = i + 1
         i += 1
+def inject_form_fields(mut params: Dict[String, String], form_fields_csv: String, body_str: String) raises:
+    """F10b (v0.5.1): 把 _form_fields 声明的字段名按名从 form body 解析, 注入 params.
+    key 前缀 form_<name>; 缺失 -> 空串. body 必须是 application/x-www-form-urlencoded
+    (key=value&key=value, URL-encoded). 与 inject_request_cookies 同模式.
+    """
+    var fields = _split_csv(form_fields_csv)
+    if len(fields) == 0:
+        return
+    var pairs = _parse_form_body(body_str)
+    for i in range(len(fields)):
+        var name = fields[i]
+        var v = String("")
+        if name in pairs:
+            v = pairs[name]
+        params["form_" + name] = v
+
+
+def _parse_form_body(body: String) -> Dict[String, String]:
+    """Parse application/x-www-form-urlencoded body: key1=val1&key2=val2.
+    每个 key/value 做 url_decode (percent + '+')."""
+    var out = Dict[String, String]()
+    if body == "":
+        return out^
+    var n = body.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(body[byte=i]) == 38)  # '&'
+        if is_sep:
+            if i > start:
+                var pair = String(body[byte=start:i])
+                var eq = -1
+                for j in range(pair.byte_length()):
+                    if ord(pair[byte=j]) == 61:  # '='
+                        eq = j
+                        break
+                if eq > 0:
+                    var k = url_decode(String(pair[byte=0:eq]))
+                    var v = url_decode(String(pair[byte=eq + 1:pair.byte_length()]))
+                    out[k] = v
+                elif eq < 0:
+                    # 裸 key 无值 (FastAPI 兼容)
+                    var k = url_decode(pair)
+                    out[k] = ""
+            start = i + 1
+        i += 1
+    return out^
+
+
 def inject_request_headers(mut params: Dict[String, String], header_names_csv: String):
     """F3a: 把 _reads_headers 声明的 header 名按名从 C 桥读出, 注入 params.
     key 前缀 header_<name>; 缺失 -> 空串. 保持 String-only (与现有 handler 兼容)."""
@@ -245,6 +294,14 @@ def register_routes(mut router: Router) raises:
     cookie_h.set_data("_reads_cookies", "session_id,user_id")
     cookie_h.set_data("message", "cookie demo")
     router.add_route("/cookies", "GET", cookie_h)
+
+    # F10b (v0.5.1): Form 参数 demo. _form_fields = 声明读取的字段名;
+    # dispatch 检测 Content-Type=application/x-www-form-urlencoded 时
+    # 解析 body 并注入 params["form_<name>"]. 注意: 必须 GET 回显才能看见 form_*.
+    var form_h = Handler(KIND_ECHO(), "form_demo")
+    form_h.set_data("_form_fields", "username,password,remember")
+    form_h.set_data("message", "form demo")
+    router.add_route("/login", "POST", form_h)
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -518,6 +575,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                 inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
                             if "_reads_cookies" in route_result.handler.data:
                                 inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
+                            if "_form_fields" in route_result.handler.data:
+                                inject_form_fields(req_params, route_result.handler.data["_form_fields"], body_str)
                             var result = run_handler(route_result.handler, req_params,
                                                      query_params, body_params, info)
                             status_line = result[0]
