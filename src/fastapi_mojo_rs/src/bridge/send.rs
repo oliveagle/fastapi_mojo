@@ -123,6 +123,11 @@ pub fn send_simple_response(fd: c_int, status: &str, body: &[u8]) -> c_long {
     send_response(fd, status, "application/json", body, true, None) as c_long
 }
 
+/// F6: 纯文本响应 (Content-Type: text/plain; charset=utf-8). Prometheus metrics 用.
+pub fn send_text_response(fd: c_int, body: &[u8]) -> c_long {
+    send_response(fd, "200 OK", "text/plain; charset=utf-8", body, true, None) as c_long
+}
+
 /// F5: SSE 响应 (Content-Type: text/event-stream; charset=utf-8).
 /// 调用方传入完整 SSE body (已按 SSE spec 格式化的多事件串), send_response 一次性发送.
 /// 不维护长连接 (避免占 worker; 一次性推送后关 fd).

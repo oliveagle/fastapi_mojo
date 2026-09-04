@@ -190,6 +190,7 @@ impl ConnTable {
         if self.conns.len() < MAX_CONNS {
             let idx = self.conns.len();
             self.conns.push(Conn::new(fd));
+            super::metrics::metrics_conn_alloc();
             return Some(idx);
         }
         None
@@ -208,6 +209,9 @@ impl ConnTable {
         }
         if self.active == Some(idx) {
             self.active = None;
+        }
+        if self.conns[idx].in_use {
+            super::metrics::metrics_conn_close();
         }
         self.conns[idx].reset_for_close();
     }

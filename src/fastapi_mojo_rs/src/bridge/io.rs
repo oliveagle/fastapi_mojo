@@ -767,6 +767,7 @@ pub fn recv_and_parse() -> i32 {
                 }
             }
             if ready_fd >= 0 {
+                super::metrics::metrics_inc_request();
                 return ready_fd;
             }
         }

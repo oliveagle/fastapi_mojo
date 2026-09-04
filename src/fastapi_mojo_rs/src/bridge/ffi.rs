@@ -32,6 +32,7 @@ use super::io::{
     conn_done as io_conn_done, recv_and_parse as io_recv_and_parse, set_listen_fd as io_set_listen_fd,
 };
 use super::port::current_configured_port as port_current_configured_port;
+use super::metrics::{metrics_get_slice, metrics_init as bridge_metrics_init};
 use super::request::{
     get_body_slice_inner, get_close_after_response as req_get_close_after_response,
     get_last_status_len as req_get_last_status_len, get_method_slice as req_get_method_slice,
@@ -49,6 +50,7 @@ use super::send::{
     send_error_json as send_error_json_inner,
     send_simple_response_extra as send_send_simple_response_extra,
     send_sse_response as send_send_sse_response,
+    send_text_response as send_send_text_response,
     send_head_response as send_send_head_response,
     send_html_response as send_send_html_response,
     send_preflight_response as send_send_preflight_response,
@@ -215,6 +217,22 @@ pub extern "C" fn get_header_value_slice() -> CSlice {
     req_get_header_value_slice()
 }
 
+/// F6: 初始化 metrics 计数器 (START_MS 记当前时间). 在 main/init_workers 调一次.
+#[no_mangle]
+pub extern "C" fn metrics_init() {
+    bridge_metrics_init();
+}
+
+/// F6: 渲染 Prometheus 文本 metrics. 返回 CSlice 指向静态缓冲 (单线程 worker 内调用).
+#[no_mangle]
+pub extern "C" fn get_metrics_block() -> CSlice {
+    let (len, ptr) = metrics_get_slice();
+    CSlice {
+        ptr: ptr as *const c_char,
+        len: len as c_long,
+    }
+}
+
 /// C: `fmc_slice get_body_slice(void)` — active conn 的 body slice
 /// (无 active 或 body 未收 → 返回空 ptr, 与 C `(fmc_slice){"", 0}` 一致).
 #[no_mangle]
@@ -322,6 +340,13 @@ pub extern "C" fn send_simple_response_extra(
 pub extern "C" fn send_sse_response(fd: c_int, body: *const c_char) -> c_long {
     let b = unsafe { c_str_bytes(body) };
     send_send_sse_response(fd, &b) as c_long
+}
+
+/// F6: 纯文本响应 (Content-Type: text/plain; charset=utf-8). Prometheus metrics 用.
+#[no_mangle]
+pub extern "C" fn send_text_response(fd: c_int, body: *const c_char) -> c_long {
+    let b = unsafe { c_str_bytes(body) };
+    send_send_text_response(fd, &b) as c_long
 }
 
 #[no_mangle]

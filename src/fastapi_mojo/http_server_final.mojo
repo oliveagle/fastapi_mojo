@@ -347,6 +347,20 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                     external_call["conn_done", NoneType](cfd, True)
                 continue
 
+            elif effective_method == "GET" and path == "/metrics":
+                # F6: Prometheus 文本 (F6, Goal-0002). 专用 text/plain content-type.
+                var m_slice = external_call["get_metrics_block", CStringSlice[origin_of(String(""))]]()
+                var m_body = span_to_str(m_slice.as_bytes())
+                _ = external_call["send_text_response", Int](
+                    cfd, m_body.as_c_string_slice())
+                var duration_ms_m = mw_timing(mw_chain, start_ms)
+                mw_logging(mw_chain, req_id, method, path, query, "200 OK (metrics)", duration_ms_m)
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
+                continue
+
             # Try static file serving for GET/HEAD requests
             if (effective_method == "GET") and is_static_path(path):
                 if is_head:
@@ -576,6 +590,9 @@ def main() raises:
     mw_chain.add(Middleware("logging"))
     mw_chain.add(Middleware("timing"))
     print("Middleware: request_id, logging, timing")
+
+    # F6: metrics 初始化 (记录进程启动时间, 供 uptime gauge 派生).
+    external_call["metrics_init", NoneType]()
 
     # Worker processes (ADR-0005): FASTAPI_MOJO_WORKERS=N (default 1 = single
     # process). Must run before create_bound_socket (SO_REUSEPORT binding).

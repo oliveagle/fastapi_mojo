@@ -11,6 +11,7 @@
 #   - F3 Request/Response + 嵌套 JSON (__nested__: 前缀直通, 修复 405 body hang)
 #   - F4 OpenAPI 3.0 (/openapi.json + /docs Swagger UI)
 #   - F5 Streaming/SSE (KIND_SSE 一次性推送 + format_sse_event 行切分合规)
+#   - F6 /metrics 端点 (Prometheus 文本, requests_total/active_conns/uptime)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
@@ -290,6 +291,16 @@ else fail "F5 SSE multiple events" "body: ${SSE_BODY:0:200}"; fi
 # SSE 终止符 \n\n (双换行) 存在
 if [[ "$SSE_BODY" == *"data: event"* && "$SSE_BODY" == *"event"* ]]; then pass "F5 SSE event terminator present"
 else fail "F5 SSE event terminator present" "body: ${SSE_BODY:0:200}"; fi
+
+echo "== metrics (Goal-0002 F6) =="
+# /metrics: Prometheus 文本, 关键 metric 存在, requests_total 非负.
+expect_code "F6 metrics -> 200" "200" "$BASE/metrics"
+METRICS_HDRS=$(curl -sS -D - -o /dev/null -m 5 "$BASE/metrics")
+if [[ "$METRICS_HDRS" == *"text/plain"* ]]; then pass "F6 metrics content-type text/plain"
+else fail "F6 metrics content-type text/plain" "headers: ${METRICS_HDRS:0:200}"; fi
+expect_body_contains "F6 metrics requests_total present" "fastapi_mojo_requests_total" "$BASE/metrics"
+expect_body_contains "F6 metrics active_connections present" "fastapi_mojo_active_connections" "$BASE/metrics"
+expect_body_contains "F6 metrics uptime present" "fastapi_mojo_uptime_seconds" "$BASE/metrics"
 
 echo "== error paths =="
 expect_code "GET /nope -> 404" 404 "$BASE/nope"

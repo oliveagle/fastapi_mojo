@@ -33,6 +33,7 @@
 pub mod cmd;
 pub mod ffi;
 pub mod conn;
+pub mod metrics;
 pub mod init_workers;
 pub mod io;
 pub mod parse;
