@@ -292,6 +292,24 @@ else fail "F5 SSE multiple events" "body: ${SSE_BODY:0:200}"; fi
 if [[ "$SSE_BODY" == *"data: event"* && "$SSE_BODY" == *"event"* ]]; then pass "F5 SSE event terminator present"
 else fail "F5 SSE event terminator present" "body: ${SSE_BODY:0:200}"; fi
 
+# F9 (v0.5.1): SSE 自定义 status_code + extra 头 (对齐上游 FastAPI 0.140.13 PR #15937).
+# /sse/created 声明 _stream_status=201 + Cache-Control/X-Accel-Buffering 头.
+SSE201_HDRS=$(curl -sS -D - -o /dev/null -m 5 -X POST "$BASE/sse/created")
+if [[ "$SSE201_HDRS" == *"HTTP/1.1 201 Created"* ]]; then pass "F9 SSE honors custom status_code (201)"
+else fail "F9 SSE honors custom status_code (201)" "headers: ${SSE201_HDRS:0:200}"; fi
+if [[ "$SSE201_HDRS" == *"Content-Type: text/event-stream"* ]]; then pass "F9 SSE 201 keeps event-stream content-type"
+else fail "F9 SSE 201 keeps event-stream content-type" "headers: ${SSE201_HDRS:0:200}"; fi
+if [[ "$SSE201_HDRS" == *"Cache-Control: no-cache"* ]]; then pass "F9 SSE extra header Cache-Control sent"
+else fail "F9 SSE extra header Cache-Control sent" "headers: ${SSE201_HDRS:0:200}"; fi
+if [[ "$SSE201_HDRS" == *"X-Accel-Buffering: no"* ]]; then pass "F9 SSE extra header X-Accel-Buffering sent"
+else fail "F9 SSE extra header X-Accel-Buffering sent" "headers: ${SSE201_HDRS:0:200}"; fi
+SSE201_BODY=$(curl -sS -m 5 -X POST "$BASE/sse/created")
+if [[ "$SSE201_BODY" == *"data: created"* ]]; then pass "F9 SSE 201 body intact"
+else fail "F9 SSE 201 body intact" "body: ${SSE201_BODY:0:200}"; fi
+# 回归: 未声明 _stream_status 的路由仍默认 200.
+if [[ "$SSE_HDRS" == *"HTTP/1.1 200 OK"* ]]; then pass "F9 SSE default remains 200"
+else fail "F9 SSE default remains 200" "headers: ${SSE_HDRS:0:200}"; fi
+
 echo "== metrics (Goal-0002 F6) =="
 # /metrics: Prometheus 文本, 关键 metric 存在, requests_total 非负.
 expect_code "F6 metrics -> 200" "200" "$BASE/metrics"

@@ -330,19 +330,72 @@ fn send_simple_response_extra_empty_is_plain() {
     assert_eq!(body_after_headers(&resp), b"{\"ok\":1}");
 }
 
+// ---------- F9: SSE status_code + extra 头 (上游 FastAPI 0.140.13 对齐) ----------
+
 #[test]
-fn debug_send_simple_response_extra_bytes() {
+fn send_sse_response_extra_honors_custom_status() {
     let mut cp = ConnPair::new();
-    let extra = "X-Handler:ctx\r\nX-Server:fastapi_mojo";
-    let body = b"{\"detail\":\"ok\"}";
-    let _ = send_simple_response_extra(cp.b, "200 OK", body, extra);
+    super::request::set_close_after_response(true);
+    let body = b"data: created\n\n";
+    let rc = send_sse_response_extra(cp.b, "201 Created", body, "");
+    assert_eq!(rc, 0);
+    assert_last_status("201 Created");
     let resp = recv_all(&mut cp);
-    eprintln!("=== full response ({} bytes) ===", resp.len());
-    eprintln!("{:?}", String::from_utf8_lossy(&resp));
-    eprintln!("=== END ===");
-    eprintln!("body after blank: {:?}", body_after_headers(&resp));
-    // also dump content-length
-    if let Some(s) = String::from_utf8_lossy(&resp).find("Content-Length: ") {
-        eprintln!("Content-Length line: {:?}", &String::from_utf8_lossy(&resp)[s..s+50]);
-    }
+    let head = &resp[..find_blank_line(&resp)];
+    let hs = String::from_utf8_lossy(head);
+    assert!(
+        hs.starts_with("HTTP/1.1 201 Created\r\n"),
+        "must honor custom status: {hs:?}"
+    );
+    assert!(hs.contains("Content-Type: text/event-stream; charset=utf-8\r\n"));
+    assert!(hs.contains("Content-Length: 15\r\n"));
+    assert_eq!(body_after_headers(&resp), body, "SSE body must arrive intact");
+}
+
+#[test]
+fn send_sse_response_extra_sends_extra_headers() {
+    // v0.5.0 缺陷: `_response_headers` 被解析但从未发送. F9 一并修复.
+    let mut cp = ConnPair::new();
+    super::request::set_close_after_response(true);
+    let body = b"data: ev\n\n";
+    let extra = "Cache-Control: no-cache\r\nX-Accel-Buffering: no";
+    let rc = send_sse_response_extra(cp.b, "200 OK", body, extra);
+    assert_eq!(rc, 0);
+    let resp = recv_all(&mut cp);
+    let head = &resp[..find_blank_line(&resp)];
+    let hs = String::from_utf8_lossy(head);
+    assert!(hs.starts_with("HTTP/1.1 200 OK\r\n"), "{hs:?}");
+    assert!(hs.contains("Cache-Control: no-cache\r\n"), "extra hdr 1: {hs:?}");
+    assert!(hs.contains("X-Accel-Buffering: no\r\n"), "extra hdr 2: {hs:?}");
+    assert_eq!(body_after_headers(&resp), body);
+}
+
+#[test]
+fn send_sse_response_extra_accepts_other_codes() {
+    let mut cp = ConnPair::new();
+    super::request::set_close_after_response(true);
+    let body = b"data: accepted\n\n";
+    let rc = send_sse_response_extra(cp.b, "202 Accepted", body, "");
+    assert_eq!(rc, 0);
+    let resp = recv_all(&mut cp);
+    let head = &resp[..find_blank_line(&resp)];
+    let hs = String::from_utf8_lossy(head);
+    assert!(hs.starts_with("HTTP/1.1 202 Accepted\r\n"), "{hs:?}");
+    assert_eq!(body_after_headers(&resp), body);
+}
+
+#[test]
+fn send_sse_response_legacy_still_200() {
+    // v0.5.0 兼容: 旧入口 send_sse_response 仍硬编码 200 OK.
+    let mut cp = ConnPair::new();
+    super::request::set_close_after_response(true);
+    let body = b"data: ok\n\n";
+    let rc = send_sse_response(cp.b, body);
+    assert_eq!(rc, 0);
+    assert_last_status("200 OK");
+    let resp = recv_all(&mut cp);
+    let head = &resp[..find_blank_line(&resp)];
+    let hs = String::from_utf8_lossy(head);
+    assert!(hs.starts_with("HTTP/1.1 200 OK\r\n"), "{hs:?}");
+    assert_eq!(body_after_headers(&resp), body);
 }

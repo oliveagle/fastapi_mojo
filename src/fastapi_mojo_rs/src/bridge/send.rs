@@ -131,8 +131,22 @@ pub fn send_text_response(fd: c_int, body: &[u8]) -> c_long {
 /// F5: SSE 响应 (Content-Type: text/event-stream; charset=utf-8).
 /// 调用方传入完整 SSE body (已按 SSE spec 格式化的多事件串), send_response 一次性发送.
 /// 不维护长连接 (避免占 worker; 一次性推送后关 fd).
+/// 硬编码 "200 OK" — 对齐 v0.5.0 行为 (上游 FastAPI 0.140.13 之前的 bug).
 pub fn send_sse_response(fd: c_int, body: &[u8]) -> c_long {
     send_response(fd, "200 OK", "text/event-stream; charset=utf-8", body, true, None) as c_long
+}
+
+/// F9: SSE 响应带自定义状态码 + extra 头 (上游 FastAPI 0.140.13 修复对齐).
+/// 上游 bug: SSE/JSONL 端点忽略路由声明的 status_code, 永远返回 200,
+/// 与 OpenAPI 文档矛盾. 本函数接受 `status` 字符串 (如 "201 Created") 与
+/// extra 头 ("\r\n" 分隔的 "Name: value" 行), 与 `send_simple_response_extra`
+/// 同一签名风格.
+/// 用例: handler 声明 `data["_stream_status"] = "201 Created"` + 
+/// `data["_response_headers"] = "Cache-Control: no-cache"` -> dispatch 走本入口.
+/// 同时修复 v0.5.0 的 `_response_headers` 被解析但从未发送的静默丢弃缺陷.
+pub fn send_sse_response_extra(fd: c_int, status: &str, body: &[u8], extra: &str) -> c_long {
+    let ex = if extra.is_empty() { None } else { Some(extra) };
+    send_response(fd, status, "text/event-stream; charset=utf-8", body, true, ex) as c_long
 }
 
 /// F3b: JSON 响应携带自定义头 (端口 C `send_simple_response` 变体).

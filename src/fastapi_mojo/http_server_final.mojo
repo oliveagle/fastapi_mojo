@@ -189,6 +189,14 @@ def register_routes(mut router: Router) raises:
     sse_h.set_data("_response_headers", "Cache-Control: no-cache")
     router.add_route("/sse", "GET", sse_h)
 
+    # F9 SSE 自定义 status_code demo (对齐上游 FastAPI 0.140.13 PR #15937).
+    # 声明 _stream_status = "201 Created"; dispatch 走 send_sse_response_extra.
+    var sse_created_h = Handler(KIND_SSE(), "sse_created")
+    sse_created_h.set_data("_stream_events", "created")
+    sse_created_h.set_data("_stream_status", "201 Created")
+    sse_created_h.set_data("_response_headers", "Cache-Control: no-cache;X-Accel-Buffering: no")
+    router.add_route("/sse/created", "POST", sse_created_h)
+
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
     router.add_ws_route("/ws", Handler(KIND_WS_ECHO(), "ws_echo"))
@@ -465,26 +473,30 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                             resp_data = result[1].copy()
 
                             # F5: SSE 一次性推送 (跳过 run_handler, 直接构造 SSE body).
+                            # F9 (v0.5.1): 支持自定义 status_code (对齐上游 FastAPI
+                            # 0.140.13 PR #15937) + 修复 `_response_headers` 被解析
+                            # 但从未发送的静默丢弃缺陷.
                             if route_result.handler.kind == KIND_SSE():
                                 var events_csv = ""
                                 if "_stream_events" in route_result.handler.data:
                                     events_csv = route_result.handler.data["_stream_events"]
                                 var sse_body = build_sse_body(events_csv)
+                                # 默认 200 OK; handler 可声明 _stream_status = "201 Created".
+                                var sse_status = "200 OK"
+                                if "_stream_status" in route_result.handler.data:
+                                    sse_status = route_result.handler.data["_stream_status"]
                                 var sse_extra = ""
                                 if "_response_headers" in route_result.handler.data:
                                     var sse_hdrs = parse_response_headers(route_result.handler)
                                     if len(sse_hdrs) > 0:
                                         sse_extra = "\r\n".join(sse_hdrs)
-                                if sse_extra != "":
-                                    # send_sse_response 不支持 extra, 退化: 用 send_simple_response_extra + 替换 content-type 不可能.
-                                    # 这里简化: 只发 SSE body, 跳过 extra 头 (Cache-Control 暂不输出).
-                                    _ = external_call["send_sse_response", Int](
-                                        cfd, sse_body.as_c_string_slice())
-                                else:
-                                    _ = external_call["send_sse_response", Int](
-                                        cfd, sse_body.as_c_string_slice())
+                                # send_sse_response_extra: status + extra 头统一透传
+                                # (不再硬编码 200, 不再丢弃声明的响应头).
+                                _ = external_call["send_sse_response_extra", Int](
+                                    cfd, sse_status.as_c_string_slice(),
+                                    sse_body.as_c_string_slice(), sse_extra.as_c_string_slice())
                                 var sse_dur = mw_timing(mw_chain, start_ms)
-                                mw_logging(mw_chain, req_id, method, path, query, "200 OK (sse)", sse_dur)
+                                mw_logging(mw_chain, req_id, method, path, query, sse_status + " (sse)", sse_dur)
                                 if external_call["get_close_after_response", Int]() != 0:
                                     external_call["conn_done", NoneType](cfd, False)
                                 else:

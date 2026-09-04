@@ -12,7 +12,9 @@
 #
 # 路由声明:
 #   - KIND_SSE handler + data["_stream_events"] = "msg1|msg2|msg3" (用 | 避免与 data 内逗号冲突).
-#   - dispatch: KIND_SSE 走 send_sse_response FFI (rust bridge 新增).
+#   - dispatch: KIND_SSE 走 send_sse_response_extra FFI (rust bridge; F9 status+extra 头).
+#   - data["_stream_status"] = "201 Created" (可选; F9 对齐上游 0.140.13 status_code 修复).
+#   - data["_response_headers"] = "Cache-Control: no-cache" (可选; F9 修复 v0.5.0 静默丢弃).
 #
 # 单点 dispatch 扩展点: dispatch 中 KIND_SSE 特殊处理; handler.mojo 加 KIND_SSE 常量.
 

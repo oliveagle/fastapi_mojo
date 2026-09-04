@@ -51,6 +51,7 @@ use super::send::{
     send_error_json as send_error_json_inner,
     send_simple_response_extra as send_send_simple_response_extra,
     send_sse_response as send_send_sse_response,
+    send_sse_response_extra as send_send_sse_response_extra,
     send_text_response as send_send_text_response,
     send_head_response as send_send_head_response,
     send_html_response as send_send_html_response,
@@ -347,6 +348,19 @@ pub extern "C" fn send_simple_response_extra(
 pub extern "C" fn send_sse_response(fd: c_int, body: *const c_char) -> c_long {
     let b = unsafe { c_str_bytes(body) };
     send_send_sse_response(fd, &b) as c_long
+}
+
+/// F9: SSE 响应带自定义状态码 + extra 头 (上游 FastAPI 0.140.13 修复对齐).
+/// `status` 形如 "201 Created"; 透传到响应头, 不再硬编码 200 OK.
+/// `extra` 为 "\r\n" 分隔的 "Name: value" 行 (空串 = 无 extra).
+#[no_mangle]
+pub extern "C" fn send_sse_response_extra(
+    fd: c_int, status: *const c_char, body: *const c_char, extra: *const c_char,
+) -> c_long {
+    let st = unsafe { c_str_lossy(status) };
+    let b = unsafe { c_str_bytes(body) };
+    let ex = unsafe { c_str_lossy(extra) };
+    send_send_sse_response_extra(fd, &st, &b, &ex) as c_long
 }
 
 /// F6: 纯文本响应 (Content-Type: text/plain; charset=utf-8). Prometheus metrics 用.

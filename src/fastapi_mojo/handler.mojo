@@ -86,7 +86,11 @@ def KIND_WS_GREET() -> Int:
 def KIND_SSE() -> Int:
     """F5: SSE 流式响应. handler.data["_stream_events"] = "msg1|msg2|msg3" 声明要推送的事件.
     dispatch 一次性按 SSE spec 推送所有事件后关连接 (不维护长连接).
-    参考 FastAPI 0.140.12 修复: format_sse_event 按行切分 (data 字段内换行 -> 多个 data: 行)."""
+    参考 FastAPI 0.140.12 修复: format_sse_event 按行切分 (data 字段内换行 -> 多个 data: 行).
+    F9 (v0.5.1) 可选声明:
+      - data["_stream_status"] = "201 Created" 自定义 status_code (对齐上游 0.140.13).
+      - data["_response_headers"] = "Cache-Control: no-cache" 自定义响应头.
+    """
     return 200
 
 

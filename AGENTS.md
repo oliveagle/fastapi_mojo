@@ -300,7 +300,8 @@
 - **已决策-25**：**结构化 access log (JSON 行)** — `FASTAPI_MOJO_ACCESS_LOG=json`
   env 一次性读取（OnceLock 缓存），Mojo 侧 `_json_escape()` 转义 `\` / `"` /
   `
-` / `` / `	` / 控制字符，输出单行 JSON `{req_id,method,path,status,duration_ms}`，
+` / `
+` / `	` / 控制字符，输出单行 JSON `{req_id,method,path,status,duration_ms}`，
   兼容现有 text 模式（默认）；bridge `get_access_log_mode()` FFI 导出；
   e2e 新增 1 例（副 server + 验证 JSON 行 schema）= 118/118 全绿
 - **已决策-26**：**Binary 体积瘦身（strip 路线，优于去 std 化）** —
@@ -313,12 +314,34 @@
     core::ffi 是 noop 替换；strip 直接去 ELF 元数据是 -49% 的零代码改动路径。
   - **未来仍有 -200 KB 空间**：UPX 压缩（额外启动时解压开销 ~10 ms），待 v0.5.1 评估。
 
+- **已决策-27**：**F9 SSE 自定义 status_code + extra 头（v0.5.1，对齐上游 FastAPI 0.140.13 PR #15937）**：
+  1. **上游 bug**：SSE/JSONL streaming 端点忽略路由声明的 `status_code`，永远返回 200，
+     与 OpenAPI 文档矛盾。PR #15937 by @SAURBHSALVE 用 `_build_response_args(status_code, solved_result)`
+     透传状态码（2026-07-28 merge）。
+  2. **Rust 新 API**：`send_sse_response_extra(fd, status, body, extra)` —— 与
+     `send_simple_response_extra` 同一签名风格（status + extra 头统一透传）；
+     `send_sse_response(fd, body)` 保留为 v0.5.0 兼容入口（硬编码 200 OK）。
+  3. **Mojo dispatch 扩展点**：
+     - `data["_stream_status"] = "201 Created"` —— handler 声明式自定义 status_code
+     - `data["_response_headers"] = "Cache-Control: no-cache;X-Accel-Buffering: no"`
+       —— 多头用 `;` 分隔（对齐 `parse_response_headers` 文档约定）
+  4. **额外收益 —— 修复 v0.5.0 静默丢弃缺陷**：原 `_response_headers` 被 dispatch 解析
+     成 `sse_extra` 但**从未发送**（注释承认"退化跳过"）。F9 一并修复，demo `/sse/created`
+     实测响应头含 `Cache-Control: no-cache` + `X-Accel-Buffering: no`。
+  5. **质量门禁实测**：Rust bridge **287 单测 / 0 BUG**（F9 新增 4 测：自定义 status 201 /
+     自定义 status 202 / extra 头透传 / 旧入口仍 200 兼容）；clippy `-D warnings --tests` **0 警告**；
+     e2e **124/124 全绿**（v0.5.0 118 + F9 新增 6 测：201 status / content-type / Cache-Control /
+     X-Accel-Buffering / body intact / 默认 200 回归）；bench 6 场景 0 errors；ldd 仅 libc；
+     env -i 干净启动；binary **2.7M**（≤4.2M 目标）；RSS 平台化 3 rounds 无线性泄漏。
+
+
 *最后更新：2026-09-04（**决策-24 v0.5.0 发布（Goal-0002 F1-F8 全部达成）**：
 类型化参数 + HTTPException + Request/Response + 嵌套 JSON + OpenAPI + SSE +
 /metrics + 结构化 access log + binary 瘦身 5.5M → 2.8M；e2e **118/118 全绿** /
 cargo test **284 单测 / 0 警告 / 0 BUG** / bench 0 errors / ldd 仅 libc /
 RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
 决策-25 结构化 access log (FASTAPI_MOJO_ACCESS_LOG=json)；
+决策-27 F9 SSE status_code + extra 头 (上游 0.140.13 对齐 + 修复 v0.5.0 静默丢弃);
 决策-26 binary strip 5.5M → 2.8M (-49%)；决策-22 Track B 去 Python；
 决策-23 质量门禁；决策-21 终态 Mojo + Rust only；决策-20 DC2-h；
 决策-19 Bridge 终态 Rust；决策-18 WS 精化；决策-17 高并发 WS；
