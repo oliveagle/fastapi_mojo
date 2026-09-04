@@ -9,6 +9,7 @@
 #   - F1 类型化参数: int/bool/422 + detail 字段 (Goal-0002)
 #   - F2 声明式异常映射: _error_map + 统一 detail 错误体 (Goal-0002)
 #   - F3 Request/Response + 嵌套 JSON (__nested__: 前缀直通, 修复 405 body hang)
+#   - F4 OpenAPI 3.0 (/openapi.json + /docs Swagger UI)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
@@ -263,6 +264,16 @@ else fail "F3c nested dict" "body: ${TAGS_BODY:0:200}"; fi
 expect_code "F2 405 body delivered -> 405" "405" "$BASE/health" POST
 
 
+
+echo "== openapi + swagger (Goal-0002 F4) =="
+# /openapi.json: 有效 OpenAPI 3.0 文档 + 路由覆盖 + 类型标注.
+expect_code "openapi.json -> 200" "200" "$BASE/openapi.json"
+expect_body_contains "openapi.json openapi 3.0.3" '"openapi":"3.0.3"' "$BASE/openapi.json"
+expect_body_contains "openapi.json has /calc path" ""/calc/{a}/{b}"" "$BASE/openapi.json"
+expect_body_contains "openapi.json /calc typed int" '"type":"integer"' "$BASE/openapi.json"
+# /docs: Swagger UI 引导页.
+expect_code "docs -> 200" "200" "$BASE/docs"
+expect_body_contains "docs contains SwaggerUIBundle" "SwaggerUIBundle" "$BASE/docs"
 
 echo "== error paths =="
 expect_code "GET /nope -> 404" 404 "$BASE/nope"

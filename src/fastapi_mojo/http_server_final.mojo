@@ -14,6 +14,7 @@ from params_json import parse_body_json
 from params_typed import validate_params, get_param_types, TypedError
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import nest_dict, nest_list, nest_raw, parse_response_headers
+from openapi import generate_openapi, swagger_ui_html
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
@@ -304,6 +305,39 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
             if is_head:
                 effective_method = "GET"
 
+
+            # F4: OpenAPI/Swagger UI (Goal-0002). 动态生成 spec + 内嵌 UI 引导页.
+            # 这两个路径不进 route table, 在 dispatch 入口特判 (避免污染路由计数).
+            if effective_method == "GET" and path == "/openapi.json":
+                var spec = generate_openapi(router, "fastapi_mojo API", "1.8.0")
+                var extra_empty = String("")
+                _ = external_call["send_simple_response_extra", Int](
+                    cfd,
+                    "200 OK".as_c_string_slice(),
+                    spec.as_c_string_slice(),
+                    extra_empty.as_c_string_slice(),  # empty extra (F4 openapi 无自定义头)
+                )
+                var duration_ms = mw_timing(mw_chain, start_ms)
+                mw_logging(mw_chain, req_id, method, path, query, "200 OK (openapi)", duration_ms)
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
+                continue
+            elif effective_method == "GET" and path == "/docs":
+                var html = swagger_ui_html("fastapi_mojo API", "/openapi.json")
+                _ = external_call["send_html_response", Int](
+                    cfd,
+                    "200 OK".as_c_string_slice(),
+                    html.as_c_string_slice(),
+                )
+                var duration_ms_d = mw_timing(mw_chain, start_ms)
+                mw_logging(mw_chain, req_id, method, path, query, "200 OK (docs)", duration_ms_d)
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
+                continue
 
             # Try static file serving for GET/HEAD requests
             if (effective_method == "GET") and is_static_path(path):
