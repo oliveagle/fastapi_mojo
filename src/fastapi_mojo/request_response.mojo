@@ -57,14 +57,14 @@ def nest_raw(json_str: String) -> String:
 
 # ---------- Request 扩展 (读 headers/cookies 注入 params) ----------
 
-def _split_csv(s: String) -> List[String]:
+def _split_csv(s: String, sep_byte: Int = 44) -> List[String]:
     """按 ',' 切 CSV, 去空."""
     var out = List[String]()
     var n = s.byte_length()
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(s[byte=i]) == 44)  # ','
+        var is_sep = (i == n) or (ord(s[byte=i]) == sep_byte)  # 分隔字节 (默认 ,)
         if is_sep:
             if i > start:
                 var piece = String(s[byte=start:i])

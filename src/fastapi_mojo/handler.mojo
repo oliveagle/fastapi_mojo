@@ -63,6 +63,16 @@ def KIND_RUN_CMD() -> Int:
     return 6
 
 
+def KIND_DEPENDENCY() -> Int:
+    """F-DI (Depends, 决策-33): 依赖注入. handler.data["_depends"] = "dep1;dep2"
+    声明依赖; dispatch 在调用 run_handler 前解析 (resolve_depends): 逐个按名找
+    已注册依赖 handler, 递归解析其 own _depends, 通过 run_handler 派发得 resp_data,
+    注入 req_params (前缀 depname_outputkey). 依赖本身也是 KIND_DEPENDENCY:
+    run_handler 返回其 data 非 '_' 前缀字段作为输出.
+    用于 FastAPI Depends() 语义: 可复用计算 / 共享状态 / 鉴权前置."""
+    return 7
+
+
 # ---------- WebSocket 处理器行为 (ADR-0007) ----------
 
 def KIND_WS_ECHO() -> Int:
@@ -318,6 +328,22 @@ def run_handler(handler: Handler,
         if "rc" in resp:
             resp["code"] = resp["rc"]
         resp["cmd"] = final_cmd
+        return ("200 OK", resp^)
+
+    elif handler.kind == KIND_DEPENDENCY():
+        """F-DI (Depends, 决策-33): 依赖注入. 返回 handler.data 中非 '_' 前缀字段
+        作为依赖输出 (递归解析时合并的嵌套依赖输出也在此, 因它们不带 '_' 前缀).
+        dispatch 在派发主 handler 前调用 resolve_depends 解析 _depends 并注入.
+
+        base 依赖 (无 _depends): data 里声明的"返回值"字段 (如 items/message).
+        递归依赖: _depends 指向的其他依赖, 其输出被合并进派发数据后一并返回.
+
+        用于 FastAPI Depends() 语义: 可复用计算 / 共享状态 / 鉴权前置."""
+        var resp = Dict[String, String]()
+        for k in handler.data:
+            if k.startswith("_"):   # _depends / _prefix 为内部配置, 不作为依赖输出
+                continue
+            resp[k] = handler.data[k]
         return ("200 OK", resp^)
 
     else:

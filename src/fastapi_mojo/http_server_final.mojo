@@ -18,6 +18,7 @@ from std.ffi import external_call, CStringSlice  # (multipart via Rust bridge FF
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE
+from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
@@ -90,10 +91,10 @@ def _mp_read_field(part_i: Int, field: Int) -> String:
         return ""
     var bytes = List[Int]()
     for b in range(fld_len):
-        var byte = external_call["mp_part_field_byte", Int](Int64(part_i), Int64(field), Int64(b))
-        if byte < 0:
+        var bval = external_call["mp_part_field_byte", Int](Int64(part_i), Int64(field), Int64(b))
+        if bval < 0:
             break
-        bytes.append(byte)
+        bytes.append(bval)
     # decode_utf8_bytes 正确处理 UTF-8 多字节序列 (append_byte 对非 ASCII
     # 转 U+FFFD, 会破坏中文文本字段 — 实测 form_desc 乱码).
     return decode_utf8_bytes(bytes)
@@ -253,6 +254,79 @@ def inject_request_headers(mut params: Dict[String, String], header_names_csv: S
             start = i + 1
         i += 1
 
+# ---------- F-DI (Depends, 决策-33): 依赖注入 ----------
+
+def _split_depends(s: String) -> List[String]:
+    """F-DI: 按 ';' 切 _depends CSV, 去空白. 复用已 import 且已验证 byte-slice 的 _split_csv,
+    分隔符由 ',' (44) 换为 ';' (59)."""
+    return _split_csv(s, 59)
+
+
+def dispatch_dep(router: Router,
+                 dep: Handler,
+                 mut target: Dict[String, String],
+                 info: ServerInfo,
+                 query: ParsedParams,
+                 body: ParsedParams,
+                 visited: List[String]) raises -> Bool:
+    """F-DI: 递归解析并派发一个依赖 (KIND_DEPENDENCY), 输出注入 target (前缀 depname_key).
+
+    dep 自身的 runtime = dep.data + 其 _depends 子依赖输出 (子依赖递归派发后并入),
+    使其 run_handler (返回非 '_' 前缀字段) 可见. visited 为当前依赖链 (环检测):
+    dep 已出现在链中 (自身祖先) -> 跳过, 防无限递归. 菱形依赖各路径独立解析 (等价).
+    Returns True = 至少注入了一个输出.
+    """
+    if dep.name in visited:
+        return False
+    var child_visited = visited.copy()
+    child_visited.append(dep.name)
+
+    var runtime = dep.data.copy()
+    if "_depends" in runtime:
+        var names = _split_depends(runtime["_depends"])
+        for name in names:
+            var nested = router.find_handler_by_name(name)
+            if nested.name == "":
+                continue
+            # 子依赖输出并入 runtime (dep 自身的 runtime), 使其 run_handler 可见.
+            dispatch_dep(router, nested, runtime, info, query, body, child_visited)
+
+    # 派发依赖 (KIND_DEPENDENCY 返回非 '_' 前缀字段, 含已并入的子依赖输出).
+    var dep_h = Handler(dep.kind, dep.name)
+    dep_h.data = runtime.copy()
+    var rt = run_handler(dep_h, Dict[String, String](), query, body, info)
+    var dep_outputs = rt[1].copy()
+    for k in dep_outputs:
+        target[dep.name + "_" + k] = dep_outputs[k]
+    return len(dep_outputs) > 0
+
+
+def resolve_depends(router: Router,
+                    dep: Handler,
+                    mut target: Dict[String, String],
+                    info: ServerInfo,
+                    query: ParsedParams,
+                    body: ParsedParams,
+                    visited: List[String]) raises -> Bool:
+    """F-DI (Depends, 决策-33): 解析主 handler 声明的 _depends, 派发每个直接依赖
+    并注入其输出到 target (前缀 depname_outputkey). 不派发 dep 自身 (由 dispatch 派发).
+
+    语义对齐 FastAPI Depends(): 可复用计算 / 嵌套依赖 / 鉴权前置.
+    visited 为环检测基准 (含主 handler name); dispatch_dep 在其上追加子依赖名.
+    """
+    if "_depends" not in dep.data:
+        return False
+    var base_visited = visited.copy()
+    base_visited.append(dep.name)
+    var names = _split_depends(dep.data["_depends"])
+    for name in names:
+        var nested = router.find_handler_by_name(name)
+        if nested.name == "":
+            continue   # 未注册的依赖名 -> 跳过 (宽松: 也可改为 400)
+        dispatch_dep(router, nested, target, info, query, body, base_visited)
+    return True
+
+
 def build_error_response(status: String, message: String) -> Dict[String, String]:
     """Build error response data. FastAPI 语义: 统一 {detail, status} (Goal-0002 F2).
     向后兼容: e2e 只检查状态码, 不检查 body 字段名."""
@@ -383,6 +457,22 @@ def register_routes(mut router: Router) raises:
     tags_h.set_data("tags", nest_list(tag_items))
     tags_h.set_data("meta", nest_dict(meta_d))
     router.add_route("/tags", "GET", tags_h)
+
+    # F-DI (Depends, 决策-33): 依赖注入 demo (对齐 FastAPI Depends()).
+    #   get_config (base 依赖): 返回 version/env.
+    #   get_auth   (嵌套依赖): _depends=get_config, 返回 user (并"使用" get_config 输出).
+    #   /di        (KIND_ECHO): _depends=get_auth, 回显被解析注入的依赖输出
+    #                 (前缀 get_auth_outputkey, 嵌套输出双层前缀 get_auth_get_config_xxx).
+    router.add_dependency(Handler(KIND_DEPENDENCY(), "get_config"))
+    router.dependencies[len(router.dependencies) - 1].set_data("version", "v0.7.0")
+    router.dependencies[len(router.dependencies) - 1].set_data("env", "demo")
+    router.add_dependency(Handler(KIND_DEPENDENCY(), "get_auth"))
+    router.dependencies[len(router.dependencies) - 1].set_data("user", "demo_user")
+    router.dependencies[len(router.dependencies) - 1].set_data("_depends", "get_config")
+    var di_h = Handler(KIND_ECHO(), "di")
+    di_h.set_data("message", "DI demo (Depends)")
+    di_h.set_data("_depends", "get_auth")
+    router.add_route("/di", "GET", di_h)
 
     # F5 SSE 一次性推送 demo (Goal-0002 §1.1). 事件用 | 分隔 (避免与 data 内 , 冲突).
     var sse_h = Handler(KIND_SSE(), "sse_demo")
@@ -705,6 +795,11 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                 inject_form_fields(req_params, route_result.handler.data["_form_fields"], body_str)
                             if "_multipart" in route_result.handler.data and route_result.handler.data["_multipart"] == "true":
                                 inject_multipart_fields(req_params)
+                            # F-DI (Depends, 决策-33): 解析 handler.data["_depends"] 声明的
+                            # 依赖, 递归派发后注入 req_params (前缀 depname_outputkey).
+                            if "_depends" in route_result.handler.data:
+                                var _ = resolve_depends(router, route_result.handler, req_params,
+                                                info, query_params, body_params, List[String]())
                             var result = run_handler(route_result.handler, req_params,
                                                      query_params, body_params, info)
                             status_line = result[0]

@@ -141,14 +141,21 @@ struct Router:
     """Mojo 原生路由表."""
     var routes: List[Route]
     var ws_routes: List[WsRoute]
+    var dependencies: List[Handler]
 
     def __init__(out self):
         self.routes = List[Route]()
         self.ws_routes = List[WsRoute]()
+        self.dependencies = List[Handler]()
 
     def add_route(mut self, path: String, method: String, handler: Handler):
         """添加路由 (handler = kind + name + data, ADR-0004)."""
         self.routes.append(Route(path, method, handler))
+
+    def add_dependency(mut self, handler: Handler):
+        """注册一个依赖 (F-DI, 决策-33). 依赖 = KIND_DEPENDENCY 的 Handler,
+        按 name 被 dispatch 的 resolve_depends 查找 (不占用 HTTP 路径)."""
+        self.dependencies.append(handler.copy())
 
     def match_route(self, path: String, method: String) -> Bool:
         """匹配路由（精确 + pattern）."""
@@ -173,6 +180,18 @@ struct Router:
             if self.routes[i].match_path_only(path):
                 result.append(self.routes[i].method)
         return result.copy()
+
+    def find_handler_by_name(self, name: String) -> Handler:
+        """按 name 找一个已注册 handler (F-DI, 决策-33).
+        先查依赖表 (dependencies), 再查路由表 (routes). 未找到 -> 返回空 handler
+        (name == ""). 依赖注入用: resolve_depends 据此解析 _depends 声明."""
+        for i in range(len(self.dependencies)):
+            if self.dependencies[i].name == name:
+                return self.dependencies[i].copy()
+        for i in range(len(self.routes)):
+            if self.routes[i].handler.name == name:
+                return self.routes[i].handler.copy()
+        return Handler(KIND_ECHO(), "")
 
     def route_count(self) -> Int:
         """获取路由数量."""
