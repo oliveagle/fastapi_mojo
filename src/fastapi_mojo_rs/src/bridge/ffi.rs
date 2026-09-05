@@ -47,6 +47,10 @@ use super::state::{
     set_max_body_size as state_set_max_body_size,
     set_static_dir as state_set_static_dir,
 };
+use super::lifespan::{
+    get_lifespan_shutdown as ls_shutdown, get_lifespan_startup as ls_startup,
+    get_lifespan_timeout_ms as ls_timeout_ms,
+};
 use super::send::{
     send_error_json as send_error_json_inner,
     send_simple_response_extra as send_send_simple_response_extra,
@@ -197,6 +201,36 @@ pub extern "C" fn set_embedded_static_dir(dir: *const c_char) {
 #[no_mangle]
 pub extern "C" fn get_access_log_mode() -> c_int {
     state_get_access_log_mode()
+}
+
+// =====================================================================
+// 2b. Lifespan (决策-36, Goal-0003 P1): startup/shutdown 命令 env 读取.
+//     命令切分/执行/失败短路在 Mojo 侧 lifespan.mojo (复用 run_command_json).
+// =====================================================================
+
+/// 决策-36: `fmc_slice get_lifespan_startup_slice(void)` — startup 命令
+/// (env FASTAPI_MOJO_LIFESPAN_STARTUP, 换行分隔). 空 = 未配置 (len=0).
+/// 缓冲 NUL 终止 (len 不含 NUL; Mojo CStringSlice.as_bytes() 按 NUL 截断, 见
+/// lifespan.rs 模块文档 — 无 NUL 会越界读堆垃圾, 决策-36 实测 catch).
+#[no_mangle]
+pub extern "C" fn get_lifespan_startup_slice() -> CSlice {
+    let v = ls_startup();
+    CSlice { ptr: v.as_ptr() as *const c_char, len: (v.len() - 1) as c_long }
+}
+
+/// 决策-36: `fmc_slice get_lifespan_shutdown_slice(void)` — shutdown 命令
+/// (env FASTAPI_MOJO_LIFESPAN_SHUTDOWN, 换行分隔). 空 = 未配置 (len=0).
+/// NUL 终止契约同 get_lifespan_startup_slice.
+#[no_mangle]
+pub extern "C" fn get_lifespan_shutdown_slice() -> CSlice {
+    let v = ls_shutdown();
+    CSlice { ptr: v.as_ptr() as *const c_char, len: (v.len() - 1) as c_long }
+}
+
+/// 决策-36: `long get_lifespan_timeout_ms(void)` — 单条命令 timeout (默认 30000).
+#[no_mangle]
+pub extern "C" fn get_lifespan_timeout_ms() -> c_long {
+    ls_timeout_ms() as c_long
 }
 
 // =====================================================================
@@ -487,14 +521,18 @@ pub extern "C" fn run_command_json(cmd: *const c_char, timeout_ms: c_long) -> CS
     if bytes.is_empty() {
         return CSlice { ptr: empty_ptr(), len: 0 };
     }
-    // malloc + memcpy; ptr 由 run_command_free(libc free) 回收 (与 C bridge 一致).
+    // malloc(n+1) + memcpy(n) + NUL 收尾; ptr 由 run_command_free(libc free) 回收.
+    // NUL 终止是硬性契约 (决策-36 修复): Mojo CStringSlice.as_bytes() 按 C 串
+    // 语义读到首个 NUL (忽略 fmc_slice.len); 无 NUL 时 Mojo 越界读堆垃圾
+    // (F11 BackgroundTasks 的 out= 日志尾部一直带垃圾, 同此病, C bridge 遗留).
     let n = bytes.len();
-    let p = unsafe { malloc(n) } as *mut c_char;
+    let p = unsafe { malloc(n + 1) } as *mut c_char;
     if p.is_null() {
         return CSlice { ptr: empty_ptr(), len: 0 };
     }
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, n);
+        *p.add(n) = 0;
     }
     CSlice { ptr: p, len: n as c_long }
 }

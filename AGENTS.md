@@ -84,6 +84,13 @@
 - **测试 syscall 隔离（Rust bridge 实战教训）**：`bridge::conn` 的 `reset_for_close`
   调用真 `close(fd)`；单元测试必须用 `#[cfg(test)] sys_close` no-op（或同等隔离
   机制），避免合成 fd 误关 libtest 捕获管道 / stdio。
+- **FFI NUL 终止契约（Rust bridge 实战教训，决策-36）**：Mojo `CStringSlice
+  .as_bytes()` 按 C 串语义**读到首个 NUL，忽略 `fmc_slice.len`**（probe 实测：
+  len=28 且无 NUL 的缓冲实读 50 字节，含相邻 static 垃圾）；因此 bridge 返回的
+  **每个 `fmc_slice` 缓冲必须 `[len]=0`**。存量 slice 全量审计已 NUL 终止
+  （决策-20 的 NUL 修复即此契约）；`run_command_json`（`malloc(n)+memcpy(n)`，
+  C bridge 时代潜伏 bug）已修 `malloc(n+1)`+NUL。回归守护：`cargo test
+  ffi_run_command_json_nul_terminated`。
 
 - 测试文件与生产代码同目录
 
@@ -392,7 +399,78 @@
      - **UPX**：2.7M → 1.0M（额外 -64%），但 ldd 失效。性价比不抵破坏 CI 门禁。
      - 未来如需进一步压缩：考虑 `--gc-sections`（裁剪未用节，~10-30KB），不破坏 ldd。
 
-*最后更新：2026-09-04（**决策-24 v0.5.0 发布（Goal-0002 F1-F8 全部达成）**：
+
+- **已决策-31**：**G3 生产化交付（Docker + systemd + nginx）**：
+  `Dockerfile`（ubuntu:24.04 nonroot，host glibc 2.39 binary 直跑）/
+  `Dockerfile.full`（容器内构建路径：mojo==1.0.0 pip wheel + rust 工具链）/
+  `docker-compose.yml`（端口 8080→8000，/dev/shm:exec tmpfs 128M，JSON access
+  log，restart unless-stopped）/ `systemd/fastapi_mojo.service`（硬化 unit：
+  NoNewPrivileges / ProtectSystem / ProtectHome / LimitNOFILE 65536 /
+  Restart=on-failure）/ `docs/deploy-nginx.md`（反代 + SSE `proxy_buffering off`
+  + WS `Connection upgrade` + 5 项常见坑）。关键修复：glibc 2.36（distroless
+  cc-debian12）无法加载 Rust std `pidfd_spawnp` 符号 → runtime 改 ubuntu:24.04；
+  Mojo 1.0.0 包名实为 `mojo==1.0.0` wheel（`modular==0.10.1` 已下线）；Docker
+  默认 /dev/shm noexec 致 Mojo runtime dlopen 失败 → compose tmpfs exec 消除。
+- **已决策-32**：**Multipart/form-data 文件上传（Rust bridge parser，G3-v0.7）**：
+  `bridge/multipart.rs`（`&[u8]` body 解析：parts/name/filename/content_type/
+  body/body_b64）+ io.rs multipart-aware 解析（RFC 2046/7578：multipart body
+  跳过 UTF-8 校验）+ ffi.rs `mp_*` 导出 + `/upload` dispatch
+  （`inject_multipart_fields`：文本字段 → `form_<name>`，文件字段 →
+  `file_<name>_filename/_size/_content_type/_body_b64`）；二进制/非法 UTF-8 文件
+  body 保留，中文文件名/文本字段走 `decode_utf8_bytes`。修复尾行 trim bug
+  （trim 掉文件自身合法的尾部 \n 破坏 b64 往返，MP1 catch）。e2e MP1..MP7。
+- **已决策-33**：**Depends 嵌套依赖解析（F-DI）**：`_collect_reads` 支持多层
+  依赖（如 `get_auth_get_config_version`）；handler.data 中非 `_` 前缀字段
+  即依赖注入段；递归依赖解析（循环检测）；dispatch 在触发 handler 前调用
+  `resolve_depends` 解析 `_depends` 注入（对齐 FastAPI Depends 嵌套/共享状态）。
+- **已决策-34**：**FastAPI 安全/认证（HTTPBasic/HTTPBearer/APIKey）— 声明式 +
+  单一 dispatch 钩子**（ADR-0011，Goal-0003 P0）：
+  1. 声明式：`_auth`（basic/bearer/apikey:header|query|cookie:<name>）+
+     `_auth_users`（user:pass CSV）+ `_auth_tokens`（token CSV）+ `_auth_realm`。
+  2. 语义对齐 FastAPI/Starlette：失败 → 401 + `WWW-Authenticate`（basic/bearer；
+     apikey 无）；成功 → 注入 `auth_user` / `auth_token` / `auth_apikey`。
+  3. base64 解码纯 Mojo（`security.mojo`：6-bit 累加 + 掩码防 64-bit Int 溢出；
+     RFC 4648 标准/URL-safe 双字母表）；UTF-8 边界安全（codepoint 边界找 `:`）。
+  4. 单一 dispatch 钩子：`check_auth(handler, query_values) -> AuthResult`
+     是唯一「认识认证」的函数（F1 类型化参数校验**之前**短路）。
+  验收：e2e SEC-* 13 项；零新增 FFI（复用 `extract_request_header`）。
+- **已决策-35**：**response_model 响应字段过滤（基础版）**：声明式
+  `_response_model = "f1,f2"`（CSV，与 `_split_csv` 同 sep），响应仅保留声明
+  字段（过滤 meta 字段与未声明字段）；`/profile` demo；未声明时保持原样
+  （含 meta，回归 RM-4）。exclude/include/none 精化归 P2。
+- **已决策-36**：**Lifespan（startup/shutdown）= 声明式 env 命令 + FFI NUL
+  终止契约（发现并修复）**（ADR-0012，Goal-0003 P1 T-P1c）：
+  1. **声明式 API**：`FASTAPI_MOJO_LIFESPAN_STARTUP` / `..._SHUTDOWN`（换行
+     分隔 shell 命令）+ `..._TIMEOUT_MS`（默认 30000）；经 `run_command_json`
+     FFI 执行（与 F11 同一机制：/bin/sh -c + fork/poll + 进程组 timeout kill）。
+  2. **语义对齐 FastAPI/uvicorn**：startup 在 bind 后、serve 前（任一命令
+     rc≠0 → `bridge_fail`，服务不启动）；shutdown 在 `serve_forever` 返回后
+     （失败只记日志）；多 worker 仅主进程执行（`worker_id=0`，nginx master
+     init 语义；re-exec worker 跳过，避免 N 倍重复执行）。
+  3. **🔴 NUL 终止契约（probe 发现 + 修复 ×2）**：Mojo `CStringSlice
+     .as_bytes()` 按 C 串语义读到首个 NUL、**忽略 `fmc_slice.len`**（实测
+     len=28 无 NUL 实读 50 字节含相邻 static 垃圾）→ bridge 返回的每个
+     fmc_slice 缓冲必须 `[len]=0`。存量 slice 全量审计已 NUL 终止（决策-20）；
+     **修复**：`run_command_json` `malloc(n)` → `malloc(n+1)`+NUL（C 时代潜伏
+     bug：F11 `out=` 日志尾部一直带堆垃圾）+ lifespan env 串尾 NUL
+     （`OnceLock<Vec<u8>>`，len 不含 NUL）。回归守护：`cargo test
+     ffi_run_command_json_nul_terminated`。
+  4. **布局**：Rust `bridge/lifespan.rs`（env OnceLock + 3 新 FFI 导出
+     `get_lifespan_startup_slice` / `get_lifespan_shutdown_slice` /
+     `get_lifespan_timeout_ms`）+ Mojo `lifespan.mojo`（140 LOC：rc 解析 /
+     命令切分执行 / 失败短路 / main() 自测）；核心 `http_server_final` 仅
+     +1 import + 2 调用点（`main()` bind 后 / serve 后），**dispatch 零改动**。
+  验收：e2e **168/168**（+LS-1..4）/ cargo test **307 passed / 0 failed /
+  4 ignored** / clippy `-D warnings` 0 警告 / 多 worker 8 轮 stress（startup
+  恰好 1 次、无崩溃、命令零损坏、无孤儿）/ ldd 仅 libc / binary 2.9M（≤4.2M）。
+
+*最后更新：2026-09-05（**决策-36 Lifespan + FFI NUL 终止契约**（ADR-0012, Goal-0003 P1）：
+声明式 env 命令 (STARTUP/SHUTDOWN 换行分隔 + TIMEOUT_MS) / 语义对齐 FastAPI-uvicorn (startup 失败 → 服务不启动; 多 worker 仅主进程) /
+🔴 probe 发现 Mojo CStringSlice.as_bytes() 按 C 串语义读 NUL 忽略 slice.len → bridge fmc_slice 缓冲必须 [len]=0 契约
+(存量审计 OK; 修复 run_command_json malloc(n+1) NUL — C 时代潜伏 bug, F11 out= 日志垃圾根因; +lifespan env 尾 NUL)；
+补记 决策-31 G3 生产化 / 决策-32 multipart / 决策-33 DI / 决策-34 安全 / 决策-35 response_model；
+e2e 168/168 / cargo 307/0/4 / clippy 0 警告 / ldd 仅 libc / 2.9M；
+2026-09-04（**决策-24 v0.5.0 发布（Goal-0002 F1-F8 全部达成）**：
 类型化参数 + HTTPException + Request/Response + 嵌套 JSON + OpenAPI + SSE +
 /metrics + 结构化 access log + binary 瘦身 5.5M → 2.8M；e2e **118/118 全绿** /
 cargo test **284 单测 / 0 警告 / 0 BUG** / bench 0 errors / ldd 仅 libc /

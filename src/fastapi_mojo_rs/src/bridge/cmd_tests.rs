@@ -154,3 +154,28 @@ fn escaping_in_output() {
     let expected: &[u8] = b"{\"rc\":0,\"ok\":true,\"timeout\":false,\"out\":\"x\x5c\x5c\x5c\x22y\x5c\x6e\",\"err\":\"\"}";
     assert_eq!(out, expected, "got: {}", s(&out));
 }
+
+// ---------- FFI 层: NUL 终止契约 (决策-36 回归) ----------
+
+#[test]
+fn ffi_run_command_json_nul_terminated() {
+    // 回归: Mojo CStringSlice.as_bytes() 按 C 串语义读到首个 NUL (忽略
+    // fmc_slice.len); FFI 返回缓冲必须 [len]=0, 否则 Mojo 越界读堆垃圾
+    // (F11 out= 日志尾部垃圾即此病, C bridge 遗留).
+    use crate::bridge::ffi::{run_command_free, run_command_json as ffi_run_command_json};
+    let c = std::ffi::CString::new("echo hi").unwrap();
+    let sl = ffi_run_command_json(c.as_ptr(), 1000);
+    assert!(!sl.ptr.is_null());
+    assert!(sl.len >= 5, "expected JSON output, len={}", sl.len);
+    unsafe {
+        assert_eq!(
+            *sl.ptr.add(sl.len as usize),
+            0,
+            "FFI buffer must be NUL-terminated at len"
+        );
+        let bytes =
+            std::slice::from_raw_parts(sl.ptr as *const u8, sl.len as usize);
+        assert!(bytes.starts_with(b"{\"rc\":"), "not JSON? {bytes:?}");
+        run_command_free(sl.ptr);
+    }
+}

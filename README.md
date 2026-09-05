@@ -91,6 +91,19 @@ FASTAPI_MOJO_WORKERS=8 ./build/fastapi_mojo --port 8000
 FASTAPI_MOJO_STATIC_DIR=/opt/static ./build/fastapi_mojo
 ```
 
+Lifespan（startup/shutdown，决策-36 / ADR-0012，对标 FastAPI `lifespan` 上下文管理器）：
+声明式 shell 命令（换行分隔），服务启动前执行 startup、停止后执行 shutdown；
+**startup 任一命令失败 → 服务不启动（进程退出）**；多 worker 时仅主进程执行
+（nginx master init 语义）：
+
+```bash
+FASTAPI_MOJO_LIFESPAN_STARTUP='mkdir -p /var/lib/app
+touch /var/lib/app/warmup.flag' \
+FASTAPI_MOJO_LIFESPAN_SHUTDOWN='echo "shutting down" >> /var/log/app.log' \
+FASTAPI_MOJO_LIFESPAN_TIMEOUT_MS=30000 \
+./build/fastapi_mojo
+```
+
 ### 部署（单文件）
 
 ```bash

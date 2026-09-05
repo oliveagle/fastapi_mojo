@@ -23,6 +23,7 @@ from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
 from security import check_auth
+from lifespan import run_lifespan_startup, run_lifespan_shutdown
 
 
 def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: String) raises:
@@ -1054,4 +1055,12 @@ def main() raises:
     print("Listening on http://127.0.0.1:" + String(port))
     print("Press Ctrl+C to stop")
 
+    # Lifespan (决策-36): startup 命令 — 仅主进程 (worker_id=0) 执行,
+    # 在服务开始接请求之前; 任一命令失败 -> bridge_fail (服务不启动).
+    run_lifespan_startup(worker_id)
+
     serve_forever(router, mw_chain)
+
+    # Lifespan (决策-36): shutdown 命令 — serve_forever 返回 (收到停止信号) 后,
+    # 仅主进程执行; 失败只记日志, 不阻塞进程退出.
+    run_lifespan_shutdown(worker_id)

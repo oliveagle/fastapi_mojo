@@ -18,6 +18,7 @@
 #   - 停滞客户端不阻塞服务器 (探针 in <1s)
 #   - WebSocket: M1..M21 全 21 项 (ADR-0006~0009 握手/帧/子协议/鉴权/并发/合并帧)
 #   - 服务器攻击后仍存活
+#   - Lifespan: 声明式 startup/shutdown 命令 (决策-36, LS-1..LS-4)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -733,6 +734,70 @@ else fail "RM-3 response_model excludes meta fields" "body: ${PROFILE:0:200}"; f
 ITEMS=$(curl -sS -m 5 "$BASE/items")
 if [[ "$ITEMS" == *'"method"'* && "$ITEMS" == *'"request_id"'* ]]; then pass "RM-4 no _response_model -> meta fields preserved (regression)"
 else fail "RM-4 no _response_model -> meta fields preserved" "body: ${ITEMS:0:200}"; fi
+
+# --- lifespan (决策-36, Goal-0003 P1) -------------------------------------------------
+# FastAPI `lifespan` 上下文管理器: yield 前 = startup, yield 后 = shutdown;
+# 每进程一次; startup 失败 -> 服务不启动 (进程退出).
+# Mojo 1.0.0 无闭包 -> 声明式 env 命令 (换行分隔), 经 run_command_json FFI 执行;
+# 多 worker (re-exec) 时仅主进程 (worker 0) 执行, 对齐 nginx master init.
+echo "== lifespan (决策-36) =="
+LS_PORT=$((PORT + 110))
+LS_DIR="$TMP/lifespan"
+mkdir -p "$LS_DIR"
+LS_STARTUP=$(printf 'touch %s/startup_1.log\ntouch %s/startup_2.log' "$LS_DIR" "$LS_DIR")
+LS_SHUTDOWN=$(printf 'touch %s/shutdown_1.log' "$LS_DIR")
+( cd "$SRC" && exec env \
+    FASTAPI_MOJO_LIFESPAN_STARTUP="$LS_STARTUP" \
+    FASTAPI_MOJO_LIFESPAN_SHUTDOWN="$LS_SHUTDOWN" \
+    "$BIN" --port "$LS_PORT" \
+    > "$LS_DIR/server.log" 2>&1 ) &
+LS_PID=$!
+LS_READY=0
+for _ in $(seq 1 30); do
+    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$LS_PORT/health"; then
+        LS_READY=1; break
+    fi
+    sleep 0.3
+done
+if [[ "$LS_READY" == 1 ]]; then
+    if [[ -f "$LS_DIR/startup_1.log" && -f "$LS_DIR/startup_2.log" ]]; then
+        pass "LS-1 startup: 2 newline-separated commands ran before serving"
+    else
+        fail "LS-1 startup: 2 newline-separated commands ran before serving" "files missing; log: $(tail -3 "$LS_DIR/server.log")"
+    fi
+    expect_code "LS-2 server serving after lifespan startup" 200 "http://127.0.0.1:$LS_PORT/health"
+else
+    fail "LS-2 server serving after lifespan startup" "second server did not start; log: $(tail -3 "$LS_DIR/server.log")"
+fi
+# 优雅停止 (SIGTERM) -> shutdown 命令执行
+kill -TERM "$LS_PID" 2>/dev/null
+for _ in $(seq 1 20); do
+    if ! kill -0 "$LS_PID" 2>/dev/null; then break; fi
+    sleep 0.3
+done
+kill -9 "$LS_PID" 2>/dev/null
+sleep 0.2
+if [[ -f "$LS_DIR/shutdown_1.log" ]]; then
+    pass "LS-3 shutdown command ran after graceful stop"
+else
+    fail "LS-3 shutdown command ran after graceful stop" "no shutdown file; log: $(tail -5 "$LS_DIR/server.log")"
+fi
+# startup 失败 (rc!=0) -> 进程退出且永不服务 (FastAPI: lifespan 异常 -> 启动失败)
+LS2_PORT=$((PORT + 111))
+( cd "$SRC" && exec env FASTAPI_MOJO_LIFESPAN_STARTUP="exit 3" \
+    "$BIN" --port "$LS2_PORT" > "$LS_DIR/fail.log" 2>&1 ) &
+LS2_PID=$!
+LS2_GONE=0
+for _ in $(seq 1 20); do
+    if ! kill -0 "$LS2_PID" 2>/dev/null; then LS2_GONE=1; break; fi
+    sleep 0.3
+done
+LS2_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:$LS2_PORT/health")
+if [[ "$LS2_GONE" == 1 && "$LS2_CODE" == "000" ]] && grep -q "refusing to serve" "$LS_DIR/fail.log"; then
+    pass "LS-4 failing startup (rc!=0) -> process exits, never serves"
+else
+    fail "LS-4 failing startup (rc!=0) -> process exits, never serves" "gone=$LS2_GONE code=$LS2_CODE; log: $(tail -3 "$LS_DIR/fail.log")"
+fi
 
 # --- summary ---------------------------------------------------------------------
 
