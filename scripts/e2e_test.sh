@@ -647,6 +647,75 @@ MP7=$(curl -sS -m 5 -X POST -H 'Content-Type: multipart/form-data; boundary=none
 if [[ "$MP7" == *'"message": "multipart upload demo"'* && "$MP7" != *'"file_'* ]]; then pass "MP7 malformed multipart -> 200 no file fields (no crash)"
 else fail "MP7 malformed multipart -> 200 no file fields (no crash)" "body: ${MP7:0:160}"; fi
 
+# --- Security (决策-34, Goal-0003 P0): HTTPBasic / HTTPBearer / APIKey --------------
+# /basic: HTTPBasic (_auth=basic, _auth_users="admin:secret;user:pass123", realm=MyApp).
+# /secure: HTTPBearer (_auth=bearer, _auth_tokens="tok123;abcd456", realm=MyApp).
+# /api: APIKey header (_auth=apikey:header:X-Api-Key, _auth_tokens="key_abc;key_def").
+# /api-q: APIKey query (_auth=apikey:query:key, _auth_tokens="key_abc").
+echo "== security (决策-34) =="
+
+# HTTPBasic: 无凭据 -> 401 + WWW-Authenticate: Basic realm="MyApp"
+BASIC_NO=$(curl -sS -m 5 -D - -o /tmp/fm_e2e_basic_body "$BASE/basic")
+if [[ "$BASIC_NO" == *"401 Unauthorized"* && "$BASIC_NO" == *'WWW-Authenticate: Basic realm="MyApp"'* ]]; then pass "SEC-B1 basic no creds -> 401 + WWW-Authenticate"
+else fail "SEC-B1 basic no creds -> 401 + WWW-Authenticate" "hdr: ${BASIC_NO:0:200}"; fi
+if [[ "$(cat /tmp/fm_e2e_basic_body)" == *'"Not authenticated"'* ]]; then pass "SEC-B2 basic no creds -> detail Not authenticated"
+else fail "SEC-B2 basic no creds -> detail Not authenticated" "body: $(cat /tmp/fm_e2e_basic_body | head -c 120)"; fi
+
+# HTTPBasic: 错误凭据 -> 401 + WWW-Authenticate
+BASIC_BAD=$(curl -sS -m 5 -D - -o /tmp/fm_e2e_basic_bad -u admin:wrong "$BASE/basic")
+if [[ "$BASIC_BAD" == *"401 Unauthorized"* && "$BASIC_BAD" == *'WWW-Authenticate: Basic realm="MyApp"'* && "$(cat /tmp/fm_e2e_basic_bad)" == *'"Invalid credentials"'* ]]; then pass "SEC-B3 basic wrong creds -> 401 + WWW-Authenticate + Invalid credentials"
+else fail "SEC-B3 basic wrong creds -> 401" "hdr: ${BASIC_BAD:0:200}"; fi
+
+# HTTPBasic: 正确凭据 (admin:secret) -> 200 + auth_user=admin
+BASIC_OK=$(curl -sS -m 5 -u admin:secret "$BASE/basic")
+if [[ "$BASIC_OK" == *'"auth_user": "admin"'* && "$BASIC_OK" == *'"basic auth demo"'* ]]; then pass "SEC-B4 basic correct (admin:secret) -> 200 + auth_user"
+else fail "SEC-B4 basic correct -> 200 + auth_user" "body: ${BASIC_OK:0:200}"; fi
+
+# HTTPBasic: 第二个用户 (user:pass123) -> 200 + auth_user=user
+BASIC_OK2=$(curl -sS -m 5 -u user:pass123 "$BASE/basic")
+if [[ "$BASIC_OK2" == *'"auth_user": "user"'* ]]; then pass "SEC-B5 basic second user (user:pass123) -> auth_user=user"
+else fail "SEC-B5 basic second user -> auth_user=user" "body: ${BASIC_OK2:0:200}"; fi
+
+# HTTPBearer: 无 token -> 401 + WWW-Authenticate: Bearer realm="MyApp"
+BEARER_NO=$(curl -sS -m 5 -D - -o /dev/null "$BASE/secure")
+if [[ "$BEARER_NO" == *"401 Unauthorized"* && "$BEARER_NO" == *'WWW-Authenticate: Bearer realm="MyApp"'* ]]; then pass "SEC-N1 bearer no token -> 401 + WWW-Authenticate"
+else fail "SEC-N1 bearer no token -> 401 + WWW-Authenticate" "hdr: ${BEARER_NO:0:200}"; fi
+
+# HTTPBearer: 错误 token -> 401 + Invalid token
+BEARER_BAD=$(curl -sS -m 5 -D - -o /tmp/fm_e2e_bearer_bad -H "Authorization: Bearer badtoken" "$BASE/secure")
+if [[ "$BEARER_BAD" == *"401 Unauthorized"* && "$(cat /tmp/fm_e2e_bearer_bad)" == *'"Invalid token"'* ]]; then pass "SEC-N2 bearer wrong token -> 401 + Invalid token"
+else fail "SEC-N2 bearer wrong token -> 401" "hdr: ${BEARER_BAD:0:200}"; fi
+
+# HTTPBearer: 正确 token (tok123) -> 200 + auth_token=tok123
+BEARER_OK=$(curl -sS -m 5 -H "Authorization: Bearer tok123" "$BASE/secure")
+if [[ "$BEARER_OK" == *'"auth_token": "tok123"'* && "$BEARER_OK" == *'"bearer auth demo"'* ]]; then pass "SEC-N3 bearer correct (tok123) -> 200 + auth_token"
+else fail "SEC-N3 bearer correct -> 200 + auth_token" "body: ${BEARER_OK:0:200}"; fi
+
+# APIKey header: 无 key -> 401
+API_NO=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" "$BASE/api")
+if [[ "$API_NO" == "401" ]]; then pass "SEC-K1 apikey header no key -> 401"
+else fail "SEC-K1 apikey header no key -> 401" "got $API_NO"; fi
+
+# APIKey header: 错误 key -> 401
+API_BAD=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" -H "X-Api-Key: badkey" "$BASE/api")
+if [[ "$API_BAD" == "401" ]]; then pass "SEC-K2 apikey header wrong key -> 401"
+else fail "SEC-K2 apikey header wrong key -> 401" "got $API_BAD"; fi
+
+# APIKey header: 正确 key (key_abc) -> 200 + auth_apikey=key_abc
+API_OK=$(curl -sS -m 5 -H "X-Api-Key: key_abc" "$BASE/api")
+if [[ "$API_OK" == *'"auth_apikey": "key_abc"'* && "$API_OK" == *'"apikey header demo"'* ]]; then pass "SEC-K3 apikey header correct -> 200 + auth_apikey"
+else fail "SEC-K3 apikey header correct -> 200 + auth_apikey" "body: ${API_OK:0:200}"; fi
+
+# APIKey query: 正确 (?key=key_abc) -> 200 + auth_apikey
+APIQ_OK=$(curl -sS -m 5 "$BASE/api-q?key=key_abc")
+if [[ "$APIQ_OK" == *'"auth_apikey": "key_abc"'* && "$APIQ_OK" == *'"apikey query demo"'* ]]; then pass "SEC-Q1 apikey query correct -> 200 + auth_apikey"
+else fail "SEC-Q1 apikey query correct -> 200 + auth_apikey" "body: ${APIQ_OK:0:200}"; fi
+
+# APIKey query: 错误 (?key=bad) -> 401
+APIQ_BAD=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" "$BASE/api-q?key=bad")
+if [[ "$APIQ_BAD" == "401" ]]; then pass "SEC-Q2 apikey query wrong -> 401"
+else fail "SEC-Q2 apikey query wrong -> 401" "got $APIQ_BAD"; fi
+
 # --- summary ---------------------------------------------------------------------
 
 echo

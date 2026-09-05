@@ -22,6 +22,7 @@ from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
+from security import check_auth
 
 
 def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: String) raises:
@@ -519,6 +520,39 @@ def register_routes(mut router: Router) raises:
     bg_h.set_data("message", "bg demo")
     router.add_route("/bg-write", "GET", bg_h)
 
+    # 决策-34 (Goal-0003 P0): Security 认证 demo (HTTPBasic / HTTPBearer / APIKey).
+    # 声明式 _auth 是请求级 gate; 失败 -> 401 + WWW-Authenticate, 成功 -> 注入 auth_* 参数.
+    # /basic: HTTPBasic. 正确凭据 (admin:secret) -> 200 + auth_user; 错/缺 -> 401 + WWW-Authenticate: Basic.
+    var basic_h = Handler(KIND_ECHO(), "secure_basic")
+    basic_h.set_data("_auth", "basic")
+    basic_h.set_data("_auth_users", "admin:secret;user:pass123")
+    basic_h.set_data("_auth_realm", "MyApp")
+    basic_h.set_data("message", "basic auth demo")
+    router.add_route("/basic", "GET", basic_h)
+
+    # /secure: HTTPBearer. 正确 token (tok123) -> 200 + auth_token; 错/缺 -> 401 + WWW-Authenticate: Bearer.
+    var bearer_h = Handler(KIND_ECHO(), "secure_bearer")
+    bearer_h.set_data("_auth", "bearer")
+    bearer_h.set_data("_auth_tokens", "tok123;abcd456")
+    bearer_h.set_data("_auth_realm", "MyApp")
+    bearer_h.set_data("message", "bearer auth demo")
+    router.add_route("/secure", "GET", bearer_h)
+
+    # /api: APIKey (header). 正确 key (key_abc) -> 200 + auth_apikey; 错/缺 -> 401.
+    var api_h = Handler(KIND_ECHO(), "secure_apikey")
+    api_h.set_data("_auth", "apikey:header:X-Api-Key")
+    api_h.set_data("_auth_tokens", "key_abc;key_def")
+    api_h.set_data("message", "apikey header demo")
+    router.add_route("/api", "GET", api_h)
+
+    # /api-q: APIKey (query). ?key=key_abc -> 200 + auth_apikey.
+    var apiq_h = Handler(KIND_ECHO(), "secure_apikey_query")
+    apiq_h.set_data("_auth", "apikey:query:key")
+    apiq_h.set_data("_auth_tokens", "key_abc")
+    apiq_h.set_data("message", "apikey query demo")
+    router.add_route("/api-q", "GET", apiq_h)
+
+
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
     router.add_ws_route("/ws", Handler(KIND_WS_ECHO(), "ws_echo"))
@@ -731,10 +765,11 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
 
                 # --- Handler dispatch ---
                 # (both branches below assign resp_data/status_line before use)
-                var resp_data: Dict[String, String]
-                var status_line: String
+                var resp_data: Dict[String, String] = Dict[String, String]()
+                var status_line: String = ""
                 var is_405 = False
                 var allow_methods = List[String]()
+                var auth_www = ""  # 决策-34: 401 响应的 WWW-Authenticate 头 (auth 失败时非空)
 
                 if not route_result.matched:
                     # Path exists but method not registered -> 405 + Allow (RFC 7231).
@@ -764,77 +799,105 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                     var info = ServerInfo("1.8.0", "request_id, logging, timing", uptime_s,
                                           req_num, route_keys, route_names)
 
-                    # F1: 类型化参数校验 (Goal-0002 §1.1). 校验失败 -> 422 + detail.
-                    # 校验通过 -> 继续 run_handler (handler 无感, ParamDict 仍是 String).
-                    # 这是 dispatch 唯一一处"认识类型化"的代码; 新增类型化路由 = 仅在
-                    # register_routes 用 set_data("_param_types", "name:type;name:type").
-                    var type_spec = get_param_types(route_result.handler)
-                    var type_err = validate_params(type_spec, route_result.params, query_params.values)
-                    if type_err.has_error:
-                        status_line = type_err.status_line
-                        resp_data = Dict[String, String]()
-                        resp_data["detail"] = type_err.detail
-                        resp_data["status"] = "422"
-                    else:
-                        # F2: 声明式异常映射 (Goal-0002). 命中 -> 直接返回错误响应,
-                        # 不进 run_handler. 这是 dispatch 唯一一处"认识 _error_map"的代码.
-                        var exc = match_error_map(route_result.handler,
-                                                  route_result.params, query_params.values)
-                        if exc.status_code > 0:
-                            status_line = exc.status_line
-                            resp_data = build_exception_body(exc.detail, exc.status_code)
+                    # 决策-34 (Goal-0003 P0): Security / 认证 (HTTPBasic/HTTPBearer/APIKey).
+                    # 声明式 _auth 是请求级 gate: 失败 -> 401 + WWW-Authenticate, 跳过 param 校验 + handler.
+                    var do_handler = True
+                    var auth_user_in = ""
+                    var auth_token_in = ""
+                    var auth_apikey_in = ""
+                    if "_auth" in route_result.handler.data:
+                        var auth = check_auth(route_result.handler, query_params.values)
+                        if not auth.ok:
+                            do_handler = False
+                            status_line = auth.status_line
+                            auth_www = auth.www_authenticate
+                            resp_data = Dict[String, String]()
+                            resp_data["detail"] = auth.detail
+                            resp_data["status"] = "401"
                         else:
-                            # F3a: Request 读 headers (Goal-0002). 声明式 _reads_headers CSV.
-                            # 注入 route_result.params 前缀 header_<name>; handler 直读.
-                            var req_params = route_result.params.copy()
-                            if "_reads_headers" in route_result.handler.data:
-                                inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
-                            if "_reads_cookies" in route_result.handler.data:
-                                inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
-                            if "_form_fields" in route_result.handler.data:
-                                inject_form_fields(req_params, route_result.handler.data["_form_fields"], body_str)
-                            if "_multipart" in route_result.handler.data and route_result.handler.data["_multipart"] == "true":
-                                inject_multipart_fields(req_params)
-                            # F-DI (Depends, 决策-33): 解析 handler.data["_depends"] 声明的
-                            # 依赖, 递归派发后注入 req_params (前缀 depname_outputkey).
-                            if "_depends" in route_result.handler.data:
-                                var _ = resolve_depends(router, route_result.handler, req_params,
-                                                info, query_params, body_params, List[String]())
-                            var result = run_handler(route_result.handler, req_params,
-                                                     query_params, body_params, info)
-                            status_line = result[0]
-                            resp_data = result[1].copy()
+                            auth_user_in = auth.auth_user
+                            auth_token_in = auth.auth_token
+                            auth_apikey_in = auth.auth_apikey
 
-                            # F5: SSE 一次性推送 (跳过 run_handler, 直接构造 SSE body).
-                            # F9 (v0.5.1): 支持自定义 status_code (对齐上游 FastAPI
-                            # 0.140.13 PR #15937) + 修复 `_response_headers` 被解析
-                            # 但从未发送的静默丢弃缺陷.
-                            if route_result.handler.kind == KIND_SSE():
-                                var events_csv = ""
-                                if "_stream_events" in route_result.handler.data:
-                                    events_csv = route_result.handler.data["_stream_events"]
-                                var sse_body = build_sse_body(events_csv)
-                                # 默认 200 OK; handler 可声明 _stream_status = "201 Created".
-                                var sse_status = "200 OK"
-                                if "_stream_status" in route_result.handler.data:
-                                    sse_status = route_result.handler.data["_stream_status"]
-                                var sse_extra = ""
-                                if "_response_headers" in route_result.handler.data:
-                                    var sse_hdrs = parse_response_headers(route_result.handler)
-                                    if len(sse_hdrs) > 0:
-                                        sse_extra = "\r\n".join(sse_hdrs)
-                                # send_sse_response_extra: status + extra 头统一透传
-                                # (不再硬编码 200, 不再丢弃声明的响应头).
-                                _ = external_call["send_sse_response_extra", Int](
-                                    cfd, sse_status.as_c_string_slice(),
-                                    sse_body.as_c_string_slice(), sse_extra.as_c_string_slice())
-                                var sse_dur = mw_timing(mw_chain, start_ms)
-                                mw_logging(mw_chain, req_id, method, path, query, sse_status + " (sse)", sse_dur)
-                                if external_call["get_close_after_response", Int]() != 0:
-                                    external_call["conn_done", NoneType](cfd, False)
-                                else:
-                                    external_call["conn_done", NoneType](cfd, True)
-                                continue
+                    if do_handler:
+                        # F1: 类型化参数校验 (Goal-0002 §1.1). 校验失败 -> 422 + detail.
+                        # 校验通过 -> 继续 run_handler (handler 无感, ParamDict 仍是 String).
+                        # 这是 dispatch 唯一一处"认识类型化"的代码; 新增类型化路由 = 仅在
+                        # register_routes 用 set_data("_param_types", "name:type;name:type").
+                        var type_spec = get_param_types(route_result.handler)
+                        var type_err = validate_params(type_spec, route_result.params, query_params.values)
+                        if type_err.has_error:
+                            status_line = type_err.status_line
+                            resp_data = Dict[String, String]()
+                            resp_data["detail"] = type_err.detail
+                            resp_data["status"] = "422"
+                        else:
+                            # F2: 声明式异常映射 (Goal-0002). 命中 -> 直接返回错误响应,
+                            # 不进 run_handler. 这是 dispatch 唯一一处"认识 _error_map"的代码.
+                            var exc = match_error_map(route_result.handler,
+                                                      route_result.params, query_params.values)
+                            if exc.status_code > 0:
+                                status_line = exc.status_line
+                                resp_data = build_exception_body(exc.detail, exc.status_code)
+                            else:
+                                # F3a: Request 读 headers (Goal-0002). 声明式 _reads_headers CSV.
+                                # 注入 route_result.params 前缀 header_<name>; handler 直读.
+                                var req_params = route_result.params.copy()
+                                # 决策-34: 注入认证身份 (basic->auth_user / bearer->auth_token / apikey->auth_apikey)
+                                if auth_user_in != "":
+                                    req_params["auth_user"] = auth_user_in
+                                if auth_token_in != "":
+                                    req_params["auth_token"] = auth_token_in
+                                if auth_apikey_in != "":
+                                    req_params["auth_apikey"] = auth_apikey_in
+                                if "_reads_headers" in route_result.handler.data:
+                                    inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
+                                if "_reads_cookies" in route_result.handler.data:
+                                    inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
+                                if "_form_fields" in route_result.handler.data:
+                                    inject_form_fields(req_params, route_result.handler.data["_form_fields"], body_str)
+                                if "_multipart" in route_result.handler.data and route_result.handler.data["_multipart"] == "true":
+                                    inject_multipart_fields(req_params)
+                                # F-DI (Depends, 决策-33): 解析 handler.data["_depends"] 声明的
+                                # 依赖, 递归派发后注入 req_params (前缀 depname_outputkey).
+                                if "_depends" in route_result.handler.data:
+                                    var _ = resolve_depends(router, route_result.handler, req_params,
+                                                    info, query_params, body_params, List[String]())
+                                var result = run_handler(route_result.handler, req_params,
+                                                         query_params, body_params, info)
+                                status_line = result[0]
+                                resp_data = result[1].copy()
+
+                                # F5: SSE 一次性推送 (跳过 run_handler, 直接构造 SSE body).
+                                # F9 (v0.5.1): 支持自定义 status_code (对齐上游 FastAPI
+                                # 0.140.13 PR #15937) + 修复 `_response_headers` 被解析
+                                # 但从未发送的静默丢弃缺陷.
+                                if route_result.handler.kind == KIND_SSE():
+                                    var events_csv = ""
+                                    if "_stream_events" in route_result.handler.data:
+                                        events_csv = route_result.handler.data["_stream_events"]
+                                    var sse_body = build_sse_body(events_csv)
+                                    # 默认 200 OK; handler 可声明 _stream_status = "201 Created".
+                                    var sse_status = "200 OK"
+                                    if "_stream_status" in route_result.handler.data:
+                                        sse_status = route_result.handler.data["_stream_status"]
+                                    var sse_extra = ""
+                                    if "_response_headers" in route_result.handler.data:
+                                        var sse_hdrs = parse_response_headers(route_result.handler)
+                                        if len(sse_hdrs) > 0:
+                                            sse_extra = "\r\n".join(sse_hdrs)
+                                    # send_sse_response_extra: status + extra 头统一透传
+                                    # (不再硬编码 200, 不再丢弃声明的响应头).
+                                    _ = external_call["send_sse_response_extra", Int](
+                                        cfd, sse_status.as_c_string_slice(),
+                                        sse_body.as_c_string_slice(), sse_extra.as_c_string_slice())
+                                    var sse_dur = mw_timing(mw_chain, start_ms)
+                                    mw_logging(mw_chain, req_id, method, path, query, sse_status + " (sse)", sse_dur)
+                                    if external_call["get_close_after_response", Int]() != 0:
+                                        external_call["conn_done", NoneType](cfd, False)
+                                    else:
+                                        external_call["conn_done", NoneType](cfd, True)
+                                    continue
 
                 # KIND_HTML: 直接以 text/html 发送 (动态前端页 / 运营面板).
                 # 走 send_html_response (Content-Type: text/html), 不再包 JSON.
@@ -895,6 +958,12 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         var hdrs = parse_response_headers(route_result.handler)
                         if len(hdrs) > 0:
                             extra = "\r\n".join(hdrs)
+                    # 决策-34: 401 响应的 WWW-Authenticate 头 (auth 失败时)
+                    if auth_www != "":
+                        if extra != "":
+                            extra = extra + "\r\nWWW-Authenticate: " + auth_www
+                        else:
+                            extra = "WWW-Authenticate: " + auth_www
                     if extra != "":
                         _ = external_call["send_simple_response_extra", Int](
                             cfd,
