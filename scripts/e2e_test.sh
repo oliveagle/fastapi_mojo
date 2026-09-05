@@ -716,6 +716,24 @@ APIQ_BAD=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" "$BASE/api-q?key=bad")
 if [[ "$APIQ_BAD" == "401" ]]; then pass "SEC-Q2 apikey query wrong -> 401"
 else fail "SEC-Q2 apikey query wrong -> 401" "got $APIQ_BAD"; fi
 
+# --- response_model (决策-35, Goal-0003 P1): 响应字段过滤 ---------------------------------
+# /profile 返回 name/age/email/secret, 但 _response_model="name;age" 只返回 name/age.
+echo "== response_model (决策-35) =="
+
+# /profile: 只返回 name/age (email/secret 被过滤)
+PROFILE=$(curl -sS -m 5 "$BASE/profile")
+if [[ "$PROFILE" == *'"name": "Alice"'* && "$PROFILE" == *'"age": "30"'* ]]; then pass "RM-1 response_model returns declared fields (name, age)"
+else fail "RM-1 response_model returns declared fields" "body: ${PROFILE:0:200}"; fi
+if [[ "$PROFILE" != *'"email"'* && "$PROFILE" != *'"secret"'* && "$PROFILE" != *"alice@example.com"* && "$PROFILE" != *"do_not_expose"* ]]; then pass "RM-2 response_model filters out undeclared fields (email, secret)"
+else fail "RM-2 response_model filters out undeclared fields" "body: ${PROFILE:0:200}"; fi
+if [[ "$PROFILE" != *'"method"'* && "$PROFILE" != *'"request_id"'* && "$PROFILE" != *'"handler"'* ]]; then pass "RM-3 response_model excludes meta fields (method, request_id, handler)"
+else fail "RM-3 response_model excludes meta fields" "body: ${PROFILE:0:200}"; fi
+
+# 回归: 未声明 _response_model 的路线保持原样 (含 meta 字段)
+ITEMS=$(curl -sS -m 5 "$BASE/items")
+if [[ "$ITEMS" == *'"method"'* && "$ITEMS" == *'"request_id"'* ]]; then pass "RM-4 no _response_model -> meta fields preserved (regression)"
+else fail "RM-4 no _response_model -> meta fields preserved" "body: ${ITEMS:0:200}"; fi
+
 # --- summary ---------------------------------------------------------------------
 
 echo

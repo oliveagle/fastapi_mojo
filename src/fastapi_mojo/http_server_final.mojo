@@ -552,6 +552,17 @@ def register_routes(mut router: Router) raises:
     apiq_h.set_data("message", "apikey query demo")
     router.add_route("/api-q", "GET", apiq_h)
 
+    # 决策-35 (Goal-0003 P1): response_model (响应字段过滤) demo.
+    # /profile 返回 name/age/email/secret, 但 _response_model="name;age" 只返回
+    # name/age (email/secret 被过滤) — 对齐 FastAPI response_model 语义.
+    var profile_h = Handler(KIND_STATIC(), "profile")
+    profile_h.set_data("name", "Alice")
+    profile_h.set_data("age", "30")
+    profile_h.set_data("email", "alice@example.com")
+    profile_h.set_data("secret", "do_not_expose")
+    profile_h.set_data("_response_model", "name,age")
+    router.add_route("/profile", "GET", profile_h)
+
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
     # 行为由 handler.kind 决定 (KIND_WS_*); "ws_sp" 数据项 = 必需子协议。
@@ -931,7 +942,21 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                 if duration_ms >= 0:
                     resp_data["duration_ms"] = String(duration_ms)
 
-                var body = json_serialize_dict(resp_data)
+                # 决策-35 (Goal-0003 P1): response_model (响应字段过滤, FastAPI 语义).
+                # _response_model = "f1,f2,f3" (逗号分隔) 声明响应只返回这些字段 (其余 — 含 method/
+                # path/handler/request_id 等 meta — 被过滤). 对齐 FastAPI response_model:
+                # 只返回模型定义的字段. 未声明 _response_model 的路线保持原样 (向后兼容).
+                # 注: Dict 非 ImplicitlyCopyable, 直接对 filtered 序列化 (不 reassign resp_data).
+                var body: String
+                if "_response_model" in route_result.handler.data:
+                    var model_fields = _split_csv(route_result.handler.data["_response_model"])
+                    var filtered = Dict[String, String]()
+                    for f in model_fields:
+                        if f in resp_data:
+                            filtered[f] = resp_data[f]
+                    body = json_serialize_dict(filtered)
+                else:
+                    body = json_serialize_dict(resp_data)
 
                 # Use HEAD response for HEAD requests (headers only, no body);
                 # 405 carries the Allow header.

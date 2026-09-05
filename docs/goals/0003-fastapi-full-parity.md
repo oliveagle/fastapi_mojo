@@ -35,7 +35,7 @@
 | 8 | Cookie | Cookie(...) | ✅ | — | — |
 | 9 | 依赖注入 | Depends (嵌套/缓存/安全依赖) | ✅ 嵌套 | 缓存(use_cache) | §P2 |
 | 10 | 响应类型 | JSON/HTML/PlainText/File/Streaming/ORJSON/UJSON/Response | 🟡 JSON/HTML/SSE | File/Streaming 通用/ORJSON | §P1 |
-| 11 | response_model | 只返回声明字段 + exclude/include/none | ❌ | 核心 | §P1 |
+| 11 | response_model | 只返回声明字段 + exclude/include/none | 🟡 基础字段过滤 ✅（决策-35）；exclude/include/none P2 | 核心基础已闭环 | **§P1 部分** |
 | 12 | 状态码 | status_code 声明 | ✅ | — | — |
 | 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | 🟡 error_map | 任意异常类型 handler | §P2 |
 | 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 | 用户自定义+GZip | §P2 |
@@ -90,7 +90,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | # | 任务 | 阶段 | 状态 |
 |---|------|------|------|
 | T-P0 | Security：HTTPBasic/HTTPBearer/APIKey（决策-34，ADR-0011） | P0 | ✅（e2e 160/160，cargo 299/0/4，clippy 0 警告，ldd 仅 libc，2.8M） |
-| T-P1a | response_model（响应字段过滤） | P1 | 📋 |
+| T-P1a | response_model（响应字段过滤，决策-35） | P1 | ✅（e2e RM-1..4，164/164，/profile demo） |
 | T-P1b | APIRouter / include_router | P1 | 📋 |
 | T-P1c | Lifespan (startup/shutdown) | P1 | 📋 |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | 📋 |
