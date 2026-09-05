@@ -14,14 +14,14 @@
 ## 0. 现状定位（2026-09-05 盘点）
 
 **已达成（v0.5.1 + 决策-31~36）**：
-- 单 binary 2.9M，ldd 仅 libc，env -i 干净启动，e2e **168 项**，cargo 307 单测
+- 单 binary 2.9M，ldd 仅 libc，env -i 干净启动，e2e **180 项**，cargo 307 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI/SSE(自定义 status+额外头)//metrics/结构化 access log/
   WebSocket 全链路/Depends 嵌套依赖/BackgroundTasks/CORS preflight/多 worker/
   静态文件/HTML 响应/生产化(Docker+systemd+nginx)/**安全认证
   (HTTPBasic/HTTPBearer/APIKey, 决策-34)**/**response_model 字段过滤 (决策-35)**/
-  **Lifespan startup/shutdown (决策-36)**
+  **Lifespan startup/shutdown (决策-36)**/**APIRouter prefix/tags/deps + include_router (决策-37)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -44,7 +44,7 @@
 | 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | 🟡 preflight | 完整配置 | §P2 |
 | 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ | tags/prefix/custom | §P2 |
 | 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ Basic/Bearer/APIKey（决策-34）；OAuth2/JWT P2 | OAuth2/JWT | §P2 |
-| 18 | APIRouter | include_router(prefix/tags/dependencies) | ❌ | 核心 | §P1 |
+| 18 | APIRouter | include_router(prefix/tags/dependencies) | ✅ include 时合并，dispatch 零改动（决策-37，ADR-0013）；OpenAPI tags + path 分组 | — | — |
 | 19 | Lifespan | startup/shutdown (context manager) | ✅ 声明式 env 命令（决策-36，Mojo 无闭包的等价形态）；失败→服务不启动 | — | — |
 | 20 | Pydantic | 嵌套模型/Field 约束/validator/enum/自定义类型 | ❌ | 核心 | §P1 |
 | 21 | Enum | 枚举参数/响应 | ❌ | — | §P1 |
@@ -66,7 +66,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 
 ### P1（后续 — 核心卖点闭环）
 - response_model（响应字段过滤）✅ 决策-35
-- APIRouter / include_router（prefix/tags/dependencies）
+- APIRouter / include_router（prefix/tags/dependencies）✅ 决策-37
 - Lifespan（startup/shutdown）✅ 决策-36
 - Pydantic 式嵌套 body 校验 + Field 约束
 - Enum 类型
@@ -93,11 +93,12 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 |---|------|------|------|
 | T-P0 | Security：HTTPBasic/HTTPBearer/APIKey（决策-34，ADR-0011） | P0 | ✅（e2e 160/160，cargo 299/0/4，clippy 0 警告，ldd 仅 libc，2.8M） |
 | T-P1a | response_model（响应字段过滤，决策-35） | P1 | ✅（e2e RM-1..4，164/164，/profile demo） |
-| T-P1b | APIRouter / include_router | P1 | 📋 |
+| T-P1b | APIRouter / include_router (决策-37, ADR-0013) | P1 | ✅（e2e AR-1..8, 180/180; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; OpenAPI tags + path 分组修复既有重复 key bug） |
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | 📋 |
 | T-P1e | Enum 类型 | P1 | 📋 |
 | T-P2* | 查询多值/alias、中间件 GZip、CORS 完整、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-05（Goal-0003 立项：全功能对标矩阵 25 项 + P0/P1/P2 优先级；P0 = Security 决策-34）*
+*最后更新：2026-09-05（**T-P1b APIRouter 达成（决策-37, ADR-0013）**：include 时合并（prefix/tags/deps 三层，dispatch 零改动，FFI diff=0）+ OpenAPI tags + path 分组（修复既有重复 key 非法 JSON）；e2e 180/180 / cargo 307/0/4 / clippy 0 警告 / ldd 仅 libc / 2.9M；
+上一轮：Goal-0003 立项：全功能对标矩阵 25 项 + P0/P1/P2 优先级；P0 = Security 决策-34）*

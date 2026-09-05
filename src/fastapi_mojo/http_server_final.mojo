@@ -476,6 +476,42 @@ def register_routes(mut router: Router) raises:
     di_h.set_data("_depends", "get_auth")
     router.add_route("/di", "GET", di_h)
 
+    # APIRouter (决策-37, FastAPI APIRouter/include_router):
+    #   items_api = APIRouter(prefix="/api/items", tags=["items"], dependencies=[api_env])
+    #   app.include_router(items_api)
+    #   -> 路由变 /api/items 与 /api/items/{item_id}; 全部路由携带 tags=items
+    #      + 基础依赖 api_env (输出注入 api_env_env / api_env_ver, 决策-33 机制).
+    # 路由用 KIND_ECHO (非 KIND_STATIC): ECHO 过滤 '_' 前缀内部字段, 避免
+    # _tags/_depends 泄漏到响应体 (KIND_STATIC 全量 dump 为既有行为, 不在此改动).
+    var items_api = Router()
+    items_api.set_prefix("/api/items")
+    items_api.set_tags("items")
+    items_api.add_dependency(Handler(KIND_DEPENDENCY(), "api_env"))
+    items_api.dependencies[len(items_api.dependencies) - 1].set_data("env", "api")
+    items_api.dependencies[len(items_api.dependencies) - 1].set_data("ver", "v1")
+    items_api.set_base_deps("api_env")
+    var api_list_h = Handler(KIND_ECHO(), "api_list_items")
+    api_list_h.set_data("message", "APIRouter list items")
+    items_api.add_route("/", "GET", api_list_h)           # -> /api/items
+    var api_get_h = Handler(KIND_ECHO(), "api_get_item")
+    api_get_h.set_data("message", "APIRouter get item by ID")
+    items_api.add_route("/{item_id}", "GET", api_get_h)   # -> /api/items/{item_id}
+    router.include_router(items_api)
+
+    # include 级 prefix (FastAPI app.include_router(r, prefix="/v1")):
+    var v1_api = Router()
+    v1_api.set_tags("v1")
+    var v1_ping_h = Handler(KIND_ECHO(), "v1_ping")
+    v1_ping_h.set_data("pong", "v1")
+    v1_api.add_route("/ping", "GET", v1_ping_h)           # -> /v1/ping
+    router.include_router(v1_api, "/v1")
+
+    # WS APIRouter: prefix 同样作用于 WS 端点 (-> /api/ws/echo).
+    var ws_api = Router()
+    ws_api.set_prefix("/api/ws")
+    ws_api.add_ws_route("/echo", Handler(KIND_WS_ECHO(), "ws_api_echo"))
+    router.include_router(ws_api)
+
     # F5 SSE 一次性推送 demo (Goal-0002 §1.1). 事件用 | 分隔 (避免与 data 内 , 冲突).
     var sse_h = Handler(KIND_SSE(), "sse_demo")
     sse_h.set_data("_stream_events", "hello\nworld|second event|multi\nline\nevent")

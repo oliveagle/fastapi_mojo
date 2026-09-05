@@ -464,7 +464,40 @@
   4 ignored** / clippy `-D warnings` 0 警告 / 多 worker 8 轮 stress（startup
   恰好 1 次、无崩溃、命令零损坏、无孤儿）/ ldd 仅 libc / binary 2.9M（≤4.2M）。
 
-*最后更新：2026-09-05（**决策-36 Lifespan + FFI NUL 终止契约**（ADR-0012, Goal-0003 P1）：
+- **已决策-37**：**APIRouter = prefix/tags/dependencies + include_router
+  （include 时合并，dispatch 零改动）**（ADR-0013，Goal-0003 P1 T-P1b）：
+  1. **API**（router.mojo）：`Router` 扩展 `prefix` / `tags`（CSV）/
+     `base_deps`（';'-CSV，与 `_depends` 同格式）+ setter；
+     `include_router(sub, prefix="", tags="", deps="") raises` 把 sub 的
+     HTTP 路由 + WS 路由 + 依赖表合并进 self。
+  2. **三层合并（FastAPI 叠加序）**：path = `_join_path(include_prefix,
+     sub.prefix, route.path)`（前导 / 保证、无 `//`、尾 / 去除、根路由 `/`
+     归一到 prefix）；tags = include `,` router `,` 路由 `_tags`（CSV）；
+     deps = include `;` router `;` 路由 `_depends`（';'-CSV）→ 全写入
+     `handler.data`，**dispatch 主循环零改动**（决策-33 `_depends` 机制自动
+     注入 `<depname>_<key>`）。
+  3. **OpenAPI 配套**（openapi.mojo）：操作级 `"tags":["a","b"]` 输出 +
+     **path 分组**（同 path 多 method 合并进单个 key）—— 修复**既有**重复
+     key 产生非法 JSON 的 bug（`/items` GET+POST 原输出两个 `"/items":` key）。
+  4. **demo**（http_server_final.mojo）：`items_api`（prefix `/api/items` +
+     tags + base dep `api_env`）/ `v1_api`（include 级 prefix `/v1`）/
+     `ws_api`（WS prefix → `/api/ws/echo`）；路由用 **KIND_ECHO**（ECHO 过滤
+     `_` 前缀内部字段，避免 `_tags`/`_depends` 泄漏响应体；KIND_STATIC 全量
+     dump 为既有行为，不在本决策改动——`__nested__:` 前缀同样以 `_` 开头，
+     naive 过滤不可行）。
+  5. **零 FFI 改动**：全部合并逻辑在 Mojo 注册期完成，Rust bridge 对
+     APIRouter 无感知（FFI diff = 0）。
+  验收：e2e **180/180**（+AR-1..8 共 12 项：状态码/body/base 依赖注入/根路由
+  归一/include prefix/无前缀回归/OpenAPI tags/`/items` key 分组 = 1/WS 端到端）/
+  cargo test **307 passed / 0 failed / 4 ignored** / clippy `-D warnings` 0 警告 /
+  bench 6 场景 0 errors（get_root_10k_100c ≈ 37.9k req/s，无回归）/
+  ldd 仅 libc / binary 2.9M（≤4.2M）/ router.mojo 472 LOC（<500）。
+
+*最后更新：2026-09-05（**决策-37 APIRouter**（ADR-0013, Goal-0003 P1 T-P1b）：
+APIRouter prefix/tags/dependencies + include_router (include 时合并, dispatch 零改动: path 前缀拼接 + _tags CSV + _depends ';' -CSV 三层合并 + WS prefix + 依赖表合并);
+OpenAPI 操作级 tags 输出 + path 分组 (修复既有重复 key 非法 JSON bug, /items GET+POST 同 key); KIND_ECHO demo 避免 _字段泄漏 (KIND_STATIC 全量 dump 为既有行为, 不动);
+零 FFI 改动 (FFI diff = 0)；e2e 180/180 (+AR-1..8) / cargo 307/0/4 / clippy 0 警告 / bench 0 errors / ldd 仅 libc / 2.9M；
+2026-09-05（**决策-36 Lifespan + FFI NUL 终止契约**（ADR-0012, Goal-0003 P1）：
 声明式 env 命令 (STARTUP/SHUTDOWN 换行分隔 + TIMEOUT_MS) / 语义对齐 FastAPI-uvicorn (startup 失败 → 服务不启动; 多 worker 仅主进程) /
 🔴 probe 发现 Mojo CStringSlice.as_bytes() 按 C 串语义读 NUL 忽略 slice.len → bridge fmc_slice 缓冲必须 [len]=0 契约
 (存量审计 OK; 修复 run_command_json malloc(n+1) NUL — C 时代潜伏 bug, F11 out= 日志垃圾根因; +lifespan env 尾 NUL)；

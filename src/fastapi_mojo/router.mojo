@@ -6,6 +6,47 @@
 from handler import Handler, KIND_ECHO, KIND_STATIC, KIND_TEMPLATE, KIND_WS_ECHO, KIND_WS_COUNTER
 
 
+# ========== 决策-37 (APIRouter) 辅助函数 ==========
+
+def _merge_csv(a: String, b: String, sep: Int) -> String:
+    """合并两个 CSV (sep: 44=',' / 59=';'); 空值跳过."""
+    if a == "":
+        return b
+    if b == "":
+        return a
+    return a + chr(sep) + b
+
+
+def _join_path(prefix: String, sub_prefix: String, path: String) -> String:
+    """决策-37: 路径拼接 prefix + sub_prefix + path.
+
+    规范化: 前导 / 保证; 不产生 //; 尾部 / 去除 (根 / 除外).
+    例: ("/v1", "/items", "/{id}") -> "/v1/items/{id}";
+        ("/api/items", "", "/")   -> "/api/items" (路由 '/' 归一).
+    """
+    var full = ""
+    if prefix != "":
+        if ord(prefix[byte=0]) == 47:  # '/'
+            full = prefix
+        else:
+            full = "/" + prefix
+    if sub_prefix != "":
+        var sp = sub_prefix
+        if ord(sp[byte=0]) != 47:  # '/'
+            sp = "/" + sp
+        while sp.byte_length() > 1 and ord(sp[byte=sp.byte_length() - 1]) == 47:
+            var sp_cut = String(sp[byte=0:sp.byte_length() - 1])
+            sp = sp_cut
+        full += sp
+    if full == "" or full == "/":
+        return path
+    var result = full + path
+    while result.byte_length() > 1 and ord(result[byte=result.byte_length() - 1]) == 47:
+        var result_cut = String(result[byte=0:result.byte_length() - 1])
+        result = result_cut
+    return result
+
+
 struct RouteMatch:
     """路由匹配结果."""
     var matched: Bool
@@ -142,15 +183,82 @@ struct Router:
     var routes: List[Route]
     var ws_routes: List[WsRoute]
     var dependencies: List[Handler]
+    # APIRouter (决策-37, FastAPI APIRouter): 本 router 的 prefix / tags / 基础依赖,
+    # include_router 时合并进每条路由 (path 前缀拼接 / _tags CSV / _depends ';'-CSV).
+    var prefix: String
+    var tags: String
+    var base_deps: String
 
     def __init__(out self):
         self.routes = List[Route]()
         self.ws_routes = List[WsRoute]()
         self.dependencies = List[Handler]()
+        self.prefix = ""
+        self.tags = ""
+        self.base_deps = ""
+
+    def set_prefix(mut self, p: String):
+        """APIRouter prefix (决策-37): 本 router 所有路由的路径前缀."""
+        self.prefix = p
+
+    def set_tags(mut self, t: String):
+        """APIRouter tags (决策-37): CSV, 应用到本 router 所有路由 (OpenAPI tags)."""
+        self.tags = t
+
+    def set_base_deps(mut self, d: String):
+        """APIRouter 基础依赖 (决策-37): ';' 分隔 (与 _depends 同格式),
+        本 router 所有路由都会注入这些依赖 (FastAPI APIRouter(dependencies=[...])).
+        依赖名必须已注册为 KIND_DEPENDENCY handler (add_dependency)."""
+        self.base_deps = d
 
     def add_route(mut self, path: String, method: String, handler: Handler):
         """添加路由 (handler = kind + name + data, ADR-0004)."""
         self.routes.append(Route(path, method, handler))
+
+    def include_router(mut self, sub: Router, prefix: String = "",
+                       tags: String = "", deps: String = "") raises:
+        """`include_router` (决策-37, FastAPI APIRouter/include_router 语义).
+
+        把 sub 的全部路由合并进 self:
+          path = _join_path(prefix, sub.prefix, route.path)
+          tags = include tags + sub.tags + 路由 _tags  -> handler.data["_tags"] (CSV)
+          deps = include deps + sub.base_deps + 路由 _depends -> handler.data["_depends"]
+                 (';' 分隔, 决策-33 依赖注入机制, 合并后 dispatch 零改动)
+        同时合并 sub 的依赖表 (KIND_DEPENDENCY handlers, 供 find_handler_by_name)
+        与 WS 路由 (同 prefix 语义). 合并后 sub 即被消费 (调用方通常丢弃).
+        """
+        for i in range(len(sub.routes)):
+            var r = Route(sub.routes[i].path, sub.routes[i].method, sub.routes[i].handler)
+            var new_path = _join_path(prefix, sub.prefix, r.path)
+            var h = r.handler.copy()
+            var merged_deps = _merge_csv(deps, sub.base_deps, 59)  # ';'
+            if "_depends" in h.data and h.data["_depends"] != "":
+                merged_deps = _merge_csv(merged_deps, h.data["_depends"], 59)
+            if merged_deps != "":
+                h.set_data("_depends", merged_deps)
+            var merged_tags = _merge_csv(tags, sub.tags, 44)  # ','
+            if "_tags" in h.data and h.data["_tags"] != "":
+                merged_tags = _merge_csv(merged_tags, h.data["_tags"], 44)
+            if merged_tags != "":
+                h.set_data("_tags", merged_tags)
+            self.add_route(new_path, r.method, h)
+        for i in range(len(sub.dependencies)):
+            self.add_dependency(sub.dependencies[i])
+        for i in range(len(sub.ws_routes)):
+            var w = WsRoute(sub.ws_routes[i].path, sub.ws_routes[i].handler)
+            var new_wpath = _join_path(prefix, sub.prefix, w.path)
+            var wh = w.handler.copy()
+            var w_deps = _merge_csv(deps, sub.base_deps, 59)
+            if "_depends" in wh.data and wh.data["_depends"] != "":
+                w_deps = _merge_csv(w_deps, wh.data["_depends"], 59)
+            if w_deps != "":
+                wh.set_data("_depends", w_deps)
+            var w_tags = _merge_csv(tags, sub.tags, 44)
+            if "_tags" in wh.data and wh.data["_tags"] != "":
+                w_tags = _merge_csv(w_tags, wh.data["_tags"], 44)
+            if w_tags != "":
+                wh.set_data("_tags", w_tags)
+            self.add_ws_route(new_wpath, wh)
 
     def add_dependency(mut self, handler: Handler):
         """注册一个依赖 (F-DI, 决策-33). 依赖 = KIND_DEPENDENCY 的 Handler,
@@ -306,5 +414,59 @@ def main() raises:
     assert not wp3.matched, "ws pattern too deep"
     if wp.matched and not wp2.matched and not wp3.matched:
         print("OK: ws routes (pattern + params)")
+
+    # APIRouter (决策-37): include_router prefix / tags / base_deps 合并
+    var sub = Router()
+    sub.set_prefix("/api/items")
+    sub.set_tags("items,api")
+    sub.set_base_deps("dep_a")
+    var sub_get_h = Handler(KIND_ECHO(), "api_get")
+    sub.add_route("/{id}", "GET", sub_get_h)
+    sub.add_route("/", "GET", Handler(KIND_STATIC(), "api_list"))
+    var app2 = Router()
+    app2.include_router(sub)
+    assert app2.route_count() == 2, "include route count"
+    var im1 = app2.match_route_with_params("/api/items/42", "GET")
+    assert im1.matched and im1.params["id"] == "42", "include prefix + pattern match"
+    var im2 = app2.match_route_with_params("/api/items", "GET")
+    assert im2.matched, "include route '/' normalized to prefix"
+    assert not app2.match_route("/api/items/42/extra", "GET"), "include too deep"
+    assert not app2.match_route("/api/itemsx/42", "GET"), "include path boundary"
+    assert im1.handler.data["_tags"] == "items,api", "router tags merged"
+    assert im1.handler.data["_depends"] == "dep_a", "router base deps merged"
+    # include 级 prefix + tags + deps 与路由级 _depends 合并
+    var sub2 = Router()
+    var s2h = Handler(KIND_ECHO(), "v1_ping")
+    s2h.set_data("_depends", "dep_b")
+    s2h.set_data("_tags", "route_tag")
+    sub2.add_route("/ping", "GET", s2h)
+    var app3 = Router()
+    app3.include_router(sub2, "/v1", "v1_tag", "dep_x")
+    var im3 = app3.match_route_with_params("/v1/ping", "GET")
+    assert im3.matched, "include-level prefix"
+    assert im3.handler.data["_depends"] == "dep_x;dep_b", "include deps + route deps"
+    assert im3.handler.data["_tags"] == "v1_tag,route_tag", "include tags + route tags"
+    # 无 prefix 时 include 不改变路径 (回归: 普通 include_router)
+    var sub3 = Router()
+    sub3.add_route("/plain", "GET", Handler(KIND_ECHO(), "plain"))
+    var app4 = Router()
+    app4.include_router(sub3)
+    assert app4.match_route("/plain", "GET"), "no-prefix include keeps path"
+    # WS include: prefix 同样作用于 WS 路由
+    var wsub = Router()
+    wsub.set_prefix("/api/ws")
+    wsub.add_ws_route("/echo", Handler(KIND_WS_ECHO(), "ws_api_echo"))
+    var app5 = Router()
+    app5.include_router(wsub)
+    assert app5.match_ws_route("/api/ws/echo").matched, "ws include prefix"
+    assert not app5.match_ws_route("/ws/echo").matched, "ws include no old path"
+    # _join_path 边界
+    assert _join_path("", "", "/x") == "/x", "join empty"
+    assert _join_path("/", "", "/x") == "/x", "join root prefix"
+    assert _join_path("/a/", "", "/x") == "/a/x", "join trailing slash prefix"
+    assert _join_path("a", "b", "/x") == "/a/b/x", "join no-slash prefixes"
+    assert _join_path("/api/items", "", "/") == "/api/items", "join route root"
+    if im1.matched and im2.matched and im3.matched and app5.match_ws_route("/api/ws/echo").matched:
+        print("OK: APIRouter include_router (prefix/tags/base_deps/WS, 决策-37)")
 
     print("Mojo router pattern matching test completed!")

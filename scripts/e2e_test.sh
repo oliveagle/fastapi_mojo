@@ -19,6 +19,7 @@
 #   - WebSocket: M1..M21 全 21 项 (ADR-0006~0009 握手/帧/子协议/鉴权/并发/合并帧)
 #   - 服务器攻击后仍存活
 #   - Lifespan: 声明式 startup/shutdown 命令 (决策-36, LS-1..LS-4)
+#   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -798,6 +799,38 @@ if [[ "$LS2_GONE" == 1 && "$LS2_CODE" == "000" ]] && grep -q "refusing to serve"
 else
     fail "LS-4 failing startup (rc!=0) -> process exits, never serves" "gone=$LS2_GONE code=$LS2_CODE; log: $(tail -3 "$LS_DIR/fail.log")"
 fi
+
+# --- APIRouter (决策-37) ---------------------------------------------------------
+
+echo "== APIRouter (prefix/tags/base_deps/include_router, 决策-37) =="
+# AR-1: /api/items/{item_id} — router 级 prefix + pattern 参数
+expect_code "AR-1a /api/items/42 -> 200" 200 "$BASE/api/items/42"
+expect_body_contains "AR-1b /api/items/42 body item_id=42" '"item_id": "42"' "$BASE/api/items/42"
+# AR-3: 基础依赖注入 (APIRouter dependencies=[api_env] -> 决策-33 机制)
+expect_body_contains "AR-3a base dep api_env env=api" '"api_env_env": "api"' "$BASE/api/items/42"
+expect_body_contains "AR-3b base dep api_env ver=v1" '"api_env_ver": "v1"' "$BASE/api/items/42"
+# AR-2: 路由 '/' 归一到 prefix (/ -> /api/items)
+expect_code "AR-2 /api/items (root via prefix) -> 200" 200 "$BASE/api/items"
+# AR-4: include 级 prefix (app.include_router(r, prefix="/v1"))
+expect_code "AR-4a /v1/ping -> 200" 200 "$BASE/v1/ping"
+expect_body_contains "AR-4b /v1/ping body pong=v1" '"pong": "v1"' "$BASE/v1/ping"
+# AR-5: 无前缀回归 (原 /items 不受 APIRouter 影响)
+expect_code "AR-5 /items no regression" 200 "$BASE/items"
+# AR-6: OpenAPI tags (APIRouter tags=[items] -> 操作级 "tags":["items"])
+API_JSON=$(http_body "$BASE/openapi.json")
+if [[ "$API_JSON" == *'"tags":["items"]'* ]]; then pass "AR-6a openapi tags [items]"
+else fail "AR-6a openapi tags [items]" "missing tags in openapi: ${API_JSON:0:120}"; fi
+if [[ "$API_JSON" == *'"tags":["v1"]'* ]]; then pass "AR-6b openapi tags [v1] (include 级)"
+else fail "AR-6b openapi tags [v1] (include 级)" "missing tags v1 in openapi: ${API_JSON:0:120}"; fi
+# AR-7: OpenAPI path 分组 — /items 仅一个 key (GET+POST 合并, 修复重复 key 非法 JSON)
+ITEMS_KEY_COUNT=$(printf '%s' "$API_JSON" | grep -o '"/items":' | wc -l)
+if [[ "$ITEMS_KEY_COUNT" == "1" ]]; then pass "AR-7 openapi /items grouped under one key"
+else fail "AR-7 openapi /items grouped under one key" "key count=$ITEMS_KEY_COUNT (expected 1)"; fi
+# AR-8: WS prefix (/api/ws/echo 端到端 echo, fmtool wsbench)
+WS_API_OUT=$("$FMTOOL" wsbench "$PORT" /api/ws/echo 2 1 2>&1)
+WS_API_OK=$(printf '%s' "$WS_API_OUT" | grep -c ',200$')
+if [[ "$WS_API_OK" == "2" ]]; then pass "AR-8 WS prefix /api/ws/echo echo OK"
+else fail "AR-8 WS prefix /api/ws/echo echo OK" "wsbench output: $WS_API_OUT"; fi
 
 # --- summary ---------------------------------------------------------------------
 

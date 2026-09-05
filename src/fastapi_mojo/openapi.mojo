@@ -85,6 +85,31 @@ def _generate_operation(route: Route) raises -> String:
     sb.append("\"operationId\":\"" + json_escape(method_lower + "_" + route.handler.name) + "\",")
     sb.append("\"summary\":\"" + json_escape(route.handler.name) + "\",")
 
+    # tags (决策-37 APIRouter): handler.data["_tags"] CSV -> "tags":["a","b"].
+    if "_tags" in route.handler.data:
+        var tags_csv = route.handler.data["_tags"]
+        var tarr = List[String]()
+        var tn = tags_csv.byte_length()
+        var tstart = 0
+        var ti = 0
+        while ti <= tn:
+            var tis = (ti == tn) or (ord(tags_csv[byte=ti]) == 44)  # ','
+            if tis:
+                if ti > tstart:
+                    var tp = String(tags_csv[byte=tstart:ti])
+                    var tb = 0
+                    var te = tp.byte_length()
+                    while tb < te and (ord(tp[byte=tb]) == 32 or ord(tp[byte=tb]) == 9):
+                        tb += 1
+                    while te > tb and (ord(tp[byte=te - 1]) == 32 or ord(tp[byte=te - 1]) == 9):
+                        te -= 1
+                    if te > tb:
+                        tarr.append("\"" + json_escape(String(tp[byte=tb:te])) + "\"")
+                tstart = ti + 1
+            ti += 1
+        if len(tarr) > 0:
+            sb.append("\"tags\":" + "[" + ",".join(tarr) + "],")
+
     # parameters: path 段 + _reads_headers + query(_param_types 里的 query)
     var params = List[String]()
     var path_params = _extract_path_params(route.path)
@@ -191,15 +216,31 @@ def generate_openapi(router: Router, title: String, version: String) raises -> S
     var sb = StringBuilder()
     sb.append("{\"openapi\":\"3.0.3\",")
     sb.append("\"info\":{\"title\":\"" + json_escape(title) + "\",\"version\":\"" + json_escape(version) + "\"},")
-    # paths
+    # paths (决策-37: 同 path 多 method 合并进单个 key — 修复重复 key 产生非法 JSON;
+    # APIRouter 合并后 app 路由表天然可能出现同 path 不同 method, 必须分组).
     sb.append("\"paths\":{")
     var first = True
     for i in range(router.route_count()):
+        # 去重: 若同 path 已在更早 index 出现过则跳过 (逗号只加在实际输出的组之间)
+        var seen = False
+        for k in range(i):
+            if router.routes[k].path == router.routes[i].path:
+                seen = True
+                break
+        if seen:
+            continue
         if not first:
             sb.append(",")
         first = False
         sb.append("\"" + json_escape(_path_to_openapi(router.routes[i].path)) + "\":{")
-        sb.append("\"" + router.routes[i].method + "\":{" + _generate_operation(router.routes[i]) + "}")
+        var first_method = True
+        for j in range(router.route_count()):
+            if router.routes[j].path != router.routes[i].path:
+                continue
+            if not first_method:
+                sb.append(",")
+            first_method = False
+            sb.append("\"" + router.routes[j].method + "\":{" + _generate_operation(router.routes[j]) + "}")
         sb.append("}")
     sb.append("}}")
     return sb.take()
