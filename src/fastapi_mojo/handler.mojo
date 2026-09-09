@@ -104,6 +104,14 @@ def KIND_SSE() -> Int:
     return 200
 
 
+def KIND_OAUTH2_TOKEN() -> Int:
+    """决策-44 (Goal-0003 P2 #17): OAuth2 password flow token 端点 (POST form).
+    真实逻辑在 dispatch 的 security_jwt.handle_oauth2_token (需 body_str, run_handler
+    签名不带 — SSE 同型特例). 声明: _auth_users "u:p;u:p" / _jwt_secret / _jwt_ttl_sec.
+    run_handler 此分支只返回占位 (dispatch 随即覆写 resp_data/status_line)."""
+    return 201
+
+
 # ---------- Handler 类型 ----------
 
 struct Handler:
@@ -345,6 +353,14 @@ def run_handler(handler: Handler,
                 continue
             resp[k] = handler.data[k]
         return ("200 OK", resp^)
+
+    # OAUTH2_TOKEN (决策-44): 占位返回; dispatch 检测到此 kind 后调
+    # security_jwt.handle_oauth2_token 覆写 status_line/resp_data (需 body_str,
+    # 与 SSE 同型). 占位保持 run_handler 单一入口契约 (所有 kind 必须有分支).
+    elif handler.kind == KIND_OAUTH2_TOKEN():
+        var resp0 = Dict[String, String]()
+        resp0["message"] = "oauth2 token endpoint"
+        return ("200 OK", resp0^)
 
     else:
         var resp = Dict[String, String]()

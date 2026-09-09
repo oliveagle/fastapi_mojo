@@ -27,6 +27,7 @@ use std::os::raw::{c_char, c_int, c_long, c_void};
 // ===== 子模块导入 (全部 `as` 别名以避免与 extern "C" fn 同名冲突) =====
 
 use super::cmd::run_command_json as cmd_run_command_json;
+use super::crypto::{b64url_encode as crypto_b64url_encode, hmac_sha256 as crypto_hmac_sha256};
 use super::init_workers::{get_worker_id as init_get_worker_id, init_workers as init_init_workers};
 use super::io::{
     conn_done as io_conn_done, recv_and_parse as io_recv_and_parse, set_listen_fd as io_set_listen_fd,
@@ -539,6 +540,59 @@ pub extern "C" fn run_command_json(cmd: *const c_char, timeout_ms: c_long) -> CS
 
 #[no_mangle]
 pub extern "C" fn run_command_free(ptr: *const c_char) {
+    if !ptr.is_null() {
+        unsafe { free(ptr as *mut c_void); }
+    }
+}
+
+// =====================================================================
+// 8.5 crypto (fm_hmac_sha256_b64url / _free) — 决策-44 OAuth2/JWT (HS256)
+// =====================================================================
+// JWT 签名原语: HMAC-SHA256(key, signing_input) -> base64url (RFC 7515, 无
+// padding). 内存契约与 run_command_json 一致: malloc(n+1) + NUL 终止
+// (决策-36: Mojo CStringSlice.as_bytes() 按 C 串读至 NUL), ptr 由
+// fm_hmac_sha256_b64url_free 走 libc free 回收. 输出为 URL-safe 字母表
+// (A-Za-z0-9-_), 无内部 NUL 风险.
+//
+// len 参数语义: > 0 时按显式长度取字节 (二进制安全, 可含 NUL);
+// == 0 / 指针为 null 时回退 NUL-terminated 语义 (空 = 空输入).
+
+/// SAFETY: `p` 指向至少 `len` 可读字节; `len <= 0` 或 null 时返回空
+/// (或 NUL 截断). 调用方 (Mojo CStringSlice) 保证.
+unsafe fn c_bytes_len(p: *const c_char, len: c_long) -> Vec<u8> {
+    if len <= 0 {
+        return c_str_bytes(p);
+    }
+    if p.is_null() {
+        return Vec::new();
+    }
+    std::slice::from_raw_parts(p as *const u8, len as usize).to_vec()
+}
+
+#[no_mangle]
+pub extern "C" fn fm_hmac_sha256_b64url(
+    key: *const c_char,
+    key_len: c_long,
+    msg: *const c_char,
+    msg_len: c_long,
+) -> CSlice {
+    let kb = unsafe { c_bytes_len(key, key_len) };
+    let mb = unsafe { c_bytes_len(msg, msg_len) };
+    let sig = crypto_b64url_encode(&crypto_hmac_sha256(&kb, &mb));
+    let n = sig.len();
+    let p = unsafe { malloc(n + 1) } as *mut c_char;
+    if p.is_null() {
+        return CSlice { ptr: empty_ptr(), len: 0 };
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(sig.as_ptr(), p as *mut u8, n);
+        *p.add(n) = 0;
+    }
+    CSlice { ptr: p, len: n as c_long }
+}
+
+#[no_mangle]
+pub extern "C" fn fm_hmac_sha256_b64url_free(ptr: *const c_char) {
     if !ptr.is_null() {
         unsafe { free(ptr as *mut c_void); }
     }

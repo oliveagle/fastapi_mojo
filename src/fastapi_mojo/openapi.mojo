@@ -407,6 +407,9 @@ def _generate_operation(route: Route) raises -> String:
                 start = i + 1
             i += 1
     sb.append("\"responses\":{" + responses.take() + "}")
+    # 决策-44: _auth=oauth2 -> operation-level security (OpenAPI 3.0 OAuth2 scheme 引用)
+    if "_auth" in route.handler.data and route.handler.data["_auth"] == "oauth2":
+        sb.append(",\"security\":[{\"OAuth2PasswordBearer\":[]}]")
     return sb.take()
 
 
@@ -461,8 +464,19 @@ def generate_openapi(router: Router, title: String, version: String) raises -> S
                 s_names.append(nm)
                 var sch = _openapi_object_schema(router.routes[i].handler.data["_body_schema"])
                 schemas.append("\"" + json_escape(nm) + "\":" + sch)
+    # 决策-44: components = schemas (决策-38) + securitySchemes (oauth2 路由存在时)
+    var comps = List[String]()
     if len(schemas) > 0:
-        sb.append(",\"components\":{\"schemas\":{" + ",".join(schemas) + "}}")
+        comps.append("\"schemas\":{" + ",".join(schemas) + "}")
+    var has_oauth2 = False
+    for i in range(router.route_count()):
+        if "_auth" in router.routes[i].handler.data and router.routes[i].handler.data["_auth"] == "oauth2":
+            has_oauth2 = True
+            break
+    if has_oauth2:
+        comps.append("\"securitySchemes\":{\"OAuth2PasswordBearer\":{\"type\":\"http\",\"scheme\":\"bearer\",\"bearerFormat\":\"JWT\"}}")
+    if len(comps) > 0:
+        sb.append(",\"components\":{" + ",".join(comps) + "}")
     sb.append("}")
     return sb.take()
 

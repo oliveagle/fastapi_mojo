@@ -8,14 +8,14 @@
 from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
-from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET
+from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET, KIND_OAUTH2_TOKEN
 from params_query import parse_path_params, parse_query_params, url_decode, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params_collect, get_param_types
 from params_query_extra import apply_query_extras, get_param_aliases
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
-from request_response import _parse_cookies, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
+from request_response import _parse_cookies, _parse_form_body, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
 from std.ffi import external_call, CStringSlice  # (multipart via Rust bridge FFI)
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
@@ -24,7 +24,8 @@ from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
-from security import check_auth
+from security import AuthResult, check_auth
+from security_jwt import handle_oauth2_token, check_oauth2  # 决策-44: /token + _auth=oauth2
 from lifespan import run_lifespan_startup, run_lifespan_shutdown
 
 
@@ -194,38 +195,6 @@ def _run_background(handler: Handler, req_id: String, method: String,
                               + " out=" + out[byte=0:min(out.byte_length(), 200)])
             start = i + 1
         i += 1
-
-
-def _parse_form_body(body: String) -> Dict[String, String]:
-    """Parse application/x-www-form-urlencoded body: key1=val1&key2=val2.
-    每个 key/value 做 url_decode (percent + '+')."""
-    var out = Dict[String, String]()
-    if body == "":
-        return out^
-    var n = body.byte_length()
-    var start = 0
-    var i = 0
-    while i <= n:
-        var is_sep = (i == n) or (ord(body[byte=i]) == 38)  # '&'
-        if is_sep:
-            if i > start:
-                var pair = String(body[byte=start:i])
-                var eq = -1
-                for j in range(pair.byte_length()):
-                    if ord(pair[byte=j]) == 61:  # '='
-                        eq = j
-                        break
-                if eq > 0:
-                    var k = url_decode(String(pair[byte=0:eq]))
-                    var v = url_decode(String(pair[byte=eq + 1:pair.byte_length()]))
-                    out[k] = v
-                elif eq < 0:
-                    # 裸 key 无值 (FastAPI 兼容)
-                    var k = url_decode(pair)
-                    out[k] = ""
-            start = i + 1
-        i += 1
-    return out^
 
 
 def inject_request_headers(mut params: Dict[String, String], header_names_csv: String):
@@ -625,6 +594,30 @@ def register_routes(mut router: Router) raises:
     apiq_h.set_data("message", "apikey query demo")
     router.add_route("/api-q", "GET", apiq_h)
 
+    # 决策-44 (Goal-0003 P2 #17): OAuth2 password flow + JWT (HS256) — 对标矩阵最后一项.
+    # /token (POST form): OAuth2PasswordRequestForm 等价 (grant_type 可选/username/password
+    #   必填); 凭据 admin:s3cret; 成功 -> 200 {access_token: HS256 JWT, token_type: bearer}.
+    var tok_h = Handler(KIND_OAUTH2_TOKEN(), "oauth2_token")
+    tok_h.set_data("_auth_users", "admin:s3cret;user:pass123")
+    tok_h.set_data("_jwt_secret", "probe-secret-key-42")
+    tok_h.set_data("_jwt_ttl_sec", "3600")
+    router.add_route("/token", "POST", tok_h)
+
+    # /token-exp: 同 /token 但 ttl=-1 -> 签发即过期 (e2e: 过期 token 被 /secure-jwt 拒).
+    var tokexp_h = Handler(KIND_OAUTH2_TOKEN(), "oauth2_token_exp")
+    tokexp_h.set_data("_auth_users", "admin:s3cret;user:pass123")
+    tokexp_h.set_data("_jwt_secret", "probe-secret-key-42")
+    tokexp_h.set_data("_jwt_ttl_sec", "-1")
+    router.add_route("/token-exp", "POST", tokexp_h)
+
+    # /secure-jwt: _auth=oauth2 gate (get_current_user 等价): Bearer <JWT> 校验
+    #   (alg/exp/nbf/sub/签名) -> auth_user=sub, auth_token=token; 失败 401 + www=Bearer.
+    var sjwt_h = Handler(KIND_ECHO(), "secure_jwt")
+    sjwt_h.set_data("_auth", "oauth2")
+    sjwt_h.set_data("_jwt_secret", "probe-secret-key-42")
+    sjwt_h.set_data("message", "oauth2 jwt demo")
+    router.add_route("/secure-jwt", "GET", sjwt_h)
+
     # 决策-35/41 (Goal-0003): response_model 家族 demo (FastAPI 语义).
     # /profile: 模型 name/age/email/secret + exclude secret → 返回 name/age/email
     #   (决策-35 include + 决策-41 exclude: 从模型字段中剔除).
@@ -917,14 +910,24 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                     var auth_token_in = ""
                     var auth_apikey_in = ""
                     if "_auth" in route_result.handler.data:
-                        var auth = check_auth(route_result.handler, query_params.values)
+                        # 决策-44: oauth2 分支走 security_jwt (JWT 校验); 其余走 check_auth.
+                        # 不并入 check_auth 的原因: 其 import 会拖入 FFI 闭包, 破坏
+                        # security.mojo 的 JIT 自检 (JIT 只链 main 可达符号); dispatch
+                        # 本身已属 JIT 不可链类别 (需完整 bridge), 无回归.
+                        var auth: AuthResult
+                        if route_result.handler.data["_auth"] == "oauth2":
+                            auth = check_oauth2(route_result.handler)
+                        else:
+                            auth = check_auth(route_result.handler, query_params.values)
                         if not auth.ok:
                             do_handler = False
                             status_line = auth.status_line
                             auth_www = auth.www_authenticate
                             resp_data = Dict[String, String]()
                             resp_data["detail"] = auth.detail
-                            resp_data["status"] = "401"
+                            # 决策-44: status 从 status_line 前 3 字节推导 (不再硬编码
+                            # "401" — oauth2 空 token 等场景可产生 403 等其它码).
+                            resp_data["status"] = String(auth.status_line[byte=0:3])
                         else:
                             auth_user_in = auth.auth_user
                             auth_token_in = auth.auth_token
@@ -1029,6 +1032,17 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                     else:
                                         external_call["conn_done", NoneType](cfd, True)
                                     continue
+
+                                # 决策-44: OAuth2 token endpoint (POST form -> JWT 签发).
+                                # 需要 body_str (run_handler 签名不带) -> 此特例覆写
+                                # status_line/resp_data/www (SSE 同型先例). 不 continue:
+                                # 落到公共 send 块 (带 WWW-Authenticate 头 + 公共 meta 字段).
+                                if route_result.handler.kind == KIND_OAUTH2_TOKEN():
+                                    var tok3 = handle_oauth2_token(route_result.handler, body_str)
+                                    status_line = tok3[0]
+                                    resp_data = tok3[1].copy()
+                                    if tok3[2] != "":
+                                        auth_www = tok3[2]
 
                 # KIND_HTML: 直接以 text/html 发送 (动态前端页 / 运营面板).
                 # 走 send_html_response (Content-Type: text/html), 不再包 JSON.

@@ -1106,6 +1106,103 @@ else fail "QS-13d openapi description" "missing description"; fi
 expect_code "QS-R1 scalar last-wins 200" 200 "$BASE/typed?count=1&count=2&verbose=true"
 expect_body_contains "QS-R1 count last-wins" '"query_count": "2"' "$BASE/typed?count=1&count=2&verbose=true"
 
+# --- OAuth2/JWT (决策-44, Goal-0003 P2 #17; 对标 FastAPI 0.141.1) -------------------
+
+echo "== OAuth2/JWT (决策-44) =="
+
+# OT-1..3: /token 正常签发 (200 + 3-part JWT + token_type)
+expect_code "OT-1 /token valid 200" 200 "$BASE/token" POST "grant_type=password&username=admin&password=s3cret"
+OT1_BODY=$(http_body "$BASE/token" POST "grant_type=password&username=admin&password=s3cret")
+OT_TOK=$(printf '%s' "$OT1_BODY" | sed -n 's/.*"access_token": "\([^"]*\)".*/\1/p')
+if [[ "$OT_TOK" == eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.* && "$OT_TOK" == *.*.* && "$OT_TOK" != *.*.*.* ]]; then
+    pass "OT-2 access_token 3-part HS256 JWT"
+else
+    fail "OT-2 access_token 3-part HS256 JWT" "got: ${OT_TOK:0:80}"
+fi
+expect_body_contains "OT-3 token_type bearer" '"token_type": "bearer"' "$BASE/token" POST "grant_type=password&username=admin&password=s3cret"
+
+# OT-4/5: 服务端签发的 token 可用于 /secure-jwt (auth_user = sub)
+# (Authorization header 需 curl -H; expect_code 不支持 header, 用原始 curl)
+OT4_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Bearer $OT_TOK" "$BASE/secure-jwt")
+if [[ "$OT4_CODE" == "200" ]]; then pass "OT-4 server token on /secure-jwt 200"
+else fail "OT-4 server token on /secure-jwt 200" "got $OT4_CODE"; fi
+OT4_BODY=$(curl -s --max-time 5 -H "Authorization: Bearer $OT_TOK" "$BASE/secure-jwt")
+if [[ "$OT4_BODY" == *'"auth_user": "admin"'* ]]; then pass "OT-5 auth_user = sub (admin)"
+else fail "OT-5 auth_user = sub (admin)" "body: ${OT4_BODY:0:120}"; fi
+
+# OT-6..8: /token 凭据错 -> 401 + WWW-Authenticate: Bearer (0.141.1 教程 "Incorrect email or password")
+expect_code "OT-6 /token bad creds 401" 401 "$BASE/token" POST "grant_type=password&username=admin&password=wrong"
+expect_body_contains "OT-7 detail Incorrect email or password" '"detail": "Incorrect email or password"' "$BASE/token" POST "grant_type=password&username=admin&password=wrong"
+OT8_HDR=$(curl -s -D - -o /dev/null --max-time 5 -X POST --data "grant_type=password&username=admin&password=wrong" "$BASE/token")
+if [[ "$OT8_HDR" == *'WWW-Authenticate: Bearer'* ]]; then pass "OT-8 401 WWW-Authenticate: Bearer"
+else fail "OT-8 401 WWW-Authenticate: Bearer" "hdr: ${OT8_HDR:0:200}"; fi
+
+# OT-9..12: form 校验 (0.141.1 OAuth2PasswordRequestForm 宽松模型 + Pydantic v2 detail)
+expect_code "OT-9 grant=refresh 422" 422 "$BASE/token" POST "grant_type=refresh&username=admin&password=s3cret"
+OT10_BODY=$(http_body "$BASE/token" POST "grant_type=refresh&username=admin&password=s3cret")
+if [[ "$OT10_BODY" == *'"type":"string_pattern_mismatch"'* && "$OT10_BODY" == *'["body","grant_type"]'* && "$OT10_BODY" == *"'^password$'"* && "$OT10_BODY" == *'"input":"refresh"'* ]]; then
+    pass "OT-10 pattern mismatch detail (compact pydantic)"
+else
+    fail "OT-10 pattern mismatch detail (compact pydantic)" "body: ${OT10_BODY:0:200}"
+fi
+expect_code "OT-11 missing username+password 422" 422 "$BASE/token" POST "grant_type=password"
+OT12_BODY=$(http_body "$BASE/token" POST "grant_type=password")
+OT12_OK=0
+if [[ "$OT12_BODY" == *'"loc":["body","username"]'* && "$OT12_BODY" == *'"loc":["body","password"]'* && "$OT12_BODY" == *'"msg":"Field required"'* ]]; then
+    OT12_OK=1
+fi
+if [[ "$OT12_OK" == "1" ]]; then pass "OT-12 both missing (collected)"
+else fail "OT-12 both missing (collected)" "body: ${OT12_BODY:0:200}"; fi
+expect_code "OT-13 grant missing ok (0.141.1 permissive)" 200 "$BASE/token" POST "username=admin&password=s3cret"
+
+# OT-14..17: /secure-jwt gate (OAuth2PasswordBearer 等价)
+expect_code "OT-14 no Authorization 401" 401 "$BASE/secure-jwt"
+expect_body_contains "OT-14b Not authenticated" '"detail": "Not authenticated"' "$BASE/secure-jwt"
+OT15_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/secure-jwt")
+if [[ "$OT15_HDR" == *'WWW-Authenticate: Bearer'* ]]; then pass "OT-15 401 WWW-Authenticate: Bearer"
+else fail "OT-15 401 WWW-Authenticate: Bearer" "hdr: ${OT15_HDR:0:200}"; fi
+OT16_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Basic abc" "$BASE/secure-jwt")
+if [[ "$OT16_CODE" == "401" ]]; then pass "OT-16 wrong scheme (Basic) 401"
+else fail "OT-16 wrong scheme (Basic) 401" "got $OT16_CODE"; fi
+# 空 Bearer: curl 会吃掉尾随空格 -> fmtool raw 精确字节 "Authorization: Bearer "
+EB_HEX=$(printf 'GET /secure-jwt HTTP/1.1\r\nAuthorization: Bearer \r\nConnection: close\r\n\r\n' | od -An -tx1 -v | tr -d ' \n')
+expect_raw_status "OT-17 empty bearer -> 401" "401 Unauthorized" "$EB_HEX"
+
+# OT-18..22: pyjwt-2.13 独立签发 fixture (key = probe-secret-key-42, 与 demo _jwt_secret 一致)
+OT_T1="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInVzZXJuYW1lIjoiYWRtaW4iLCJpYXQiOjE3ODg5NzkyMDAsImV4cCI6OTk5OTk5OTk5OX0.k9rThWezzPx3d1B6pLUl_6yLHTsmfjxXKnDCo1fDPqw"
+OT_T2="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsImlhdCI6MTAwMDAwMDAwMCwiZXhwIjoxMDAwMDAzNjAwfQ.cR6qjt1cKSFDGLJ7pX8UlaLCJwzi-bu1mfD7bLjbFEA"
+OT_T3="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInVzZXJuYW1lIjoiYWRtaW4iLCJpYXQiOjE3ODg5NzkyMDAsImV4cCI6OTk5OTk5OTk5OX0.gySF8Qyh8XDJoe4OTixIRyCFjcHvngkYCfSd8AWF9QU"
+OT_T4="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6ImFkbWluIiwiZXhwIjo5OTk5OTk5OTk5fQ.893k0xg9h4jLRQAXQulmAPKX4B0Ah8HSmElFHrZPw14"
+OT_T5="eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiIsInVzZXJuYW1lIjoiYWRtaW4iLCJpYXQiOjE3ODg5NzkyMDAsImV4cCI6OTk5OTk5OTk5OX0."
+ot_probe() { # name expected token
+    local got
+    got=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Bearer $3" "$BASE/secure-jwt")
+    if [[ "$got" == "$2" ]]; then pass "$1"
+    else fail "$1" "expected $2, got $got"; fi
+}
+ot_probe "OT-18 fixture T1 valid 200" 200 "$OT_T1"
+ot_probe "OT-19 fixture T2 expired 401" 401 "$OT_T2"
+ot_probe "OT-20 fixture T3 bad sig 401" 401 "$OT_T3"
+ot_probe "OT-21 fixture T4 no sub 401" 401 "$OT_T4"
+ot_probe "OT-22 fixture T5 alg=none 401" 401 "$OT_T5"
+
+# OT-23: /token-exp (ttl=-1) 签发即过期 -> /secure-jwt 拒
+OT23_TOK=$(http_body "$BASE/token-exp" POST "grant_type=password&username=admin&password=s3cret" | sed -n 's/.*"access_token": "\([^"]*\)".*/\1/p')
+ot_probe "OT-23 issued-expired token 401" 401 "$OT23_TOK"
+
+# OT-24/25: OpenAPI securitySchemes + operation-level security
+OT_API=$(http_body "$BASE/openapi.json")
+if [[ "$OT_API" == *'"securitySchemes":{"OAuth2PasswordBearer":{"type":"http","scheme":"bearer","bearerFormat":"JWT"}}'* ]]; then
+    pass "OT-24 openapi securitySchemes OAuth2PasswordBearer"
+else
+    fail "OT-24 openapi securitySchemes OAuth2PasswordBearer" "missing in: ${OT_API:0:200}"
+fi
+if [[ "$OT_API" == *'"security":[{"OAuth2PasswordBearer":[]}'* ]]; then
+    pass "OT-25 openapi operation security"
+else
+    fail "OT-25 openapi operation security" "missing in: ${OT_API:0:200}"
+fi
+
 # --- summary ---------------------------------------------------------------------
 
 echo

@@ -33,6 +33,7 @@
 from handler import Handler
 from string_builder import StringBuilder
 from json import json_serialize_dict, json_serialize_list, json_escape
+from params_query import url_decode  # _parse_form_body (决策-44 从 http_server_final 移入)
 
 
 # ---------- 嵌套 JSON helpers ----------
@@ -91,6 +92,40 @@ def _collect_reads(handler: Handler) raises -> Tuple[List[String], List[String]]
     if "_reads_cookies" in handler.data:
         cks = _split_csv(handler.data["_reads_cookies"])
     return (hdrs^, cks^)
+
+
+# ---------- form body 解析 (决策-44: 从 http_server_final.mojo 移入, 供 security_jwt 复用; 避免 http_server_final -> security_jwt -> request_response 循环) ----------
+
+def _parse_form_body(body: String) -> Dict[String, String]:
+    """Parse application/x-www-form-urlencoded body: key1=val1&key2=val2.
+    每个 key/value 做 url_decode (percent + '+')."""
+    var out = Dict[String, String]()
+    if body == "":
+        return out^
+    var n = body.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(body[byte=i]) == 38)  # '&'
+        if is_sep:
+            if i > start:
+                var pair = String(body[byte=start:i])
+                var eq = -1
+                for j in range(pair.byte_length()):
+                    if ord(pair[byte=j]) == 61:  # '='
+                        eq = j
+                        break
+                if eq > 0:
+                    var k = url_decode(String(pair[byte=0:eq]))
+                    var v = url_decode(String(pair[byte=eq + 1:pair.byte_length()]))
+                    out[k] = v
+                elif eq < 0:
+                    # 裸 key 无值 (FastAPI 兼容)
+                    var k = url_decode(pair)
+                    out[k] = ""
+            start = i + 1
+        i += 1
+    return out^
 
 
 def _parse_cookies(cookie_header: String) -> Dict[String, String]:

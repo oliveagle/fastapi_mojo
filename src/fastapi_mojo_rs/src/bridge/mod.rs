@@ -31,6 +31,7 @@
 //!     `cargo test --release -- --ignored --test-threads=1` 单独跑.
 
 pub mod cmd;
+pub mod crypto;
 pub mod cors;
 pub mod ffi;
 pub mod conn;
@@ -60,6 +61,9 @@ mod gzip_tests;
 
 #[cfg(test)]
 mod cors_tests;
+
+#[cfg(test)]
+mod crypto_tests;
 
 #[cfg(test)]
 mod conn_tests;
