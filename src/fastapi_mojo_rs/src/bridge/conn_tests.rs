@@ -351,6 +351,27 @@ fn fh_body_utf8_invalid_400() {
 }
 
 #[test]
+fn fh_multipart_binary_body_in_hdr_ok() {
+    // P0 回归: body 一次 recv 与 header 同到 (copy >= content_length) 时,
+    // multipart/form-data 含二进制 part (\xff\x00 非 UTF-8) 不得 400.
+    let hdr = b"POST /upload HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: 3\r\n\r\n\xff\x00\xfe";
+    let rh = finish_header(hdr, 1024 * 1024).expect("multipart binary body must not 400");
+    assert!(!rh.need_body);
+    assert_eq!(rh.body_got, 3);
+    assert_eq!(rh.content_length, 3);
+}
+
+#[test]
+fn fh_non_multipart_binary_body_in_hdr_400() {
+    // 对照: 非 multipart 的非法 UTF-8 body 仍 400 (既有行为不变).
+    let hdr = b"POST /x HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\n\r\n\xff\x00\xfe";
+    assert_eq!(
+        finish_header(hdr, 1024 * 1024).unwrap_err(),
+        ("400 Bad Request", "Invalid UTF-8 in request body")
+    );
+}
+
+#[test]
 fn fh_malformed_request_line_400() {
     let hdr = b"BLAH\r\n\r\n";
     assert_eq!(

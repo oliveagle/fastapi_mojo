@@ -10,7 +10,8 @@
 
 use super::super::parse::{
     bounded_strstr, connection_directive, expect_100_continue, find_header_end,
-    get_header_value_ci, has_header_name_ci, utf8_valid, ConnDirective,
+    get_header_value_ci, has_header_name_ci, is_multipart_form_data, utf8_valid,
+    ConnDirective,
 };
 use super::{MAX_BODY, MAX_METHOD, MAX_PATH, MAX_QUERY};
 
@@ -94,9 +95,11 @@ pub fn finish_header(
     }
     let copy = body_in_hdr.min(content_length);
     if copy >= content_length {
-        // body 已齐: UTF-8 校验
+        // body 已齐: UTF-8 校验. multipart/form-data 允许二进制 part (RFC 7578),
+        // 跳过 — 与 io.rs phase-1/EOF 路径的豁免一致 (P0: 小 body 一次 recv
+        // 到齐时此处曾误 400, 破坏 multipart 二进制 roundtrip).
         let body = &hdr[hdr_end..hdr_end + copy];
-        if !utf8_valid(body) {
+        if !is_multipart_form_data(header) && !utf8_valid(body) {
             return Err(("400 Bad Request", "Invalid UTF-8 in request body"));
         }
         return Ok(RequestHeader {

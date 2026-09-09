@@ -52,55 +52,10 @@ use super::ws_session_ffi::{get_ws_ping_max, ws_send_close};
 use crate::bridge::conn::Conn;
 use crate::ws::{ws_parser_feed, ws_reply_close_buf, ws_write_message};
 /// CT = multipart/form-data -> 跳过 body UTF-8 校验 (RFC 2046/RFC 7578 允许
-/// 任意二进制 part body). 找到 "content-type: multipart/form-data" 即返回 true.
+/// 任意二进制 part body). 判定委托纯函数 `bridge::parse::is_multipart_form_data`
+/// (与 finish_header 的 multipart 豁免共用同一实现, 消除双份扫描逻辑).
 fn hdr_is_multipart(c: &super::conn::Conn) -> bool {
-    let hdr = &c.hdr[..c.hdr_total];
-    let needle = b"content-type:";
-    let mut i = 0;
-    while i + needle.len() < hdr.len() {
-        if i == 0 || hdr[i - 1] == b'\n' {
-            let mut ok = true;
-            for j in 0..needle.len() {
-                let c1 = hdr[i + j];
-                let c2 = needle[j];
-                let l1 = if c1.is_ascii_uppercase() { c1 + 32 } else { c1 };
-                let l2 = if c2.is_ascii_uppercase() { c2 + 32 } else { c2 };
-                if l1 != l2 {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
-                let mut j = i + needle.len();
-                while j < hdr.len() && (hdr[j] == b' ' || hdr[j] == b'\t') {
-                    j += 1;
-                }
-                let val_start = j;
-                while j < hdr.len() && hdr[j] != b'\r' && hdr[j] != b'\n' {
-                    j += 1;
-                }
-                let val = &hdr[val_start..j];
-                let mp = b"multipart/form-data";
-                if val.len() >= mp.len() {
-                    let mut match_mp = true;
-                    for k in 0..mp.len() {
-                        let c1 = val[k];
-                        let c2 = mp[k];
-                        let l1 = if c1.is_ascii_uppercase() { c1 + 32 } else { c1 };
-                        if l1 != c2 {
-                            match_mp = false;
-                            break;
-                        }
-                    }
-                    if match_mp {
-                        return true;
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    false
+    bridge_parse::is_multipart_form_data(&c.hdr[..c.hdr_total])
 }
 
 

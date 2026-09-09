@@ -353,3 +353,27 @@ fn expect_100_embedded_token() {
     let hdr = b"POST / HTTP/1.1\r\nExpect: x100-continue\r\n\r\n";
     assert!(expect_100_continue(hdr));
 }
+
+// ---------- is_multipart_form_data (决策-39: finish_header 豁免共用) ----------
+
+#[test]
+fn is_multipart_form_data_basic() {
+    let hdr = b"POST /u HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=x\r\n\r\n";
+    assert!(is_multipart_form_data(hdr));
+}
+
+#[test]
+fn is_multipart_form_data_case_insensitive() {
+    assert!(is_multipart_form_data(b"POST / HTTP/1.1\r\ncontent-type: multipart/form-data\r\n\r\n"));
+    assert!(is_multipart_form_data(
+        b"POST / HTTP/1.1\r\nCONTENT-TYPE:  Multipart/Form-Data; boundary=b\r\n\r\n"
+    ));
+}
+
+#[test]
+fn is_multipart_form_data_other_ct() {
+    assert!(!is_multipart_form_data(b"POST / HTTP/1.1\r\nContent-Type: application/json\r\n\r\n"));
+    assert!(!is_multipart_form_data(b"POST / HTTP/1.1\r\n\r\n"));
+    // 前缀不完整 (无 /form-data) 不算 multipart
+    assert!(!is_multipart_form_data(b"POST / HTTP/1.1\r\nContent-Type: multipart\r\n\r\n"));
+}

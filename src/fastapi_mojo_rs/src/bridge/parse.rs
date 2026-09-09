@@ -153,6 +153,18 @@ pub fn get_header_value_ci(hdr: &[u8], name: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// header 块是否为 `Content-Type: multipart/form-data` (RFC 7578).
+/// multipart 允许二进制 part body (0..255 任意字节, 非必合法 UTF-8),
+/// 故 body UTF-8 校验路径必须跳过该类型 — io.rs 的 phase-1/EOF 豁免的
+/// 纯函数版 (`hdr_is_multipart` 委托此函数; `finish_header` 亦用).
+pub fn is_multipart_form_data(hdr: &[u8]) -> bool {
+    const MP: &[u8] = b"multipart/form-data";
+    match get_header_value_ci(hdr, b"Content-Type") {
+        Some(v) => v.len() >= MP.len() && v[..MP.len()].eq_ignore_ascii_case(MP),
+        None => false,
+    }
+}
+
 /// Connection 头指令扫描结果 (端口 C `connection_directive` 的 0/1/2)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnDirective {
