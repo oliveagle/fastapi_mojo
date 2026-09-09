@@ -165,3 +165,59 @@ def is_nested_marker(v: String) -> Bool:
            ord(v[byte=2]) == 110 and ord(v[byte=3]) == 101 and ord(v[byte=4]) == 115 and \
            ord(v[byte=5]) == 116 and ord(v[byte=6]) == 101 and ord(v[byte=7]) == 100 and \
            ord(v[byte=8]) == 95 and ord(v[byte=9]) == 95 and ord(v[byte=10]) == 58
+
+
+# ---------- 决策-41: response_model exclude/include/exclude_none (ADR-0016) ----------
+
+def _csv_contains(csv: List[String], v: String) -> Bool:
+    """v 是否在 CSV 列表 (手动 trim 后精确匹配; Mojo 1.0.0 String 无 .trim())."""
+    for it in csv:
+        var b = 0
+        var e = it.byte_length()
+        while b < e and (ord(it[byte=b]) == 32 or ord(it[byte=b]) == 9):
+            b += 1
+        while e > b and (ord(it[byte=e - 1]) == 32 or ord(it[byte=e - 1]) == 9):
+            e -= 1
+        if e > b:
+            if String(it[byte=b:e]) == v:
+                return True
+        elif v == "":
+            return True
+    return False
+
+
+def _is_null_value(v: String) -> Bool:
+    """exclude_none 判定: 空串, 或 __nested__:null (真实 JSON null).
+    注意: 普通值 "null" 会被序列化为 JSON 字符串 "null", 不算 null (FastAPI
+    语义里 exclude_none 只去 None, 不去 "null" 字符串)."""
+    if v == "":
+        return True
+    return v.startswith("__nested__:null")
+
+
+def response_model_body(handler: Handler, resp_data: Dict[String, String]) raises -> String:
+    """决策-41: response_model 过滤 (FastAPI/Pydantic 语义) — 单一 dispatch 调用点.
+
+    声明式 (handler.data):
+      - _response_model      = "f1,f2,..."  include: 只返回模型字段 (决策-35 既有)
+      - _response_exclude    = "a,b"        exclude: 从模型字段中剔除 (FastAPI
+        response_model_exclude 语义: 作用于模型字段, 无模型时 no-op — 上游对齐)
+      - _response_exclude_none = "true"     exclude_none: 剔除 null 值字段
+        (扁平 string dict 等价: 空串 / __nested__:null)
+    应用序: include -> exclude -> exclude_none. 未声明 _response_model 时
+    整体 no-op (FastAPI: 无 response_model 时 include/exclude 不影响响应).
+    """
+    if "_response_model" not in handler.data:
+        return json_serialize_dict(resp_data)
+    var model_fields = _split_csv(handler.data["_response_model"])
+    var exclude = List[String]()
+    if "_response_exclude" in handler.data:
+        exclude = _split_csv(handler.data["_response_exclude"])
+    var exclude_none = "_response_exclude_none" in handler.data and handler.data["_response_exclude_none"] == "true"
+    var filtered = Dict[String, String]()
+    for f in model_fields:
+        if f in resp_data and not _csv_contains(exclude, f):
+            var v = resp_data[f]
+            if not (exclude_none and _is_null_value(v)):
+                filtered[f] = v
+    return json_serialize_dict(filtered)

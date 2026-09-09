@@ -22,6 +22,7 @@
 #   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
 #   - Body validation: _body_schema + Field 约束 + Enum + FastAPI 422 detail (决策-38, BS-1..BS-12)
 #   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
+#   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -724,12 +725,12 @@ else fail "SEC-Q2 apikey query wrong -> 401" "got $APIQ_BAD"; fi
 # /profile 返回 name/age/email/secret, 但 _response_model="name;age" 只返回 name/age.
 echo "== response_model (决策-35) =="
 
-# /profile: 只返回 name/age (email/secret 被过滤)
+# /profile: 模型 name/age/email/secret + exclude secret -> 返回 name/age/email
 PROFILE=$(curl -sS -m 5 "$BASE/profile")
-if [[ "$PROFILE" == *'"name": "Alice"'* && "$PROFILE" == *'"age": "30"'* ]]; then pass "RM-1 response_model returns declared fields (name, age)"
-else fail "RM-1 response_model returns declared fields" "body: ${PROFILE:0:200}"; fi
-if [[ "$PROFILE" != *'"email"'* && "$PROFILE" != *'"secret"'* && "$PROFILE" != *"alice@example.com"* && "$PROFILE" != *"do_not_expose"* ]]; then pass "RM-2 response_model filters out undeclared fields (email, secret)"
-else fail "RM-2 response_model filters out undeclared fields" "body: ${PROFILE:0:200}"; fi
+if [[ "$PROFILE" == *'"name": "Alice"'* && "$PROFILE" == *'"age": "30"'* && "$PROFILE" == *'"email": "alice@example.com"'* ]]; then pass "RM-1 response_model returns model fields (name, age, email)"
+else fail "RM-1 response_model returns model fields" "body: ${PROFILE:0:200}"; fi
+if [[ "$PROFILE" != *'"secret"'* && "$PROFILE" != *"do_not_expose"* ]]; then pass "RM-2 response_model_exclude removes secret from model"
+else fail "RM-2 response_model_exclude removes secret" "body: ${PROFILE:0:200}"; fi
 if [[ "$PROFILE" != *'"method"'* && "$PROFILE" != *'"request_id"'* && "$PROFILE" != *'"handler"'* ]]; then pass "RM-3 response_model excludes meta fields (method, request_id, handler)"
 else fail "RM-3 response_model excludes meta fields" "body: ${PROFILE:0:200}"; fi
 
@@ -737,6 +738,21 @@ else fail "RM-3 response_model excludes meta fields" "body: ${PROFILE:0:200}"; f
 ITEMS=$(curl -sS -m 5 "$BASE/items")
 if [[ "$ITEMS" == *'"method"'* && "$ITEMS" == *'"request_id"'* ]]; then pass "RM-4 no _response_model -> meta fields preserved (regression)"
 else fail "RM-4 no _response_model -> meta fields preserved" "body: ${ITEMS:0:200}"; fi
+
+# RM-5: exclude_none=true -> 空值字段 (note) 剔除
+PNONE=$(curl -sS -m 5 "$BASE/profile-none")
+if [[ "$PNONE" == *'"name": "Bob"'* && "$PNONE" != *'"note"'* ]]; then pass "RM-5 exclude_none drops empty field"
+else fail "RM-5 exclude_none drops empty field" "body: ${PNONE:0:200}"; fi
+
+# RM-6: 对照: exclude_none 缺省 -> note:"" 保留
+PKEEP=$(curl -sS -m 5 "$BASE/profile-keep")
+if [[ "$PKEEP" == *'"name": "Bob"'* && "$PKEEP" == *'"note": ""'* ]]; then pass "RM-6 exclude_none default keeps empty field"
+else fail "RM-6 exclude_none default keeps empty field" "body: ${PKEEP:0:200}"; fi
+
+# RM-7: 无 _response_model 时 exclude/exclude_none 是 no-op (FastAPI 对齐)
+RNOOP=$(curl -sS -m 5 "$BASE/rm-noop")
+if [[ "$RNOOP" == *'"message": "noop"'* && "$RNOOP" == *'"method"'* ]]; then pass "RM-7 exclude without response_model is no-op (FastAPI parity)"
+else fail "RM-7 exclude without response_model is no-op" "body: ${RNOOP:0:200}"; fi
 
 # --- lifespan (决策-36, Goal-0003 P1) -------------------------------------------------
 # FastAPI `lifespan` 上下文管理器: yield 前 = startup, yield 后 = shutdown;

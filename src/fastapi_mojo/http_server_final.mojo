@@ -14,7 +14,7 @@ from params_json import parse_body_json
 from params_typed import validate_params_collect, get_param_types
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
-from request_response import _parse_cookies, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers
+from request_response import _parse_cookies, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
 from std.ffi import external_call, CStringSlice  # (multipart via Rust bridge FFI)
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
@@ -606,16 +606,40 @@ def register_routes(mut router: Router) raises:
     apiq_h.set_data("message", "apikey query demo")
     router.add_route("/api-q", "GET", apiq_h)
 
-    # 决策-35 (Goal-0003 P1): response_model (响应字段过滤) demo.
-    # /profile 返回 name/age/email/secret, 但 _response_model="name;age" 只返回
-    # name/age (email/secret 被过滤) — 对齐 FastAPI response_model 语义.
+    # 决策-35/41 (Goal-0003): response_model 家族 demo (FastAPI 语义).
+    # /profile: 模型 name/age/email/secret + exclude secret → 返回 name/age/email
+    #   (决策-35 include + 决策-41 exclude: 从模型字段中剔除).
     var profile_h = Handler(KIND_STATIC(), "profile")
     profile_h.set_data("name", "Alice")
     profile_h.set_data("age", "30")
     profile_h.set_data("email", "alice@example.com")
     profile_h.set_data("secret", "do_not_expose")
-    profile_h.set_data("_response_model", "name,age")
+    profile_h.set_data("_response_model", "name,age,email,secret")
+    profile_h.set_data("_response_exclude", "secret")
     router.add_route("/profile", "GET", profile_h)
+
+    # /profile-none: 模型 name/note + exclude_none=true → note(空串=null 等价)剔除
+    var pnone_h = Handler(KIND_STATIC(), "profile_none")
+    pnone_h.set_data("name", "Bob")
+    pnone_h.set_data("note", "")
+    pnone_h.set_data("_response_model", "name,note")
+    pnone_h.set_data("_response_exclude_none", "true")
+    router.add_route("/profile-none", "GET", pnone_h)
+
+    # /profile-keep: 同数据但 exclude_none 缺省 → note:"" 保留 (回归对照)
+    var pkeep_h = Handler(KIND_STATIC(), "profile_keep")
+    pkeep_h.set_data("name", "Bob")
+    pkeep_h.set_data("note", "")
+    pkeep_h.set_data("_response_model", "name,note")
+    router.add_route("/profile-keep", "GET", pkeep_h)
+
+    # /rm-noop: 声明 _response_exclude 但**无** _response_model → no-op (FastAPI:
+    # 无 response_model 时 include/exclude/exclude_none 不影响响应) — meta 字段全保留
+    var rnoop_h = Handler(KIND_ECHO(), "rm_noop")
+    rnoop_h.set_data("message", "noop")
+    rnoop_h.set_data("_response_exclude", "message")
+    rnoop_h.set_data("_response_exclude_none", "true")
+    router.add_route("/rm-noop", "GET", rnoop_h)
 
 
     # WebSocket 端点 (ADR-0007): user code = data, 同 HTTP 路由注册模式。
@@ -1013,21 +1037,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                 if duration_ms >= 0:
                     resp_data["duration_ms"] = String(duration_ms)
 
-                # 决策-35 (Goal-0003 P1): response_model (响应字段过滤, FastAPI 语义).
-                # _response_model = "f1,f2,f3" (逗号分隔) 声明响应只返回这些字段 (其余 — 含 method/
-                # path/handler/request_id 等 meta — 被过滤). 对齐 FastAPI response_model:
-                # 只返回模型定义的字段. 未声明 _response_model 的路线保持原样 (向后兼容).
-                # 注: Dict 非 ImplicitlyCopyable, 直接对 filtered 序列化 (不 reassign resp_data).
-                var body: String
-                if "_response_model" in route_result.handler.data:
-                    var model_fields = _split_csv(route_result.handler.data["_response_model"])
-                    var filtered = Dict[String, String]()
-                    for f in model_fields:
-                        if f in resp_data:
-                            filtered[f] = resp_data[f]
-                    body = json_serialize_dict(filtered)
-                else:
-                    body = json_serialize_dict(resp_data)
+                # 决策-35/41 (Goal-0003): response_model (include) + exclude + exclude_none
+                # (FastAPI/Pydantic 语义, 单一调用点 response_model_body; ADR-0016).
+                var body = response_model_body(route_result.handler, resp_data)
 
                 # Use HEAD response for HEAD requests (headers only, no body);
                 # 405 carries the Allow header.
