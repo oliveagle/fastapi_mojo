@@ -493,7 +493,67 @@
   bench 6 场景 0 errors（get_root_10k_100c ≈ 37.9k req/s，无回归）/
   ldd 仅 libc / binary 2.9M（≤4.2M）/ router.mojo 472 LOC（<500）。
 
-*最后更新：2026-09-05（**决策-37 APIRouter**（ADR-0013, Goal-0003 P1 T-P1b）：
+- **已决策-38**：**Pydantic 式 body 校验 + Field 约束 + Enum（声明式 spec，
+  统一 FastAPI 422 detail）**（ADR-0014，Goal-0003 P1 T-P1d+T-P1e）：
+  1. **`_body_schema` 声明式 spec**（body_schema.mojo 315 LOC = spec 层）：
+     `字段:type[=默认][|约束]`，类型 str/int/float/bool/obj/arr + `T[]`
+     （数组）+ `T[v1,v2]`（enum）+ `obj{子spec}`（嵌套递归同一文法）；
+     约束 `gt/ge/lt/le=N` / `len=N-M` / `items=N-M`；畸形 spec 注册期
+     `check_body_schemas` fail-fast（启动即 fail）。
+  2. **统一 422 detail（FastAPI/Pydantic v2，全错误收集）**（body_validate.mojo
+     313 LOC = 校验层 + 21 项 `check()` 真断言自测）：参数校验改 collect 模式
+     （`validate_params_collect`，loc `["path"/"query",x]`）+ body 校验
+     （loc `["body",x]` / 嵌套 `["body","meta","city"]` / 元素
+     `["body","tags",0]`）→ dispatch 单点合并 `{"detail":[{loc,msg,type}...]}`
+     （`__nested__:` 直通，复用既有机制）；msg/type 对齐 Pydantic v2
+     （field required/greater_than/enum/float_parsing/string_too_short/
+     too_long/json_invalid...）。
+  3. **Enum 参数（T-P1e）**：`_param_types` 支持 `T[values](=default)`
+     （query/path 枚举校验 + 422 + OpenAPI parameter `"enum":[...]`）。
+  4. **OpenAPI 扩展（F4）**：requestBody `$ref` → `components/schemas/<handler>`
+     （自动从同一 spec 生成 object schema：type/format/enum/min-max-
+     Length/Items/default/required；单一事实源）+ 修复既有 2 处字面量 BUG
+     （`"type":"string}` 缺引号 / `"default":""d""` 双引号，openapi.json
+     非法 JSON）。
+  5. **🔴 Mojo 1.0.0 `assert` 是 no-op（本 ADR 实测发现）**：`mojo run`
+     （-O0/-O3 均）下 `assert False` **不触发** → 此前所有 `.mojo` 自测的
+     assert **从未生效**；body_validate 自测改用 `check(cond,msg)`（失败
+     `std.os.abort()`）。**遗留**：仓库其余 `.mojo` 自测 assert 仍是 no-op
+     （独立任务）。
+  验收：e2e **205/205**（+23 项 BS-1..12 + 1 既有断言更新；205 达成依赖
+  决策-39 修复，见 §8 补充）/ cargo test **312/0/4** / clippy `-D warnings`
+  0 警告 / mojo 自测 21 check 全过 / bench 6 场景 0 errors（get_root_10k_100c
+  41.9k req/s 无回归）/ ldd 仅 libc / env -i 干净启动 / binary **3.1M**
+  （≤4.2M）/ **FFI diff = 0**。
+
+- **已决策-39**：**finish_header multipart/form-data UTF-8 豁免（P0 修复，
+  DC2 端口遗漏）**：
+  1. **BUG**：`conn/parse.rs finish_header` 在 body 与 header **同 recv 到齐**
+     （`copy >= content_length`，小 body 必然，256B 文件一次到齐）时做 body
+     UTF-8 校验且**无 multipart 豁免**；io.rs phase-1/EOF 两路的
+     `hdr_is_multipart` 豁免只覆盖分片 body。后果：256B 全字节（0..255）
+     multipart 文件（e2e MP4）误 400 `Invalid UTF-8`，二进制 roundtrip 破；
+     300KB（MP5）因分片幸免（掩盖 P0）。
+  2. **修复**：`parse.rs` 新增纯函数 `is_multipart_form_data`（Content-Type
+     值前缀 `multipart/form-data`，大小写不敏感，复用 `get_header_value_ci`）；
+     `finish_header` 加同一豁免；io.rs `hdr_is_multipart` 委托纯函数
+     （消除双份扫描，FFI 面不变）。
+  3. **教训**：RFC 7578 豁免必须覆盖 **body 到齐的所有路径**（header 内到齐 /
+     phase-1 收齐 / EOF 短 body），port C→Rust 时逐路径核对豁免一致性。
+  验收：cargo test **312/0/4**（+5：is_multipart_form_data x3 +
+  fh_multipart_binary_body_in_hdr_ok / fh_non_multipart_binary_body_in_hdr_400）/
+  clippy `-D warnings` 0 警告 / e2e **205/205**（MP4 恢复绿）/ ldd 仅 libc /
+  env -i 干净启动 / bench 0 errors（41.9k req/s 无回归）/ binary 3.1M。
+
+*最后更新：2026-09-09（**决策-38 Pydantic 式 body 校验 + Field 约束 + Enum**（ADR-0014, Goal-0003 P1 T-P1d+T-P1e 全部达成）：
+`_body_schema` 声明式 spec (str/int/float/bool/obj/arr + T[](数组) + T[values](enum) + obj{嵌套}; gt/ge/lt/le/len/items 约束; 注册期 fail-fast);
+统一 422 detail (FastAPI/Pydantic v2 loc/msg/type, 参数+body 全错误收集, __nested__: 直通) + Enum 参数 (query/path T[values]) +
+OpenAPI components/schemas 自动生成 (requestBody $ref, 单一事实源, 修复既有 2 处字面量 BUG); 两文件拆分 (spec 315/校验 313, 均 <500);
+🔴 实测发现 Mojo 1.0.0 assert 是 no-op (此前 .mojo 自测 assert 从未生效; 本 ADR 首用 check() 真断言, 遗留修复独立任务);
+**决策-39 P0 修复**：finish_header 在 body 与 header 同 recv 到齐 (小 body 必然) 时 UTF-8 校验缺 multipart 豁免 →
+256B 全字节 multipart 文件误 400 (MP4); parse.rs 纯函数 is_multipart_form_data + finish_header 豁免 + io.rs 委托 (FFI 面不变);
+验收: e2e **205/205** / cargo **312/0/4** / clippy 0 警告 / mojo 自测 21 check / bench 0 errors (41.9k req/s) / ldd 仅 libc / env -i 干净启动 / **3.1M** (≤4.2M);
+2026-09-05（**决策-37 APIRouter**（ADR-0013, Goal-0003 P1 T-P1b）：
 APIRouter prefix/tags/dependencies + include_router (include 时合并, dispatch 零改动: path 前缀拼接 + _tags CSV + _depends ';' -CSV 三层合并 + WS prefix + 依赖表合并);
 OpenAPI 操作级 tags 输出 + path 分组 (修复既有重复 key 非法 JSON bug, /items GET+POST 同 key); KIND_ECHO demo 避免 _字段泄漏 (KIND_STATIC 全量 dump 为既有行为, 不动);
 零 FFI 改动 (FFI diff = 0)；e2e 180/180 (+AR-1..8) / cargo 307/0/4 / clippy 0 警告 / bench 0 errors / ldd 仅 libc / 2.9M；

@@ -13,15 +13,16 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~36）**：
-- 单 binary 2.9M，ldd 仅 libc，env -i 干净启动，e2e **180 项**，cargo 307 单测
+**已达成（v0.5.1 + 决策-31~39）**：
+- 单 binary 3.1M，ldd 仅 libc，env -i 干净启动，e2e **205 项**，cargo 312 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
-  嵌套 JSON/OpenAPI+SwaggerUI/SSE(自定义 status+额外头)//metrics/结构化 access log/
-  WebSocket 全链路/Depends 嵌套依赖/BackgroundTasks/CORS preflight/多 worker/
-  静态文件/HTML 响应/生产化(Docker+systemd+nginx)/**安全认证
+  嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
+  结构化 access log/WebSocket 全链路/Depends 嵌套依赖/BackgroundTasks/CORS preflight/
+  多 worker/静态文件/HTML 响应/生产化(Docker+systemd+nginx)/**安全认证
   (HTTPBasic/HTTPBearer/APIKey, 决策-34)**/**response_model 字段过滤 (决策-35)**/
-  **Lifespan startup/shutdown (决策-36)**/**APIRouter prefix/tags/deps + include_router (决策-37)**
+  **Lifespan startup/shutdown (决策-36)**/**APIRouter prefix/tags/deps + include_router (决策-37)**/
+  **Pydantic 式 body 校验 (嵌套/Field 约束/Enum/422 全收集, 决策-38)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -30,7 +31,7 @@
 | 1 | 路径方法 | GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD + 405+Allow | ✅ | PATCH 未单独注册(走通用) | 补 PATCH |
 | 2 | 路径参数 | `{param}` + 类型 + 约束 | ✅ 类型化 | 约束(gt/lt/regex) | §P2 |
 | 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 类型化 | 多值 List、alias | §P2 |
-| 4 | 请求体 | Pydantic 模型 / dict / 嵌套 | 🟡 扁平 dict | 嵌套模型+字段约束 | §P1 |
+| 4 | 请求体 | Pydantic 模型 / dict / 嵌套 | ✅ 声明式 spec（决策-38） | validator 自定义回调 = Mojo 无闭包，声明式约束词表为等价形态（扩充 P2） | — |
 | 5 | Form | Form(...) 多值 | 🟡 单值 | 多值 | §P2 |
 | 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 字节+b64 | UploadFile 对象 API | §P2 |
 | 7 | Header | Header(...) | ✅ | alias/desc | §P2 |
@@ -46,8 +47,8 @@
 | 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ Basic/Bearer/APIKey（决策-34）；OAuth2/JWT P2 | OAuth2/JWT | §P2 |
 | 18 | APIRouter | include_router(prefix/tags/dependencies) | ✅ include 时合并，dispatch 零改动（决策-37，ADR-0013）；OpenAPI tags + path 分组 | — | — |
 | 19 | Lifespan | startup/shutdown (context manager) | ✅ 声明式 env 命令（决策-36，Mojo 无闭包的等价形态）；失败→服务不启动 | — | — |
-| 20 | Pydantic | 嵌套模型/Field 约束/validator/enum/自定义类型 | ❌ | 核心 | §P1 |
-| 21 | Enum | 枚举参数/响应 | ❌ | — | §P1 |
+| 20 | Pydantic | 嵌套模型/Field 约束/validator/enum/自定义类型 | ✅ 嵌套+Field 约束+enum（决策-38，声明式 spec 等价形态） | 约束词表扩充（P2） | §P2 |
+| 21 | Enum | 枚举参数/响应 | ✅ query/path/body enum + 422 + OpenAPI enum 数组（决策-38） | — | — |
 | 22 | Request 对象 | state/client/url.full_url/query_params | 🟡 部分 | state | §P2 |
 | 23 | WebSocket 进阶 | close(code)/exception_handler/send_text/bytes/json | 🟡 部分 | 精化 | §P2 |
 | 24 | 压缩 | GZipMiddleware | ❌ | — | §P2 |
@@ -95,10 +96,16 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1a | response_model（响应字段过滤，决策-35） | P1 | ✅（e2e RM-1..4，164/164，/profile demo） |
 | T-P1b | APIRouter / include_router (决策-37, ADR-0013) | P1 | ✅（e2e AR-1..8, 180/180; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; OpenAPI tags + path 分组修复既有重复 key bug） |
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
-| T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | 📋 |
-| T-P1e | Enum 类型 | P1 | 📋 |
+| T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
+| T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
 | T-P2* | 查询多值/alias、中间件 GZip、CORS 完整、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-05（**T-P1b APIRouter 达成（决策-37, ADR-0013）**：include 时合并（prefix/tags/deps 三层，dispatch 零改动，FFI diff=0）+ OpenAPI tags + path 分组（修复既有重复 key 非法 JSON）；e2e 180/180 / cargo 307/0/4 / clippy 0 警告 / ldd 仅 libc / 2.9M；
-上一轮：Goal-0003 立项：全功能对标矩阵 25 项 + P0/P1/P2 优先级；P0 = Security 决策-34）*
+*最后更新：2026-09-09（**T-P1d + T-P1e 达成（决策-38, ADR-0014）— P1 全部闭环**：
+Pydantic 式 body 校验（`_body_schema` 声明式 spec：嵌套/Field 约束/enum/数组/默认值）+
+统一 FastAPI 422 detail（loc/msg/type，参数+body 全错误收集）+ Enum 参数（query/path）+
+OpenAPI components/schemas 自动生成（requestBody $ref，单一事实源）；
+🔴 Mojo 1.0.0 assert no-op 实测发现（首用 check() 真断言）；
+**决策-39**：finish_header multipart UTF-8 豁免 P0 修复（body 与 header 同 recv 到齐路径，MP4 256B 二进制 roundtrip）；
+e2e **205/205** / cargo **312/0/4** / clippy 0 警告 / bench 0 errors（41.9k req/s）/ ldd 仅 libc / 3.1M；
+下一轮：P2 精化（GZip 中间件 / CORS 完整配置 / 查询多值+alias / response_model exclude-include / OAuth2-JWT / Request.state / WS 精化 / OpenAPI custom info））*
