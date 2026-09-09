@@ -184,10 +184,12 @@ struct Router:
     var ws_routes: List[WsRoute]
     var dependencies: List[Handler]
     # APIRouter (决策-37, FastAPI APIRouter): 本 router 的 prefix / tags / 基础依赖,
-    # include_router 时合并进每条路由 (path 前缀拼接 / _tags CSV / _depends ';'-CSV).
+    # include_router 时合并进每条路由 (path 前缀拼接 / _tags CSV / _depends ';'
+    # -CSV / _depends_nocache 决策-47).
     var prefix: String
     var tags: String
     var base_deps: String
+    var base_deps_nocache: String
 
     def __init__(out self):
         self.routes = List[Route]()
@@ -196,6 +198,7 @@ struct Router:
         self.prefix = ""
         self.tags = ""
         self.base_deps = ""
+        self.base_deps_nocache = ""
 
     def set_prefix(mut self, p: String):
         """APIRouter prefix (决策-37): 本 router 所有路由的路径前缀."""
@@ -211,12 +214,20 @@ struct Router:
         依赖名必须已注册为 KIND_DEPENDENCY handler (add_dependency)."""
         self.base_deps = d
 
+
+    def set_base_deps_nocache(mut self, d: String):
+        """APIRouter 基础 nocache 依赖 (决策-47, upstream use_cache=False):
+        ';' 分隔 (与 _depends_nocache 同格式), include 时合并进路由
+        _depends_nocache (基础依赖无独立 nocache 声明面 — ADR-0022 §3.5-3)."""
+        self.base_deps_nocache = d
+
     def add_route(mut self, path: String, method: String, handler: Handler):
         """添加路由 (handler = kind + name + data, ADR-0004)."""
         self.routes.append(Route(path, method, handler))
 
     def include_router(mut self, sub: Router, prefix: String = "",
-                       tags: String = "", deps: String = "") raises:
+                       tags: String = "", deps: String = "",
+                       deps_nc: String = "") raises:
         """`include_router` (决策-37, FastAPI APIRouter/include_router 语义).
 
         把 sub 的全部路由合并进 self:
@@ -224,6 +235,8 @@ struct Router:
           tags = include tags + sub.tags + 路由 _tags  -> handler.data["_tags"] (CSV)
           deps = include deps + sub.base_deps + 路由 _depends -> handler.data["_depends"]
                  (';' 分隔, 决策-33 依赖注入机制, 合并后 dispatch 零改动)
+          deps_nc = include deps_nc + sub.base_deps_nocache + 路由 _depends_nocache
+                 -> handler.data["_depends_nocache"] (决策-47, use_cache=False)
         同时合并 sub 的依赖表 (KIND_DEPENDENCY handlers, 供 find_handler_by_name)
         与 WS 路由 (同 prefix 语义). 合并后 sub 即被消费 (调用方通常丢弃).
         """
@@ -236,6 +249,11 @@ struct Router:
                 merged_deps = _merge_csv(merged_deps, h.data["_depends"], 59)
             if merged_deps != "":
                 h.set_data("_depends", merged_deps)
+            var merged_deps_nc = _merge_csv(deps_nc, sub.base_deps_nocache, 59)  # ';'
+            if "_depends_nocache" in h.data and h.data["_depends_nocache"] != "":
+                merged_deps_nc = _merge_csv(merged_deps_nc, h.data["_depends_nocache"], 59)
+            if merged_deps_nc != "":
+                h.set_data("_depends_nocache", merged_deps_nc)
             var merged_tags = _merge_csv(tags, sub.tags, 44)  # ','
             if "_tags" in h.data and h.data["_tags"] != "":
                 merged_tags = _merge_csv(merged_tags, h.data["_tags"], 44)
@@ -253,6 +271,11 @@ struct Router:
                 w_deps = _merge_csv(w_deps, wh.data["_depends"], 59)
             if w_deps != "":
                 wh.set_data("_depends", w_deps)
+            var w_deps_nc = _merge_csv(deps_nc, sub.base_deps_nocache, 59)
+            if "_depends_nocache" in wh.data and wh.data["_depends_nocache"] != "":
+                w_deps_nc = _merge_csv(w_deps_nc, wh.data["_depends_nocache"], 59)
+            if w_deps_nc != "":
+                wh.set_data("_depends_nocache", w_deps_nc)
             var w_tags = _merge_csv(tags, sub.tags, 44)
             if "_tags" in wh.data and wh.data["_tags"] != "":
                 w_tags = _merge_csv(w_tags, wh.data["_tags"], 44)

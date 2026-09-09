@@ -20,6 +20,7 @@ from file_params import (validate_file_collect,
                          text_multi_map_filtered, apply_file_extras,
                          file_declared_names, get_file_types, get_file_aliases,
                          MpParts)
+from dep_cache import DepCache, inject_dep_calls
 from file_ops_ffi import snapshot_mp_parts, apply_file_ops
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
@@ -188,13 +189,21 @@ def dispatch_dep(router: Router,
                  info: ServerInfo,
                  query: ParsedParams,
                  body: ParsedParams,
-                 visited: List[String]) raises -> Bool:
-    """F-DI: 递归解析并派发一个依赖 (KIND_DEPENDENCY), 输出注入 target (前缀 depname_key).
+                 visited: List[String],
+                 nocache: Bool,
+                 mut cache: DepCache) raises -> Bool:
+    """F-DI + 决策-47 (ADR-0022): 递归解析并派发一个依赖 (KIND_DEPENDENCY),
+    输出注入 target (前缀 depname_key).
 
-    dep 自身的 runtime = dep.data + 其 _depends 子依赖输出 (子依赖递归派发后并入),
-    使其 run_handler (返回非 '_' 前缀字段) 可见. visited 为当前依赖链 (环检测):
-    dep 已出现在链中 (自身祖先) -> 跳过, 防无限递归. 菱形依赖各路径独立解析 (等价).
-    Returns True = 至少注入了一个输出.
+    dep 自身的 runtime = dep.data + 其 _depends / _depends_nocache 子依赖输出
+    (子依赖递归派发后并入), 使其 run_handler (返回非 '_' 前缀字段) 可见.
+    use_cache 语义 (上游 0.141.1 probe P9-1..P9-5):
+      - cached 引用 (nocache=False, upstream use_cache=True 默认): 本 dep name
+        已有 memo -> 重注入, 跳过重新派发 (菱形/三重菱形 = 1 次, P9-1/P9-5);
+      - nocache 引用 (nocache=True, upstream use_cache=False): 恒重新派发,
+        结果追加 memo 表 (后续 cached 引用复用最新条, P9-3);
+      - visited (当前依赖链) = 环检测基准: dep 是自身祖先 -> 跳过 (优先于 memo).
+    Returns True = 至少注入一个输出 (含 memo 重注入).
     """
     if dep.name in visited:
         return False
@@ -204,22 +213,47 @@ def dispatch_dep(router: Router,
     var runtime = dep.data.copy()
     if "_depends" in runtime:
         var names = _split_depends(runtime["_depends"])
-        for name in names:
-            var nested = router.find_handler_by_name(name)
-            if nested.name == "":
-                continue
-            # 子依赖输出并入 runtime (dep 自身的 runtime), 使其 run_handler 可见.
-            dispatch_dep(router, nested, runtime, info, query, body, child_visited)
+        var i = 0
+        while i < len(names):
+            var nested = router.find_handler_by_name(names[i])
+            if nested.name != "":
+                # 子依赖输出并入 runtime (dep 自身的 runtime), 使其 run_handler 可见.
+                # 默认 cached 引用 (upstream use_cache=True).
+                dispatch_dep(router, nested, runtime, info, query, body,
+                             child_visited, False, cache)
+            i += 1
+    if "_depends_nocache" in runtime:
+        var names_nc = _split_depends(runtime["_depends_nocache"])
+        var j = 0
+        while j < len(names_nc):
+            var nested_nc = router.find_handler_by_name(names_nc[j])
+            if nested_nc.name != "":
+                # nocache 引用 (upstream use_cache=False).
+                dispatch_dep(router, nested_nc, runtime, info, query, body,
+                             child_visited, True, cache)
+            j += 1
+
+    # memo 查找 (仅 cached 引用; P9-3: nocache 派发的结果同样入库).
+    var mi = cache.find(dep.name)
+    if mi >= 0 and not nocache:
+        cache.inject(dep.name, mi, target)
+        return True
 
     # 派发依赖 (KIND_DEPENDENCY 返回非 '_' 前缀字段, 含已并入的子依赖输出).
     var dep_h = Handler(dep.kind, dep.name)
     dep_h.data = runtime.copy()
     var rt = run_handler(dep_h, Dict[String, String](), query, body, info)
     var dep_outputs = rt[1].copy()
+    # 入库: cached 引用 = 无 memo 时存; nocache = 恒追加新条 (P9-3 覆写语义).
+    var okeys = List[String]()
+    var ovals = List[String]()
+    for k in dep_outputs:
+        okeys.append(k)
+        ovals.append(dep_outputs[k])
+    cache.append(dep.name, okeys, ovals)
     for k in dep_outputs:
         target[dep.name + "_" + k] = dep_outputs[k]
     return len(dep_outputs) > 0
-
 
 def resolve_depends(router: Router,
                     dep: Handler,
@@ -227,25 +261,39 @@ def resolve_depends(router: Router,
                     info: ServerInfo,
                     query: ParsedParams,
                     body: ParsedParams,
-                    visited: List[String]) raises -> Bool:
-    """F-DI (Depends, 决策-33): 解析主 handler 声明的 _depends, 派发每个直接依赖
-    并注入其输出到 target (前缀 depname_outputkey). 不派发 dep 自身 (由 dispatch 派发).
-
-    语义对齐 FastAPI Depends(): 可复用计算 / 嵌套依赖 / 鉴权前置.
-    visited 为环检测基准 (含主 handler name); dispatch_dep 在其上追加子依赖名.
+                    visited: List[String],
+                    mut cache: DepCache) raises -> Bool:
+    """F-DI (Depends, 决策-33/47): 解析主 handler 声明的 _depends (默认 cached)
+    与 _depends_nocache (upstream use_cache=False), 派发每个直接依赖并注入
+    输出到 target (前缀 depname_outputkey). 不派发 dep 自身 (由 dispatch 派发).
+    语义对齐 FastAPI Depends(): 可复用计算 / 嵌套依赖 / 鉴权前置 + 每请求
+    memo 表 (决策-47 use_cache). 解析序: 先 _depends (CSV 序) 后
+    _depends_nocache (CSV 序). visited 为环检测基准 (含主 handler name).
     """
-    if "_depends" not in dep.data:
-        return False
+    var any = False
     var base_visited = visited.copy()
     base_visited.append(dep.name)
-    var names = _split_depends(dep.data["_depends"])
-    for name in names:
-        var nested = router.find_handler_by_name(name)
-        if nested.name == "":
-            continue   # 未注册的依赖名 -> 跳过 (宽松: 也可改为 400)
-        dispatch_dep(router, nested, target, info, query, body, base_visited)
-    return True
-
+    if "_depends" in dep.data:
+        var names = _split_depends(dep.data["_depends"])
+        var i = 0
+        while i < len(names):
+            var nested = router.find_handler_by_name(names[i])
+            if nested.name != "":
+                if dispatch_dep(router, nested, target, info, query, body,
+                                base_visited, False, cache):
+                    any = True
+            i += 1
+    if "_depends_nocache" in dep.data:
+        var names_nc = _split_depends(dep.data["_depends_nocache"])
+        var j = 0
+        while j < len(names_nc):
+            var nested_nc = router.find_handler_by_name(names_nc[j])
+            if nested_nc.name != "":
+                if dispatch_dep(router, nested_nc, target, info, query, body,
+                                base_visited, True, cache):
+                    any = True
+            j += 1
+    return any
 
 def build_error_response(status: String, message: String) -> Dict[String, String]:
     """Build error response data. FastAPI 语义: 统一 {detail, status} (Goal-0002 F2).
@@ -393,6 +441,42 @@ def register_routes(mut router: Router) raises:
     di_h.set_data("message", "DI demo (Depends)")
     di_h.set_data("_depends", "get_auth")
     router.add_route("/di", "GET", di_h)
+
+    # 决策-47 (ADR-0022): Depends use_cache demo (上游 0.141.1 probe P9-1/2/3;
+    # 每请求 memo 表: 默认 cached / _depends_nocache = use_cache=False):
+    #   dc_tick  (base 依赖): 返回 tick=TICK.
+    #   dc_auth  (_depends=dc_tick, 默认 cached):
+    #     /di-cache (_depends=dc_auth;dc_tick) = 菱形 -> dc_tick 仅派发 1 次 (P9-1).
+    #   dc_auth2 (_depends_nocache=dc_tick, 嵌套 nocache):
+    #     /di-mix (_depends=dc_auth2;dc_tick) -> 直接 cached 引用复用 nocache
+    #     派发的入库结果 -> dc_tick 仅 1 次 (P9-3).
+    #   /di-nocache (_depends_nocache=dc_auth;dc_tick) -> 嵌套 cached + 直接
+    #     nocache = 2 次派发 (P9-2).
+    #   _dep_calls=true -> 响应注入 <dep>_calls = 每请求实际派发次数
+    #   (observability 超集, 上游无此面; 未声明 = 零输出).
+    router.add_dependency(Handler(KIND_DEPENDENCY(), "dc_tick"))
+    router.dependencies[len(router.dependencies) - 1].set_data("tick", "TICK")
+    router.add_dependency(Handler(KIND_DEPENDENCY(), "dc_auth"))
+    router.dependencies[len(router.dependencies) - 1].set_data("user", "dc_user")
+    router.dependencies[len(router.dependencies) - 1].set_data("_depends", "dc_tick")
+    router.add_dependency(Handler(KIND_DEPENDENCY(), "dc_auth2"))
+    router.dependencies[len(router.dependencies) - 1].set_data("user2", "dc_user2")
+    router.dependencies[len(router.dependencies) - 1].set_data("_depends_nocache", "dc_tick")
+    var dic_h = Handler(KIND_ECHO(), "di_cache")
+    dic_h.set_data("message", "DI use_cache demo (diamond cached)")
+    dic_h.set_data("_depends", "dc_auth;dc_tick")
+    dic_h.set_data("_dep_calls", "true")
+    router.add_route("/di-cache", "GET", dic_h)
+    var din_h = Handler(KIND_ECHO(), "di_nocache")
+    din_h.set_data("message", "DI nocache demo (route refs use_cache=False)")
+    din_h.set_data("_depends_nocache", "dc_auth;dc_tick")
+    din_h.set_data("_dep_calls", "true")
+    router.add_route("/di-nocache", "GET", din_h)
+    var dim_h = Handler(KIND_ECHO(), "di_mix")
+    dim_h.set_data("message", "DI nested-nocache demo (cached reuses nocache memo)")
+    dim_h.set_data("_depends", "dc_auth2;dc_tick")
+    dim_h.set_data("_dep_calls", "true")
+    router.add_route("/di-mix", "GET", dim_h)
 
     # APIRouter (决策-37, FastAPI APIRouter/include_router):
     #   items_api = APIRouter(prefix="/api/items", tags=["items"], dependencies=[api_env])
@@ -1043,11 +1127,21 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                         apply_file_ops(req_params, mp_parts,
                                                        route_result.handler.data["_file_ops"],
                                                        fal_file)
-                                # F-DI (Depends, 决策-33): 解析 handler.data["_depends"] 声明的
-                                # 依赖, 递归派发后注入 req_params (前缀 depname_outputkey).
-                                if "_depends" in route_result.handler.data:
+                                # F-DI (Depends, 决策-33) + 决策-47 (use_cache):
+                                # 解析 _depends (默认 cached) / _depends_nocache (upstream
+                                # use_cache=False), 递归派发后注入 req_params (前缀
+                                # depname_outputkey); 每请求 memo 表 = 上游 Depends
+                                # use_cache 语义 (ADR-0022; P9-1 菱形 1 次 / P9-2 直
+                                # 接 nocache 2 次 / P9-3 cached 复用 nocache 入库结果).
+                                if "_depends" in route_result.handler.data or \
+                                        "_depends_nocache" in route_result.handler.data:
+                                    var dcache = DepCache()
                                     var _ = resolve_depends(router, route_result.handler, req_params,
-                                                    info, query_params, body_params, List[String]())
+                                                    info, query_params, body_params,
+                                                    List[String](), dcache)
+                                    # _dep_calls=true -> 注入各 dep 每请求实际派发次数
+                                    # (observability 超集, 上游无此面; ADR-0022 §3.5-2).
+                                    inject_dep_calls(route_result.handler.data, req_params, dcache)
                                 var result = run_handler(route_result.handler, req_params,
                                                          query_params, body_params, info)
                                 status_line = result[0]

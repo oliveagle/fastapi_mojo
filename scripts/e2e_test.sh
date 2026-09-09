@@ -29,6 +29,9 @@
 #   - UploadFile 对象 API: _file_types file/bytes + 422 (U2 value_error / U3 string_type /
 #     U4 last-wins / U5 全缺失) + _file_ops (head/range/sha256/save) + multipart OpenAPI
 #     (决策-46, MP8..MP23b; size = 实际字节 U1; MP1..MP7 决策-32 存量)
+#   - Depends use_cache: 每请求 memo 表 (默认 cached 菱形 1 次 / _depends_nocache =
+#     use_cache=False 重派发 / 嵌套 nocache 结果入库供 cached 引用复用, 上游 P9-1/2/3)
+#     (决策-47, DC-1..DC-7; _dep_calls 观测超集)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -972,6 +975,35 @@ WS_API_OUT=$("$FMTOOL" wsbench "$PORT" /api/ws/echo 2 1 2>&1)
 WS_API_OK=$(printf '%s' "$WS_API_OUT" | grep -c ',200$')
 if [[ "$WS_API_OK" == "2" ]]; then pass "AR-8 WS prefix /api/ws/echo echo OK"
 else fail "AR-8 WS prefix /api/ws/echo echo OK" "wsbench output: $WS_API_OUT"; fi
+
+# --- Depends use_cache (决策-47, ADR-0022) -------------------------------------
+# /di-cache: _depends=dc_auth;dc_tick (菱形, 默认 cached) -> P9-1: dc_tick 1 次.
+# /di-nocache: _depends_nocache=dc_auth;dc_tick (直接 nocache) -> P9-2: 2 次.
+# /di-mix: _depends=dc_auth2;dc_tick, dc_auth2._depends_nocache=dc_tick
+#   (嵌套 nocache) -> P9-3: cached 引用复用 nocache 入库结果 = 1 次.
+# _dep_calls=true -> <dep>_calls 注入 (observability 超集); /di 与 /api/items
+# 未声明 -> 零输出 (回归: 无 _calls 泄漏).
+echo "== Depends use_cache (决策-47, ADR-0022) =="
+DCC=$(curl -sS -m 5 "$BASE/di-cache")
+if [[ "$DCC" == *'"dc_tick_calls": "1"'* && "$DCC" == *'"dc_auth_calls": "1"'* ]]; then pass "DC-1 diamond default cached -> dc_tick dispatched once (P9-1)"
+else fail "DC-1 diamond cached" "body: ${DCC:0:240}"; fi
+if [[ "$DCC" == *'"dc_tick_tick": "TICK"'* && "$DCC" == *'"dc_auth_dc_tick_tick": "TICK"'* ]]; then pass "DC-2 diamond both refs see same memo value (P9-1 value identity)"
+else fail "DC-2 memo value identity" "body: ${DCC:0:240}"; fi
+DCN=$(curl -sS -m 5 "$BASE/di-nocache")
+if [[ "$DCN" == *'"dc_tick_calls": "2"'* && "$DCN" == *'"dc_auth_calls": "1"'* ]]; then pass "DC-3 route nocache refs -> dc_tick dispatched twice (P9-2)"
+else fail "DC-3 route nocache" "body: ${DCN:0:240}"; fi
+DCM=$(curl -sS -m 5 "$BASE/di-mix")
+if [[ "$DCM" == *'"dc_tick_calls": "1"'* && "$DCM" == *'"dc_auth2_calls": "1"'* ]]; then pass "DC-4 nested nocache + direct cached -> cached reuses memo, 1 dispatch (P9-3)"
+else fail "DC-4 nested nocache" "body: ${DCM:0:240}"; fi
+DCM2=$(curl -sS -m 5 "$BASE/di-mix")
+if [[ "$DCM2" == *'"dc_tick_calls": "1"'* ]]; then pass "DC-5 per-request cache scope (second request independent, still 1)"
+else fail "DC-5 per-request scope" "body: ${DCM2:0:240}"; fi
+DCD=$(curl -sS -m 5 "$BASE/di")
+if [[ "$DCD" == *'"get_auth_user": "demo_user"'* && "$DCD" != *'_calls"'* ]]; then pass "DC-6 /di (决策-33) regression: no _dep_calls -> zero _calls leak"
+else fail "DC-6 /di regression" "body: ${DCD:0:240}"; fi
+APIR=$(curl -sS -m 5 "$BASE/api/items/42")
+if [[ "$APIR" == *'"api_env_env": "api"'* && "$APIR" != *'_calls"'* ]]; then pass "DC-7 APIRouter base deps (AR-3) regression: no _calls leak"
+else fail "DC-7 APIRouter base deps regression" "body: ${APIR:0:240}"; fi
 
 # --- body validation / Field constraints / Enum (决策-38) ---------------------------
 # /validate (POST, _body_schema): name:str;price:float|gt=0;quantity:int=10;
