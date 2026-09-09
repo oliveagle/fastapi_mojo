@@ -4,6 +4,7 @@
 //
 // 子命令:
 //   raw      <port> <hex>            send raw bytes, print status line
+//   jsoncheck [FILE|-]             validate JSON (exit 0/1)
 //   cont100  <port>                  100-continue probe (print OK/FAIL dt=...)
 //   keepalive <port>                 keep-alive + Connection:close + idle
 //   headbody  <port>                 HEAD / body byte count
@@ -30,6 +31,7 @@ fn usage() -> &'static str {
 
 USAGE:
   fmtool raw      <port> <hex>
+  fmtool jsoncheck [FILE|-]  validate a JSON document (file or stdin)
   fmtool cont100  <port>
   fmtool keepalive <port>
   fmtool headbody  <port>
@@ -57,6 +59,7 @@ fn main() -> ExitCode {
 
     let rc = match sub.as_str() {
         "raw" => run_raw(&rest),
+        "jsoncheck" => run_jsoncheck(&rest),
         "cont100" => run_e2e_port("cont100", &rest, e2e::cont100),
         "keepalive" => run_e2e_port("keepalive", &rest, e2e::keepalive),
         "headbody" => run_e2e_port("headbody", &rest, e2e::headbody),
@@ -90,6 +93,27 @@ fn run_raw(args: &[&str]) -> i32 {
         Err(_) => { eprintln!("bad port"); return 2; }
     };
     e2e::raw(port, args[1])
+}
+
+fn run_jsoncheck(args: &[&str]) -> i32 {
+    let path = args.first().copied().unwrap_or("-");
+    let data = if path == "-" {
+        let mut s = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).is_err() {
+            eprintln!("read stdin failed");
+            return 2;
+        }
+        s
+    } else {
+        match std::fs::read_to_string(path) {
+            Ok(x) => x,
+            Err(e) => { eprintln!("read {path}: {e}"); return 2; }
+        }
+    };
+    match json::parse(&data) {
+        Ok(_) => { println!("OK"); 0 }
+        Err(e) => { eprintln!("INVALID: {e}"); 1 }
+    }
 }
 
 fn run_e2e_port<F: FnOnce(u16) -> i32>(name: &str, args: &[&str], f: F) -> i32 {

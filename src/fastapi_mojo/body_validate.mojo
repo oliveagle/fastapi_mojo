@@ -99,6 +99,30 @@ def _elem_check(elem_t: String, e: String) raises -> Tuple[Bool, String, String]
 
 # ---------- 约束与校验 ----------
 
+def _body_input(raw_body: String) -> String:
+    """missing 的 input JSON 片段 (0.141.1 P3 实测: input = 收到的 body 对象;
+    空 body -> null). 合法 JSON body 原文即对象字面量, 原样嵌入."""
+    if raw_body == "":
+        return "null"
+    return raw_body
+
+
+def _json_input_frag(v: String) raises -> String:
+    """值 -> 合法 JSON 片段: 引号/括号/number/bool/null 开头 -> 原样;
+    其它 (裸 token, 如坏元素 zz) -> 转义字符串 (保 detail JSON 合法)."""
+    var n = v.byte_length()
+    if n == 0:
+        return "null"
+    var c0 = ord(v[byte=0])
+    if c0 == 34 or c0 == 123 or c0 == 91:
+        return v
+    if _is_num_lit(v) or _is_int_lit(v):
+        return v
+    if v == "true" or v == "false" or v == "null":
+        return v
+    return "\"" + json_escape(v) + "\""
+
+
 def _apply_constraints(fs: FieldSpec, raw: String, elem_count: Int, floc: String,
                        mut errs: List[String]) raises:
     """应用 gt/ge/lt/le/len/items 约束 (elem_count = 数组元素数, 非数组 = -1)."""
@@ -120,32 +144,32 @@ def _apply_constraints(fs: FieldSpec, raw: String, elem_count: Int, floc: String
             if not cv[0]:
                 continue
             if key == "gt" and not (rv[1] > cv[1]):
-                errs.append(err_obj(floc, "Input should be greater than " + fmt_num(cv[1]), "greater_than"))
+                errs.append(err_obj(floc, "Input should be greater than " + fmt_num(cv[1]), "greater_than", _json_input_frag(raw)))
             elif key == "ge" and not (rv[1] >= cv[1]):
-                errs.append(err_obj(floc, "Input should be greater than or equal to " + fmt_num(cv[1]), "greater_than_equal"))
+                errs.append(err_obj(floc, "Input should be greater than or equal to " + fmt_num(cv[1]), "greater_than_equal", _json_input_frag(raw)))
             elif key == "lt" and not (rv[1] < cv[1]):
-                errs.append(err_obj(floc, "Input should be less than " + fmt_num(cv[1]), "less_than"))
+                errs.append(err_obj(floc, "Input should be less than " + fmt_num(cv[1]), "less_than", _json_input_frag(raw)))
             elif key == "le" and not (rv[1] <= cv[1]):
-                errs.append(err_obj(floc, "Input should be less than or equal to " + fmt_num(cv[1]), "less_than_equal"))
+                errs.append(err_obj(floc, "Input should be less than or equal to " + fmt_num(cv[1]), "less_than_equal", _json_input_frag(raw)))
         elif key == "len":
             var rl = raw.byte_length()
             var pr = _parse_range(val)
             if pr[0]:
                 if pr[1] > 0 and rl < pr[1]:
-                    errs.append(err_obj(floc, "String should have at least " + String(pr[1]) + " character(s)", "string_too_short"))
+                    errs.append(err_obj(floc, "String should have at least " + String(pr[1]) + " character(s)", "string_too_short", _json_input_frag(raw)))
                 if pr[2] > 0 and rl > pr[2]:
-                    errs.append(err_obj(floc, "String should have at most " + String(pr[2]) + " character(s)", "string_too_long"))
+                    errs.append(err_obj(floc, "String should have at most " + String(pr[2]) + " character(s)", "string_too_long", _json_input_frag(raw)))
         elif key == "items" and elem_count >= 0:
             var pr2 = _parse_range(val)
             if pr2[0]:
                 if pr2[1] > 0 and elem_count < pr2[1]:
-                    errs.append(err_obj(floc, "List should have at least " + String(pr2[1]) + " item(s)", "too_short"))
+                    errs.append(err_obj(floc, "List should have at least " + String(pr2[1]) + " item(s)", "too_short", _json_input_frag(raw)))
                 if pr2[2] > 0 and elem_count > pr2[2]:
-                    errs.append(err_obj(floc, "List should have at most " + String(pr2[2]) + " item(s)", "too_long"))
+                    errs.append(err_obj(floc, "List should have at most " + String(pr2[2]) + " item(s)", "too_long", _json_input_frag(raw)))
 
 
 def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: String,
-                     mut out: Dict[String, String], mut errs: List[String]) raises:
+                     raw_body: String, mut out: Dict[String, String], mut errs: List[String]) raises:
     """逐字段校验 (顶层与嵌套共用). prefix = 注入键前缀; loc = FastAPI loc 数组 (不含字段名)."""
     for i in range(len(s.fields)):
         var fs = get_field(s, i)
@@ -155,7 +179,7 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
             if fs.has_default():
                 out[key] = fs.default_value
             else:
-                errs.append(err_obj(floc + "]", "field required", "missing"))
+                errs.append(err_obj(floc + "]", "Field required", "missing", _body_input(raw_body)))
             continue
         var raw = body.values[fs.name]
         var t = "string"
@@ -178,10 +202,10 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
             ok_t = t == "array"
         if not ok_t:
             var te = _type_err(fs)
-            errs.append(err_obj(floc + "]", te[0], te[1]))
+            errs.append(err_obj(floc + "]", te[0], te[1], _json_input_frag(raw)))
             continue
         if fs.is_enum and not _in_enum_csv(raw, fs.enum_values):
-            errs.append(err_obj(floc + "]", _enum_or_msg(fs.enum_values), "enum"))
+            errs.append(err_obj(floc + "]", _enum_or_msg(fs.enum_values), "enum", _json_input_frag(raw)))
             continue
         out[key] = raw
         if fs.is_array:
@@ -189,15 +213,15 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
             for ei in range(len(elems)):
                 var ec = _elem_check(fs.elem, elems[ei])
                 if not ec[0]:
-                    errs.append(err_obj(floc + "," + String(ei) + "]", ec[1], ec[2]))
+                    errs.append(err_obj(floc + "," + String(ei) + "]", ec[1], ec[2], _json_input_frag(elems[ei])))
             _apply_constraints(fs, raw, len(elems), floc + "]", errs)
         elif fs.type_name == "obj" and fs.nested_spec != "":
             var sub = parse_body_json(raw)
             if sub.has_error:
-                errs.append(err_obj(floc + "]", "Input should be an object", "model_type"))
+                errs.append(err_obj(floc + "]", "Input should be an object", "model_type", _json_input_frag(raw)))
             else:
                 var subs = parse_body_schema(fs.nested_spec)
-                _validate_fields(subs, sub, prefix + fs.name + "_", floc, out, errs)
+                _validate_fields(subs, sub, prefix + fs.name + "_", floc, raw_body, out, errs)
         else:
             _apply_constraints(fs, raw, -1, floc + "]", errs)
 
@@ -217,10 +241,10 @@ def validate_body_schema(handler: Handler, method: String,
         return (True, List[String](), ok_vals^)
     var errs = List[String]()
     if body_params.has_error:
-        errs.append(err_obj("[\"body\"]", "JSON decode error", "json_invalid"))
+        errs.append(err_obj("[\"body\"]", "JSON decode error", "json_invalid", _json_input_frag(body_str)))
         return (False, errs^, ok_vals^)
     var fields = parse_body_schema(handler.data["_body_schema"])
-    _validate_fields(fields, body_params, "", "[\"body\"", ok_vals, errs)
+    _validate_fields(fields, body_params, "", "[\"body\"", body_str, ok_vals, errs)
     if len(errs) > 0:
         return (False, errs^, ok_vals^)
     return (True, List[String](), ok_vals^)

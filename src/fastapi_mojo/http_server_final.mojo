@@ -15,7 +15,7 @@ from params_typed import validate_params_collect, get_param_types
 from params_query_extra import apply_query_extras, get_param_aliases
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
-from request_response import _parse_cookies, _parse_form_body, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
+from request_response import _parse_cookies, parse_form_multi, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
 from std.ffi import external_call, CStringSlice  # (multipart via Rust bridge FFI)
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
@@ -24,7 +24,8 @@ from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
-from security import AuthResult, check_auth
+from security import AuthResult, check_auth, _get_header
+from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii)
 from security_jwt import handle_oauth2_token, check_oauth2  # 决策-44: /token + _auth=oauth2
 from lifespan import run_lifespan_startup, run_lifespan_shutdown
 
@@ -71,22 +72,10 @@ def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: S
                     params["cookie_" + clean] = v
             start = i + 1
         i += 1
-def inject_form_fields(mut params: Dict[String, String], form_fields_csv: String, body_str: String) raises:
-    """F10b (v0.5.1): 把 _form_fields 声明的字段名按名从 form body 解析, 注入 params.
-    key 前缀 form_<name>; 缺失 -> 空串. body 必须是 application/x-www-form-urlencoded
-    (key=value&key=value, URL-encoded). 与 inject_request_cookies 同模式.
-    """
-    var fields = _split_csv(form_fields_csv)
-    if len(fields) == 0:
-        return
-    var pairs = _parse_form_body(body_str)
-    for i in range(len(fields)):
-        var name = fields[i]
-        var v = String("")
-        if name in pairs:
-            v = pairs[name]
-        params["form_" + name] = v
-
+def _ct_is_form(ct: String) -> Bool:
+    """Form Content-Type 判定 (ADR-0020): 小写化后
+    忽略尾部 "; charset=..." — 仅 urlencoded 为真."""
+    return lower_ascii(ct).startswith("application/x-www-form-urlencoded")
 
 def _mp_read_field(part_i: Int, field: Int) -> String:
     """从 Rust bridge multipart 状态逐字节读取 part 字段 (field: 0=name
@@ -112,7 +101,7 @@ def inject_multipart_fields(mut params: Dict[String, String]) raises:
     解析为 parts; 每个 part:
       - 文本字段 (无 filename) -> params["form_<name>"] = <body string>
       - 文件字段 (有 filename) -> params["file_<name>_filename"/"_size"/"_content_type"/"_body_b64"]
-    Handler 声明 `_multipart` = "true" 即启用 (与 inject_form_fields 同模式).
+    Handler 声明 `_multipart` = "true" 即启用 (与 _form_fields 同模式).
 
     为何 Rust: multipart body 含任意二进制 (PNG/PDF 等), Mojo String 是 UTF-8
     容器, span_to_str 会把 invalid 字节变 U+FFFD; [byte=...] 切片在非 codepoint
@@ -516,6 +505,23 @@ def register_routes(mut router: Router) raises:
     qr_h.set_data("message", "required list demo")
     qr_h.set_data("_param_types", "n:int[]")
     router.add_route("/query-req", "GET", qr_h)
+    # 决策-45 (ADR-0020): Form 多值/alias/desc demo. _form_types 声明
+    # 类型 (list 多值 / 标量默认 / float / bool); _param_descs ->
+    # OpenAPI description. 必填 list 缺失 -> 422; count=0 标量默认.
+    var fmt_h = Handler(KIND_ECHO(), "form_multi")
+    fmt_h.set_data("message", "form multi demo")
+    fmt_h.set_data("_form_fields", "items,tags,count,fx,fb")
+    fmt_h.set_data("_form_types", "items:int[];tags:str[];count:int=0;fx:float[]=;fb:bool[]=")
+    fmt_h.set_data("_param_descs", "items=Numeric items (multi-occurrence)")
+    router.add_route("/form-multi", "POST", fmt_h)
+
+    # Form alias demo: wire key = alias (tags); 原始名 (labels) 无
+    # 绑定效力 (缺失 -> 默认); size 标量默认 2.
+    var fali_h = Handler(KIND_ECHO(), "form_alias")
+    fali_h.set_data("message", "form alias demo")
+    fali_h.set_data("_form_types", "labels:str[]=;size:int=2")
+    fali_h.set_data("_form_aliases", "labels=tags")
+    router.add_route("/form-alias", "POST", fali_h)
 
     # F5 SSE 一次性推送 demo (Goal-0002 §1.1). 事件用 | 分隔 (避免与 data 内 , 冲突).
     var sse_h = Handler(KIND_SSE(), "sse_demo")
@@ -947,6 +953,15 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         var perr = validate_params_collect(type_spec, route_result.params,
                                                            query_params.values, query_params.multi_values, aliases)
                         var sres = validate_body_schema(route_result.handler, effective_method, body_params, body_str)
+                        # 决策-45 (ADR-0020): Form 多值/422 parity —
+                        # CT 为 form 时 parse_form_multi 收全部 occurrence;
+                        # 非 form CT 传空 multi (上游同款: 缺失->默认/422).
+                        var fmulti = Dict[String, List[String]]()
+                        if _ct_is_form(_get_header("Content-Type")):
+                            fmulti = parse_form_multi(body_str)
+                        var ftypes = get_form_types(route_result.handler)
+                        var fal = get_form_aliases(route_result.handler)
+                        var ferr = validate_form_collect(ftypes, fal, fmulti)
                         var all_errs = List[String]()
                         if not perr[0]:
                             for pe in perr[1]:
@@ -954,6 +969,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         if not sres[0]:
                             for se in sres[1]:
                                 all_errs.append(se)
+                        if not ferr[0]:
+                            for fe in ferr[1]:
+                                all_errs.append(fe)
                         if len(all_errs) > 0:
                             status_line = "422 Unprocessable Entity"
                             resp_data = Dict[String, String]()
@@ -988,8 +1006,13 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                     inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
                                 if "_reads_cookies" in route_result.handler.data:
                                     inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
+                                # 决策-45: form 归一化单点注入 — typed
+                                # list 全 occurrence CSV / 标量 last-wins /
+                                # alias 绑定 / legacy 未标注字段 (缺失 -> "").
+                                var ff_csv = ""
                                 if "_form_fields" in route_result.handler.data:
-                                    inject_form_fields(req_params, route_result.handler.data["_form_fields"], body_str)
+                                    ff_csv = route_result.handler.data["_form_fields"]
+                                apply_form_extras(req_params, ftypes, fal, fmulti, ff_csv)
                                 if "_multipart" in route_result.handler.data and route_result.handler.data["_multipart"] == "true":
                                     inject_multipart_fields(req_params)
                                 # F-DI (Depends, 决策-33): 解析 handler.data["_depends"] 声明的

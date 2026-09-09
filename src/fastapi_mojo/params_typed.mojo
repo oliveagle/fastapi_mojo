@@ -7,7 +7,8 @@
 #   "str[low,high]" (enum, 决策-38); 空括号 = list, 非空 = enum);
 #   _param_aliases = "name=alias" (决策-43: query key = alias, 原始 name
 #   无绑定效力). 校验失败 -> 422 + FastAPI detail 数组 (loc/msg/type, 全收集;
-#   list 元素 loc 带下标 i, 首个失败即停, 上游同款). 标量多值 = last-wins
+#   list 元素 loc 带下标 i, collect-all (0.141.1 实测, 决策-45)). 错误对象含
+#   input 字段 (决策-45: 上游 0.141.1 全 422 均带 input). 标量多值 = last-wins
 #   (Starlette); list = 全部 occurrence. 校验通过 -> handler 无感 (String dict).
 #
 # 依赖方向: params_typed -> params_query_extra -> params_query (无环;
@@ -168,9 +169,9 @@ def _enum_msg(csv: String) raises -> String:
     return "Input should be " + sb
 
 
-def _pe(loc: String, msg: String, type_name: String) -> String:
-    """单个参数校验错误 JSON 对象 (FastAPI loc/msg/type, 决策-38)."""
-    return "{\"loc\":" + loc + ",\"msg\":\"" + json_escape(msg) + "\",\"type\":\"" + type_name + "\"}"
+def _pe(loc: String, msg: String, type_name: String, input_json: String) -> String:
+    """单个参数校验错误 JSON 对象 (决策-45: loc/msg/type/input, 上游 0.141.1)."""
+    return "{\"loc\":" + loc + ",\"msg\":\"" + json_escape(msg) + "\",\"type\":\"" + type_name + "\",\"input\":" + input_json + "}"
 
 
 # ---------- 类型转换原语 ----------
@@ -253,12 +254,14 @@ def parse_typed_value(type_name: String, raw: String) -> Tuple[Bool, String]:
     """把字符串 raw 按 type_name 解析; 成功 -> (True, 类型化字面量字符串).
     类型化字面量 (与 json_serialize 一致): int/float -> 数字串; bool ->
     "true"/"false"; string -> 原样. 失败 -> (False, "")."""
-    if type_name == "string":
+    if type_name == "string" or type_name == "str":
         return (True, raw)
     if type_name == "int" or type_name == "float":
         var ok = _is_int_literal(raw)
         if type_name == "float":
-            ok = _is_float_literal(raw)
+            # 决策-45: float 接受 int 字面量 (上游 pydantic v2 parity:
+            # "1" -> 1.0); 小数点/指数仍由 _is_float_literal 判定.
+            ok = _is_float_literal(raw) or _is_int_literal(raw)
         if not ok:
             return (False, "")
         return (True, raw)
@@ -279,11 +282,11 @@ def validate_params_collect(type_spec: Dict[String, String],
                             query_params: Dict[String, String],
                             query_multi: Dict[String, List[String]],
                             aliases: Dict[String, String]) raises -> Tuple[Bool, List[String]]:
-    """统一校验 (决策-38 collect + 决策-43 list/alias): 收集全部错误
-    (loc/msg/type). 优先 path; 否则 query (alias 声明时按 alias key);
-    都无则看 default. loc: path -> ["path",name]; query -> ["query",name]
-    (list 元素 + 下标 i). 标量 = last-wins; list = 全部 occurrence 逐元素
-    校验 (首个失败即停, 上游同款). 不改入参 dict."""
+    """统一校验 (决策-38 collect + 决策-43 list/alias + 决策-45 input/collect-all):
+    收集全部错误 (loc/msg/type/input). 优先 path; 否则 query (alias 声明时
+    按 alias key); 都无则看 default. loc: path -> ["path",name]; query ->
+    ["query",name] (list 元素 + 下标 i). 标量 = last-wins; list = 全部
+    occurrence 逐元素校验 (collect-all, 0.141.1 实测, 决策-45). 不改入参 dict."""
     var errs = List[String]()
     if len(type_spec) == 0:
         return (True, errs^)
@@ -297,7 +300,7 @@ def validate_params_collect(type_spec: Dict[String, String],
         if not in_path:
             loc = "[\"query\",\"" + json_escape(k) + "\"]"
         if not pb.ok:
-            errs.append(_pe(loc, "unknown type for parameter '" + k + "': " + ts.base_type, "unknown_type"))
+            errs.append(_pe(loc, "unknown type for parameter '" + k + "': " + ts.base_type, "unknown_type", "null"))
             continue
 
         # 取值: path 优先 (alias 不适用 path); query 按 alias key
@@ -319,7 +322,7 @@ def validate_params_collect(type_spec: Dict[String, String],
                 var d = ts.default_value
                 vals = split_csv(d)
             else:
-                errs.append(_pe(loc, "field required", "missing"))
+                errs.append(_pe(loc, "Field required", "missing", "null"))
                 continue
             validate_list_values(pb.type_name, vals^, k, errs)
             continue
@@ -337,23 +340,23 @@ def validate_params_collect(type_spec: Dict[String, String],
             has_value = True
 
         if not has_value:
-            errs.append(_pe(loc, "field required", "missing"))
+            errs.append(_pe(loc, "Field required", "missing", "null"))
             continue
 
         if pb.is_enum:
             if not _enum_in(raw, pb.values_csv):
-                errs.append(_pe(loc, _enum_msg(pb.values_csv), "enum"))
+                errs.append(_pe(loc, _enum_msg(pb.values_csv), "enum", "\"" + json_escape(raw) + "\""))
             continue
 
         # 类型校验
         var pr = parse_typed_value(pb.type_name, raw)
         if not pr[0]:
             if pb.type_name == "int":
-                errs.append(_pe(loc, "Input should be a valid integer, unable to parse string as an integer", "int_parsing"))
+                errs.append(_pe(loc, "Input should be a valid integer, unable to parse string as an integer", "int_parsing", "\"" + json_escape(raw) + "\""))
             elif pb.type_name == "float":
-                errs.append(_pe(loc, "Input should be a valid number, unable to parse string as a number", "float_parsing"))
+                errs.append(_pe(loc, "Input should be a valid number, unable to parse string as a number", "float_parsing", "\"" + json_escape(raw) + "\""))
             else:
-                errs.append(_pe(loc, "Input should be a valid boolean", "bool_parsing"))
+                errs.append(_pe(loc, "Input should be a valid boolean", "bool_parsing", "\"" + json_escape(raw) + "\""))
 
     return (len(errs) == 0, errs^)
 

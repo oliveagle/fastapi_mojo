@@ -128,6 +128,47 @@ def _parse_form_body(body: String) -> Dict[String, String]:
     return out^
 
 
+def parse_form_multi(body: String) raises -> Dict[String, List[String]]:
+    """决策-45: _parse_form_body 的 multi 姊妹函数 — 同 key 全部 occurrence
+    按序 append (上游 Starlette MultiDict.getlist 语义; F1/F7 实测).
+    每 key/value url_decode (percent + '+'); 裸 key (无 '=') -> 空串元素;
+    与 _parse_form_body 同宽松规则 (eq=0 空 key 跳过)."""
+    var out = Dict[String, List[String]]()
+    if body == "":
+        return out^
+    var n = body.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(body[byte=i]) == 38)  # '&'
+        if is_sep:
+            if i > start:
+                var pair = String(body[byte=start:i])
+                var eq = -1
+                for j in range(pair.byte_length()):
+                    if ord(pair[byte=j]) == 61:  # '='
+                        eq = j
+                        break
+                var k = String("")
+                var v = String("")
+                if eq > 0:
+                    k = url_decode(String(pair[byte=0:eq]))
+                    v = url_decode(String(pair[byte=eq + 1:pair.byte_length()]))
+                elif eq < 0:
+                    k = url_decode(pair)
+                    v = ""
+                if k != "":
+                    if k in out:
+                        out[k].append(v)
+                    else:
+                        var one = List[String]()
+                        one.append(v)
+                        out[k] = one^
+            start = i + 1
+        i += 1
+    return out^
+
+
 def _parse_cookies(cookie_header: String) -> Dict[String, String]:
     """从 Cookie 头解析 key=value 对 (RFC 6265 简化: ';' 分隔, '=' 切, 去空格)."""
     var out = Dict[String, String]()

@@ -26,6 +26,7 @@
 
 from handler import Handler
 from params_query import ParsedParams, parse_query_params
+from json import json_escape
 
 
 # ---------- 声明表解析 ----------
@@ -331,18 +332,20 @@ def main() raises:
     print("query extras test completed!")
 
 
-def make_error_json(loc: String, msg: String, type_name: String) raises -> String:
-    """单个参数校验错误 JSON 对象 (与 params_typed._pe 同构, loc/msg/type)."""
+def make_error_json(loc: String, msg: String, type_name: String, input_json: String) raises -> String:
+    """单个参数校验错误 JSON 对象 (与 params_typed._pe 同构, 决策-45: loc/msg/type/input)."""
     from json import json_escape
-    return "{\"loc\":" + loc + ",\"msg\":\"" + json_escape(msg) + "\",\"type\":\"" + type_name + "\"}"
+    return "{\"loc\":" + loc + ",\"msg\":\"" + json_escape(msg) + "\",\"type\":\"" + type_name + "\",\"input\":" + input_json + "}"
 
 
 def validate_list_values(type_name: String, values: List[String],
                          param_name: String, mut errs: List[String]) raises:
-    """决策-43: List 参数逐元素校验.
+    """List 参数逐元素校验.
 
-    FastAPI 0.141.1 实测语义: 首个失败元素即报 (不继续收集), loc 带数组
-    下标 ["query",name,i]. string 元素恒过 (enum list 语法不可表达,
+    FastAPI 0.141.1 实测语义 (决策-45 更正: 0.141.1 + pydantic 2.13.5 对
+    query/body list 均 **collect-all** — 全部坏元素按序收集, 含 input =
+    元素 raw; ADR-0018「首个失败即停」为旧版实测误记). loc 带数组下标
+    ["query",name,i]. string 元素恒过 (enum list 语法不可表达,
     注册期 set_param_type 拒绝)."""
     from params_typed import parse_typed_value
     var i = 0
@@ -353,12 +356,11 @@ def validate_list_values(type_name: String, values: List[String],
             if not pr[0]:
                 var loc = "[\"query\",\"" + param_name + "\"," + String(i) + "]"
                 if type_name == "int":
-                    errs.append(make_error_json(loc, "Input should be a valid integer, unable to parse string as an integer", "int_parsing"))
+                    errs.append(make_error_json(loc, "Input should be a valid integer, unable to parse string as an integer", "int_parsing", "\"" + json_escape(v) + "\""))
                 elif type_name == "float":
-                    errs.append(make_error_json(loc, "Input should be a valid number, unable to parse string as a number", "float_parsing"))
+                    errs.append(make_error_json(loc, "Input should be a valid number, unable to parse string as a number", "float_parsing", "\"" + json_escape(v) + "\""))
                 else:
                     # pydantic v2 实测措辞 (标量 bool 短消息是决策-38 既有
                     # 简化; list 元素用上游完整措辞, ADR-0018 §3.4)
-                    errs.append(make_error_json(loc, "Input should be a valid boolean, unable to interpret input", "bool_parsing"))
-                return  # 首个失败即停 (上游同款)
+                    errs.append(make_error_json(loc, "Input should be a valid boolean, unable to interpret input", "bool_parsing", "\"" + json_escape(v) + "\""))
         i += 1

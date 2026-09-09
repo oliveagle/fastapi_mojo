@@ -155,10 +155,10 @@ def fmt_num(v: Float64) -> String:
     return String(v)
 
 
-def err_obj(loc_json: String, msg: String, type_name: String) -> String:
-    """构造单个 FastAPI 422 detail 对象 (loc/msg/type, Pydantic v2 风格)."""
+def err_obj(loc_json: String, msg: String, type_name: String, input_json: String) -> String:
+    """构造单个 FastAPI 422 detail 对象 (决策-45: loc/msg/type/input, 上游 0.141.1)."""
     return "{\"loc\":" + loc_json + ",\"msg\":\"" + json_escape(msg) + \
-           "\",\"type\":\"" + json_escape(type_name) + "\"}"
+           "\",\"type\":\"" + json_escape(type_name) + "\",\"input\":" + input_json + "}"
 
 
 def _in_enum_csv(v: String, csv: String) -> Bool:

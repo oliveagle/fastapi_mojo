@@ -24,6 +24,8 @@
 #   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
+#   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
+#     (决策-45, FM-1..FM-20; OpenAPI JSON 合法性 jsoncheck 门禁)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -867,7 +869,7 @@ expect_body_contains "BS-1f nested meta_city" '"body_meta_city": "sh"' "$BASE/va
 expect_body_contains "BS-1g tags array" '"body_tags": "[\"' "$BASE/validate" POST "$BV_VALID"
 expect_code "BS-2a missing required -> 422" 422 "$BASE/validate" POST '{"price":1}'
 expect_body_contains "BS-2b loc body.name" '["body","name"]' "$BASE/validate" POST '{"price":1}'
-expect_body_contains "BS-2c msg field required" '"msg":"field required"' "$BASE/validate" POST '{"price":1}'
+expect_body_contains "BS-2c msg Field required" '"msg":"Field required"' "$BASE/validate" POST '{"price":1}'
 expect_body_contains "BS-3a float_parsing" '"type":"float_parsing"' "$BASE/validate" POST '{"name":"x","price":"abc"}'
 expect_body_contains "BS-4a gt constraint" "Input should be greater than 0" "$BASE/validate" POST '{"name":"x","price":-5}'
 expect_body_contains "BS-5a enum type" '"type":"enum"' "$BASE/validate" POST '{"name":"x","price":1,"mode":"turbo"}'
@@ -1089,7 +1091,7 @@ expect_body_contains "QS-9 alias limit" '"query_limit": "5"' "$BASE/query-extra?
 expect_body_contains "QS-10 raw limit ignored (default)" '"query_limit": "10"' "$BASE/query-extra?limit=9"
 expect_code "QS-11 required list missing" 422 "$BASE/query-req"
 expect_body_contains "QS-11 missing loc" '["query","n"]' "$BASE/query-req"
-expect_body_contains "QS-11 field required" '"msg":"field required"' "$BASE/query-req"
+expect_body_contains "QS-11 Field required" '"msg":"Field required"' "$BASE/query-req"
 expect_code "QS-12 required list ok" 200 "$BASE/query-req?n=1&n=2"
 expect_body_contains "QS-12 n csv" '"query_n": "1,2"' "$BASE/query-req?n=1&n=2"
 # QS-13: OpenAPI — alias name / array+items / 空 list 默认 / description
@@ -1202,6 +1204,48 @@ if [[ "$OT_API" == *'"security":[{"OAuth2PasswordBearer":[]}'* ]]; then
 else
     fail "OT-25 openapi operation security" "missing in: ${OT_API:0:200}"
 fi
+
+# --- Form 多值 + 422 parity (决策-45, ADR-0020, P2 矩阵 #5) -------------------------
+# FastAPI 0.141.1 实测: list 多值 (全部 occurrence) / 标量 last-wins / alias (wire
+# key) / 422 detail ("Field required" F 大写 + input 字段 + list collect-all).
+FM_FULL='items=1&items=2&items=3&tags=a&count=5&fx=1.5&fb=true'
+expect_body_contains "FM-1 list 3-occ csv" '"form_items": "1,2,3"' "$BASE/form-multi" POST "$FM_FULL"
+expect_body_contains "FM-2 list single wrap" '"form_items": "1"' "$BASE/form-multi" POST 'items=1&tags=a'
+expect_body_contains "FM-3 missing 422 F+input null" '"loc":["body","items"],"msg":"Field required","type":"missing","input":null' "$BASE/form-multi" POST 'tags=x'
+expect_body_contains "FM-4 scalar default 0" '"form_count": "0"' "$BASE/form-multi" POST 'items=1&tags=a'
+expect_body_contains "FM-5 list default empty (fx)" '"form_fx": ""' "$BASE/form-multi" POST 'items=1&tags=a'
+expect_body_contains "FM-6 list default empty (fb)" '"form_fb": ""' "$BASE/form-multi" POST 'items=1&tags=a'
+expect_body_contains "FM-7 float value" '"form_fx": "1.5"' "$BASE/form-multi" POST 'items=1&tags=a&fx=1.5'
+FM8=$(http_body "$BASE/form-multi" POST 'items=1&items=zz&items=yy&tags=a')
+N8=$(printf '%s' "$FM8" | grep -o '"type":"int_parsing"' | wc -l | tr -d ' ')
+if [[ "$N8" == "2" ]]; then pass "FM-8 collect-all 2 int_parsing"
+else fail "FM-8 collect-all 2 int_parsing" "got $N8: ${FM8:0:160}"; fi
+expect_body_contains "FM-9 float_parsing input" '"type":"float_parsing","input":"abc"' "$BASE/form-multi" POST 'items=1&tags=a&fx=abc'
+expect_body_contains "FM-10 bool_parsing input" '"type":"bool_parsing","input":"xyz"' "$BASE/form-multi" POST 'items=1&tags=a&fb=xyz'
+expect_body_contains "FM-11 alias wire key" '"form_labels": "x,y"' "$BASE/form-alias" POST 'tags=x&tags=y'
+expect_body_contains "FM-12 alias raw -> default" '"form_labels": ""' "$BASE/form-alias" POST 'labels=zz'
+expect_body_contains "FM-13 scalar default (size)" '"form_size": "2"' "$BASE/form-alias" POST 'tags=x'
+expect_body_contains "FM-14 login last-wins" '"form_username": "bob"' "$BASE/login" POST 'username=alice&username=bob&remember=1'
+expect_body_contains "FM-15 login missing -> empty" '"form_password": ""' "$BASE/login" POST 'username=alice'
+expect_body_contains "FM-16 url-encoded multi" '"form_tags": "a b,c"' "$BASE/form-multi" POST 'items=1&tags=a%20b&tags=c'
+FM_OAPI=$(http_body "$BASE/openapi.json")
+FM_OAPI_F="$TMP/oapi_form.json"
+printf '%s' "$FM_OAPI" > "$FM_OAPI_F"
+if "$FMTOOL" jsoncheck "$FM_OAPI_F" >/dev/null; then
+    pass "FM-17 openapi.json valid JSON (jsoncheck)"
+else
+    fail "FM-17 openapi.json valid JSON (jsoncheck)" "$(head -c 200 "$FM_OAPI_F")"
+fi
+expect_body_contains "FM-18 form-multi requestBody+required" '"requestBody":{"required":true,"content":{"application/x-www-form-urlencoded":{"schema":{"$ref":"#/components/schemas/Body_form_multi_post"}}}}' "$BASE/openapi.json"
+if [[ "$FM_OAPI" == *'"requestBody":{"content":{"application/x-www-form-urlencoded":{"schema":{"$ref":"#/components/schemas/Body_form_demo_post"}}}}'* ]]; then
+    pass "FM-19 login requestBody no required"
+else
+    fail "FM-19 login requestBody no required" "unexpected: ${FM_OAPI:0:120}"
+fi
+FM19Q=$(http_body "$BASE/query-req?n=1&n=zz&n=yy")
+N19=$(printf '%s' "$FM19Q" | grep -o '"type":"int_parsing"' | wc -l | tr -d ' ')
+if [[ "$N19" == "2" ]]; then pass "FM-20 query collect-all 2 int_parsing (P1 fix)"
+else fail "FM-20 query collect-all 2 int_parsing (P1 fix)" "got $N19: ${FM19Q:0:160}"; fi
 
 # --- summary ---------------------------------------------------------------------
 
