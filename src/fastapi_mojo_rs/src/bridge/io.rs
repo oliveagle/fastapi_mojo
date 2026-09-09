@@ -42,7 +42,7 @@ use super::conn::{
 use super::conn::deadlines::{decide, DeadlineAction};
 use super::conn::parse::finish_header;
 use super::parse as bridge_parse;
-use super::request::{set_http_fields, set_ws_event_type};
+use super::request::{set_accepts_gzip, set_http_fields, set_ws_event_type};
 use super::send::{send_all, send_error_json};
 use super::signals::is_running;
 use super::socket::setup_conn_fd;
@@ -189,6 +189,8 @@ fn apply_request_header(c: &mut Conn, hdr: super::conn::parse::RequestHeader) ->
             hdr.close_after_response,
             c.fd,
         );
+        // 决策-40: 记录 Accept-Encoding: gzip (GZip 中间件判定, 纯 header 扫描)
+        set_accepts_gzip(bridge_parse::accepts_gzip(&c.hdr[..c.hdr_total]));
         return 1;
     }
 
@@ -216,6 +218,8 @@ fn apply_request_header(c: &mut Conn, hdr: super::conn::parse::RequestHeader) ->
         hdr.close_after_response,
         c.fd,
     );
+    // 决策-40: 记录 Accept-Encoding: gzip (GZip 中间件判定, 纯 header 扫描)
+    set_accepts_gzip(bridge_parse::accepts_gzip(&c.hdr[..c.hdr_total]));
 
     if c.body_got >= hdr.content_length {
         // body 已齐: UTF-8 校验

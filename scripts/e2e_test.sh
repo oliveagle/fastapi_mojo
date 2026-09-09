@@ -21,6 +21,7 @@
 #   - Lifespan: 声明式 startup/shutdown 命令 (决策-36, LS-1..LS-4)
 #   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
 #   - Body validation: _body_schema + Field 约束 + Enum + FastAPI 422 detail (决策-38, BS-1..BS-12)
+#   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -868,6 +869,71 @@ expect_body_contains "BS-11c enum param loc" '["query","level"]' "$BASE/enum?lev
 expect_body_contains "BS-12a openapi components" '"components"' "$BASE/openapi.json"
 expect_body_contains "BS-12b openapi requestBody ref" '"$ref":"#/components/schemas/validate_item"' "$BASE/openapi.json"
 expect_body_contains "BS-12c openapi enum array" '"enum":["low","medium","high"]' "$BASE/openapi.json"
+
+# --- GZip 中间件 (决策-40, ADR-0015, Goal-0003 P2 矩阵 #24) -----------------------
+# FastAPI/Starlette GZipMiddleware 声明式 env 等价形态: FASTAPI_MOJO_GZIP=1 启用
+# (默认关 = FastAPI 默认) + MIN_SIZE (默认 500, 对齐 Starlette) + MAX_SIZE (1MiB).
+# 条件: client Accept-Encoding 含裸 token gzip/x-gzip (不支持 q, 上游 quirk 对齐)
+#   + body >= min_size + 非 304 + extra 无 Content-Encoding.
+# 压缩后: Content-Encoding: gzip + Content-Length = 压缩后长度; Content-Type 不变.
+# flate2 = 纯 Rust miniz_oxide 后端 (无 C 路径, 静态, ldd 仅 libc).
+# 零 python3 (Track B 决策-22): roundtrip 用 curl --compressed 自动 gunzip + cmp.
+echo "== GZip middleware (决策-40) =="
+GZ_PORT=$((PORT + 101))
+GZ_LOG="$TMP/gzip.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+    FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_GZIP=1 \
+    "$BIN" --port "$GZ_PORT" \
+    > "$GZ_LOG" 2>&1 ) &
+GZ_PID=$!
+GZ_READY=0
+for _ in $(seq 1 30); do
+    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$GZ_PORT/health"; then
+        GZ_READY=1; break
+    fi
+    sleep 0.3
+done
+if [[ "$GZ_READY" == 1 ]]; then
+    GZ_BASE="http://127.0.0.1:$GZ_PORT"
+    # GZ-1: 默认关 (主 server 无 env): Accept-Encoding: gzip 也不压缩 (FastAPI 默认对齐)
+    if curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$BASE/openapi.json" | grep -qi 'content-encoding'; then
+        fail "GZ-1 default off: no Content-Encoding" "default server returned gzip header"
+    else
+        pass "GZ-1 default off: no Content-Encoding"
+    fi
+    # GZ-2: 启用 + Accept-Encoding: gzip + /openapi.json (>500B) → Content-Encoding: gzip
+    if curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/openapi.json" | grep -qi 'content-encoding: *gzip'; then
+        pass "GZ-2 gzip on: Content-Encoding: gzip"
+    else
+        fail "GZ-2 gzip on: Content-Encoding: gzip"
+    fi
+    # GZ-3: 启用 + 无 Accept-Encoding → identity
+    if curl -s -D - -o /dev/null "$GZ_BASE/openapi.json" | grep -qi 'content-encoding'; then
+        fail "GZ-3 no accept-encoding: identity"
+    else
+        pass "GZ-3 no accept-encoding: identity"
+    fi
+    # GZ-4: 启用 + 小 body (/health <500B min_size) → identity
+    if curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/health" | grep -qi 'content-encoding'; then
+        fail "GZ-4 small body below min_size: identity"
+    else
+        pass "GZ-4 small body below min_size: identity"
+    fi
+    # GZ-5: roundtrip 逐字节一致 (curl --compressed 自动 gunzip) + JSON 完整性
+    curl -s "$GZ_BASE/openapi.json" > "$TMP/gz_plain.json"
+    curl -s --compressed -H 'Accept-Encoding: gzip' "$GZ_BASE/openapi.json" > "$TMP/gz_gz.json"
+    if cmp -s "$TMP/gz_plain.json" "$TMP/gz_gz.json" && grep -q '"openapi"' "$TMP/gz_gz.json"; then
+        pass "GZ-5 gunzip roundtrip identical"
+    else
+        fail "GZ-5 gunzip roundtrip identical"
+    fi
+else
+    fail "GZ side server did not start" "see $GZ_LOG"
+fi
+kill -TERM "$GZ_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$GZ_PID" 2>/dev/null
 
 # --- summary ---------------------------------------------------------------------
 

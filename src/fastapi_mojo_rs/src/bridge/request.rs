@@ -48,6 +48,8 @@ pub struct CurrentRequest {
     /// 上一次响应状态行 (供 /status 路由读, send_response 时更新).
     pub last_status: [u8; 32],
     pub last_status_len: usize,
+    /// 决策-40: 当前请求 Accept-Encoding 含 gzip/x-gzip (send_response GZip 判定用).
+    pub accepts_gzip: bool,
     /// F3a: 最近一次按名查询的请求 header 值 (NUL 结尾, 供 get_request_header_slice 读).
     /// 在 conn.rs::extract_header_value_to_current 写入; 多次查询会覆盖, 串行调用安全.
     pub hdr_value: [u8; 512],
@@ -74,6 +76,7 @@ impl CurrentRequest {
             ws_protocol_len: 0,
             last_status: [0u8; 32],
             last_status_len: 0,
+            accepts_gzip: false,
             hdr_value: [0u8; 512],
             hdr_value_len: 0,
         }
@@ -168,8 +171,20 @@ pub fn reset_request_fields() {
     g.ws_protocol_len = 0;
     g.last_status_len = 0;
     g.last_status = [0u8; 32];
+    g.accepts_gzip = false;
     g.hdr_value_len = 0;
     g.hdr_value = [0u8; 512];
+}
+
+/// 决策-40: 记录当前请求 Accept-Encoding 是否含 gzip (io.rs 解析完 header 时调用).
+pub fn set_accepts_gzip(b: bool) {
+    let mut g = lock_current();
+    g.accepts_gzip = b;
+}
+
+/// 决策-40: 当前请求是否接受 gzip 响应.
+pub fn current_accepts_gzip() -> bool {
+    lock_current().accepts_gzip
 }
 
 /// 更新 active fd/phase (conn_done / pump 后).
@@ -410,4 +425,13 @@ mod tests {
         set_close_after_response(true);
         assert!(get_close_after_response());
     }
+
+    #[test]
+    fn accepts_gzip_set_and_reset() {
+        set_accepts_gzip(true);
+        assert!(current_accepts_gzip());
+        reset_request_fields();
+        assert!(!current_accepts_gzip());
+    }
 }
+

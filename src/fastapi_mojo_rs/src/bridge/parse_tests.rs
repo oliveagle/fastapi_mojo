@@ -377,3 +377,35 @@ fn is_multipart_form_data_other_ct() {
     // 前缀不完整 (无 /form-data) 不算 multipart
     assert!(!is_multipart_form_data(b"POST / HTTP/1.1\r\nContent-Type: multipart\r\n\r\n"));
 }
+
+// ---------- accepts_gzip (决策-40) ----------
+
+#[test]
+fn accepts_gzip_basic() {
+    let hdr = b"GET / HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n";
+    assert!(accepts_gzip(hdr));
+}
+
+#[test]
+fn accepts_gzip_xgzip_and_case() {
+    assert!(accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: x-gzip\r\n\r\n"));
+    assert!(accepts_gzip(b"GET / HTTP/1.1\r\nACCEPT-ENCODING: GZIP\r\n\r\n"));
+}
+
+#[test]
+fn accepts_gzip_list_tokens() {
+    // 列表中裸 token gzip 命中 (Starlette: strip 后精确匹配 gzip/x-gzip)
+    let hdr = b"GET / HTTP/1.1\r\nAccept-Encoding: br, gzip, zstd\r\n\r\n";
+    assert!(accepts_gzip(hdr));
+    // quirk 对齐: 带 q-value 的 "gzip;q=0.5" 不算 (Starlette 精确匹配, 不支持 q)
+    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=0.5\r\n\r\n"));
+    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=0\r\n\r\n"));
+}
+
+#[test]
+fn accepts_gzip_absent_or_other() {
+    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\n\r\n"));
+    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: br, deflate\r\n\r\n"));
+    // deflate 不含 gzip token
+    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n"));
+}

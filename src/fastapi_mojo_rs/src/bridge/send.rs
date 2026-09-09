@@ -28,7 +28,8 @@
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
-use super::request::{get_close_after_response, set_last_status};
+use super::request::{current_accepts_gzip, get_close_after_response, set_last_status};
+use super::gzip;
 use super::response::{build_preflight_response, build_response_headers, get_content_type, json_escape};
 use super::state::get_static_dir;
 
@@ -78,6 +79,11 @@ pub fn send_all(fd: c_int, buf: &[u8]) -> c_int {
 /// 发送完整 HTTP 响应 (头 + 可选体), 端口 C `send_response` §1421-1445。
 /// `extra` 为无尾 CRLF 的可选额外头行 (如 `Allow: GET, POST`); None 不添加。
 /// 发送前把 `status` 记入 last_status (供 /status 路由读)。
+///
+/// 决策-40 (GZip 中间件, Starlette GZipMiddleware 等价): 满足 gzip 条件
+/// (env 启用 + client Accept-Encoding: gzip + 尺寸窗口 + 非 304 + extra
+/// 无 Content-Encoding) 时 body 换 gzip 字节并追加 `Content-Encoding: gzip`
+/// 头 (Content-Type 不变, Content-Length = 压缩后长度)。
 pub fn send_response(
     fd: c_int,
     status: &str,
@@ -86,11 +92,38 @@ pub fn send_response(
     include_body: bool,
     extra: Option<&str>,
 ) -> c_int {
+    // 决策-40: GZip 判定 + 压缩 (gzip_result 持有压缩 body 生命期)
+    let gzip_result: Option<Vec<u8>> =
+        if gzip::should_gzip(
+            &gzip::config(),
+            body.len(),
+            status,
+            extra,
+            current_accepts_gzip(),
+            include_body,
+        ) {
+            gzip::gzip_compress(body)
+        } else {
+            None
+        };
+    // 压缩时追加 Content-Encoding: gzip 行 (与既有 extra 行按 \r\n 合并);
+    // 未压缩时原样透传 extra.
+    let gzip_extra: Option<String> = gzip_result
+        .is_some()
+        .then(|| match extra {
+            Some(e) => format!("{e}\r\nContent-Encoding: gzip"),
+            None => "Content-Encoding: gzip".to_string(),
+        });
+    let body_out: &[u8] = match &gzip_result {
+        Some(c) => c.as_slice(),
+        None => body,
+    };
+    let extra_out: Option<&str> = gzip_extra.as_deref().or(extra);
     // ⚠️ get_close_after_response() 返回 "close_after" 语义 (C: g_close_after_response);
     // build_response_headers 的 keep_alive 参数是其**取反**。
     // C 逻辑: `g_close_after_response ? "close" : "keep-alive"`。
     let close_after = get_close_after_response();
-    let hdr = build_response_headers(status, content_type, body.len(), !close_after, extra);
+    let hdr = build_response_headers(status, content_type, body_out.len(), !close_after, extra_out);
     if hdr.len() >= RESP_HDR_SIZE {
         return -1; // C: hlen >= sizeof hdr -> -1
     }
@@ -98,7 +131,7 @@ pub fn send_response(
     if send_all(fd, &hdr) != 0 {
         return -1;
     }
-    if include_body && !body.is_empty() && send_all(fd, body) != 0 {
+    if include_body && !body_out.is_empty() && send_all(fd, body_out) != 0 {
         return -1;
     }
     0

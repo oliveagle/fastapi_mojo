@@ -7,7 +7,7 @@
 #   - crate-type = ["staticlib"]  (只产 .a, 绝不 cdylib)
 #   - panic = "abort"             (panic 不跨界 unwind)
 #   - lto = true, codegen-units = 1, opt-level = "z"  (体积/速度平衡)
-#   - 零第三方 crate (系统调用用 extern "C" 直连; SHA-1/base64/UTF-8 手写)
+#   - 唯一第三方 crate = flate2 (GZip 响应压缩 [决策-40, 已落地] + permessage-deflate/RFC7692 [ws-deflate, 预置]; 默认纯 Rust miniz_oxide 后端; 静态链接; ldd 仅 libc 实测; 无 C 路径; SHA-1/base64/UTF-8 手写其余系统调用)
 
 [package]
 name = "fastapi_mojo_rs"
@@ -26,3 +26,7 @@ panic = "abort"
 lto = true
 codegen-units = 1
 opt-level = "z"
+
+
+[dependencies]
+flate2 = "1.0"

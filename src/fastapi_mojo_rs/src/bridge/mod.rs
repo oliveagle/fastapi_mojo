@@ -42,6 +42,7 @@ pub mod port;
 pub mod response;
 pub mod shim;
 pub mod send;
+pub mod gzip;
 pub mod signals;
 pub mod socket;
 pub mod ws_session_ffi;
@@ -52,6 +53,9 @@ pub mod time_util;
 
 #[cfg(test)]
 mod cmd_tests;
+
+#[cfg(test)]
+mod gzip_tests;
 
 #[cfg(test)]
 mod conn_tests;

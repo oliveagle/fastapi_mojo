@@ -221,6 +221,43 @@ pub fn connection_directive(hdr: &[u8]) -> ConnDirective {
     ConnDirective::None
 }
 
+/// `Accept-Encoding` 列表中含**裸 token** `gzip` / `x-gzip`（strip 后精确
+/// 匹配, 大小写不敏感）→ true. **不支持 q-value**（`gzip;q=0` 不算）—
+/// Starlette GZipMiddleware `_zlib_accept_encoding` quirk 对齐（决策-40,
+/// ADR-0015）. 无 Accept-Encoding 头 → false.
+pub fn accepts_gzip(hdr: &[u8]) -> bool {
+    let v = match get_header_value_ci(hdr, b"Accept-Encoding") {
+        Some(v) => v,
+        None => return false,
+    };
+    // 逐 token 扫描 (逗号分隔, 前后空白 trim; 与 parse.rs 既有扫描风格一致)
+    let mut start = 0usize;
+    let mut i = 0usize;
+    loop {
+        while i < v.len() && v[i] != b',' {
+            i += 1;
+        }
+        let mut b = start;
+        let mut e = i;
+        while b < e && (v[b] == b' ' || v[b] == b'\t') {
+            b += 1;
+        }
+        while e > b && (v[e - 1] == b' ' || v[e - 1] == b'\t') {
+            e -= 1;
+        }
+        let tok = &v[b..e];
+        if tok.eq_ignore_ascii_case(b"gzip") || tok.eq_ignore_ascii_case(b"x-gzip") {
+            return true;
+        }
+        if i >= v.len() {
+            break;
+        }
+        start = i + 1;
+        i += 1;
+    }
+    false
+}
+
 /// 大小写不敏感检查 `Expect: 100-continue` (RFC 7231 §5.1.1; 仅 honor
 /// 100-continue, 遇到其他 Expect 值返回 false)。端口 C `expect_100_continue`
 /// (含其非行首子串扫描语义, 与 C 行为字节等价)。

@@ -10,7 +10,7 @@
 use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::request::{get_last_status_len, read_last_status_byte};
+use super::request::{current_accepts_gzip, get_last_status_len, read_last_status_byte, reset_request_fields, set_accepts_gzip};
 use super::send::*;
 use super::state::set_static_dir;
 
@@ -398,4 +398,64 @@ fn send_sse_response_legacy_still_200() {
     let hs = String::from_utf8_lossy(head);
     assert!(hs.starts_with("HTTP/1.1 200 OK\r\n"), "{hs:?}");
     assert_eq!(body_after_headers(&resp), body);
+}
+
+// ---------- GZip 中间件 (决策-40, ADR-0015) ----------
+
+/// GZip 全链路 (真实 fd): env 启用 + client 接受 + body >= min
+/// → Content-Encoding: gzip 头 + gzip 体 (解压后逐字节还原)。
+/// env 副作用受控: 本测试设置 FASTAPI_MOJO_GZIP 后删除;
+/// CONFIG OnceLock 缓存后保持 enabled, 但后续测试 current_accepts_gzip()=false
+/// (reset_request_fields) 不会触发压缩, 无污染 (--test-threads=1).
+#[test]
+fn send_response_gzip_when_client_accepts() {
+    // 先清 config 缓存再设 env (前序测试可能已用空 env 初始化缓存)
+    super::gzip::__test_reset_config();
+    std::env::set_var("FASTAPI_MOJO_GZIP", "1");
+    set_accepts_gzip(true);
+    assert!(current_accepts_gzip());
+    let mut cp = ConnPair::new();
+    let mut body = Vec::with_capacity(1200);
+    for i in 0..1200 {
+        body.push((i % 26) as u8 + b'a');
+    }
+    let rc = send_simple_response(cp.b, "200 OK", &body);
+    assert_eq!(rc, 0);
+    let resp = recv_all(&mut cp);
+    let text = String::from_utf8_lossy(&resp);
+    assert!(text.contains("Content-Encoding: gzip"), "head: {}", &text[..text.len().min(200)]);
+    assert!(text.contains("Content-Type: application/json"));
+    // Content-Length 应为压缩后长度
+    let clen = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Length: ").map(|v| v.trim().to_string()))
+        .expect("Content-Length header");
+    let b = body_after_headers(&resp);
+    assert_eq!(clen.parse::<usize>().unwrap(), b.len(), "CL must equal compressed len");
+    // 解压 roundtrip
+    let mut dec = flate2::read::GzDecoder::new(b);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut dec, &mut out).unwrap();
+    assert_eq!(out, body, "gunzipped body must equal original");
+    std::env::remove_var("FASTAPI_MOJO_GZIP");
+    super::gzip::__test_reset_config();
+    set_accepts_gzip(false);
+    reset_request_fields();
+}
+
+/// 客户端不接受 gzip → 原样 identity (config 重置后 env 未设 → 禁用)。
+#[test]
+fn send_response_identity_when_client_no_gzip() {
+    super::gzip::__test_reset_config();
+    set_accepts_gzip(false);
+    let mut cp = ConnPair::new();
+    let body = vec![b'q'; 800];
+    let rc = send_simple_response(cp.b, "200 OK", &body);
+    assert_eq!(rc, 0);
+    let resp = recv_all(&mut cp);
+    let text = String::from_utf8_lossy(&resp);
+    assert!(!text.contains("Content-Encoding"), "no gzip without client accept");
+    let b = body_after_headers(&resp);
+    assert_eq!(b, &body[..], "body must be untouched");
+    reset_request_fields();
 }
