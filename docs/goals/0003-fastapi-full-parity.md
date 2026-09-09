@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~44）**：
-- 单 binary 3.17M，ldd 仅 libc，env -i 干净启动，e2e **274 项**，cargo 349 单测
+**已达成（v0.5.1 + 决策-31~45）**：
+- 单 binary 3.24M，ldd 仅 libc，env -i 干净启动，e2e **294 项**，cargo 349 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -26,7 +26,8 @@
   **GZip 中间件 (FASTAPI_MOJO_GZIP env 声明式, Rust bridge flate2 纯 Rust, 决策-40)**/
   **CORS 完整配置 (Starlette CORSMiddleware 声明式 env 等价, 决策-42)**/
   **查询参数精化 (List 多值 / alias / description, 声明式纯 Mojo, 决策-43)**/
-  **OAuth2/JWT (password grant + JWT HS256, Rust crypto 原语 + 纯 Mojo 协议层, 决策-44)**
+  **OAuth2/JWT (password grant + JWT HS256, Rust crypto 原语 + 纯 Mojo 协议层, 决策-44)**/
+  **Form 多值/alias/desc + 422 detail parity (List 多值 / alias / desc / input / collect-all, 声明式纯 Mojo, 决策-45)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -34,9 +35,9 @@
 |---|------|-------------|------|------|------|
 | 1 | 路径方法 | GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD + 405+Allow | ✅ | PATCH 未单独注册(走通用) | 补 PATCH |
 | 2 | 路径参数 | `{param}` + 类型 + 约束 | ✅ 类型化 | 约束(gt/lt/regex) | §P2 |
-| 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 多值 List/alias/desc（决策-43, ADR-0018：T[] 空括号 list 语法 + _param_aliases query-only + _param_descs → OpenAPI 双处） | 标量 bool 短消息 vs list 完整消息 + CSV 逗号歧义（均文档化, ADR-0018 §3.5, e2e 守护） | — |
+| 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 多值 List/alias/desc/collect-all（决策-43/45, ADR-0018/0020：T[] 语法 + alias query-only + desc 双处；元素校验 **collect-all** — ADR-0020 更正 ADR-0018「首败即停 = 上游同款」错误实测） | 标量 bool 短消息 vs list 完整消息 + CSV 逗号歧义（均文档化, ADR-0018 §3.5, e2e 守护） | — |
 | 4 | 请求体 | Pydantic 模型 / dict / 嵌套 | ✅ 声明式 spec（决策-38） | validator 自定义回调 = Mojo 无闭包，声明式约束词表为等价形态（扩充 P2） | — |
-| 5 | Form | Form(...) 多值 | 🟡 单值 | 多值 | §P2 |
+| 5 | Form | Form(...) 多值 / alias / desc | ✅ 全量（决策-45, ADR-0020：List 多值 = 全部 occurrence / 标量 last-wins / alias wire key（原始名无效力）/ _param_descs → OpenAPI；422 = "Field required" + input + list collect-all；/login 未标注字段旧语义兼容） | 未标注字段 = 未声明校验（不 422）+ CSV 逗号歧义（均文档化, ADR-0020 §3.5, e2e FM 守护） | — |
 | 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 字节+b64 | UploadFile 对象 API | §P2 |
 | 7 | Header | Header(...) | ✅ desc（决策-43, _param_descs → OpenAPI） | alias | §P2 |
 | 8 | Cookie | Cookie(...) | ✅ | — | — |
@@ -78,6 +79,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 
 ### P2（后续 — 精化/完备）
 - 查询多值 / alias / desc ✅（决策-43, ADR-0018）
+- Form 多值 / alias / desc ✅（决策-45, ADR-0020）
 - 中间件自定义（GZip ✅ 决策-40；自定义逻辑 = 声明式 env 扩充）
 - CORS 完整配置 ✅（决策-42, ADR-0017）
 - OAuth2/JWT（password grant + JWT HS256）✅（决策-44, ADR-0019）
@@ -103,10 +105,35 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-44 OAuth2 password flow + JWT（HS256）**（ADR-0019, P2 矩阵 #17 ✅，对标矩阵最后一项）：
+*最后更新：2026-09-10（**决策-45 Form 多值/alias/desc + 422 detail parity**（ADR-0020, P2 矩阵 #5 ✅）：
+纯 Mojo form_params（493：parse_form_multi multi-map（同 key 全部 occurrence 按序, url_decode, 裸 key→""）/ validate_form_collect
+（缺失 → "Field required" F 大写 + input null；list = 全部 occurrence 逐元素 **collect-all**；标量 = last-wins；
+loc ["body",name(,i)]）/ apply_form_extras（list→CSV / 标量 last-wins / alias wire key 绑定（原始名无效力）/ 未标注
+_form_fields 字段旧语义（缺失 → ""，/login 向后兼容））/ form_openapi_schema（F10 字段序 items/type/title/description/default）/
+form_request_body_required（仅当存在无默认 _form_types 字段时 required:true））
++ request_response.parse_form_multi（_parse_form_body multi 姊妹，决策-44 纯 Mojo 分层延续，FFI diff = 0）
++ 422 全局 parity（P1-P5，FastAPI 0.141.1 + pydantic 2.13.5 probe）：3 个构造器（params_typed._pe / params_query_extra.
+make_error_json / body_validate.err_obj）加 input（missing=null / parse=raw 转义 / JSON body 缺失=收到的 body 对象；
+字段序 loc,msg,type,input — 上游序差异文档化）；"field required" → "Field required"；
+validate_list_values stop-on-first → **collect-all**（P1 更正 ADR-0018 错误实测 — 0.141.1 对 query/body 均 collect-all）；
+parse_typed_value float 接受 int 字面量（P6：pydantic v2 "1" → 1.0）+ 接受 "str"（潜在 bug 修复）
++ dispatch 2 点接线（校验段：CT 含 urlencoded（大小写不敏感）→ parse_form_multi，否则空 multi = **上游同款**（非 form
+body → 字段全缺失 → 默认/422）；注入段：inject_form_fields（决策-28）移除 → apply_form_extras 单点）
++ /form-multi（items:int[];tags:str[];count:int=0;fx:float[]=;fb:bool[]= + _param_descs）+ /form-alias（labels:str[]=;size:int=2
++ _form_aliases labels=tags）demo + OpenAPI form requestBody（与 _body_schema 互斥；_multipart 跳过）
++ 附带 P0 修复（P7）：/openapi.json 自决策-38 起非法 JSON（query 参数 schema 括号配对错 — 标量分支不关对象 +
+_generate_parameter 过早关参数对象且 parameter 级 description 落到对象外；子串 e2e 从未发现）— 修正 +
+fmtool jsoncheck 整文合法性门禁（fmtool 新增纯 std 子命令）；FFI diff = 0，零新 crate；
+e2e **294/294**（274+20 FM：3-occ/wrap / missing F+input null / 默认×3 / collect-all×3（int 双错误+loc idx）/ alias×3 /
+兼容×2 / URL 编码 / openapi.json jsoncheck 整文 / requestBody×2（required:true / 无 required）/ query collect-all×2（P1））
+/ cargo **349/0/4**（FFI 零改动）/ clippy 0 警告（双 crate）/ bench 0 errors（34.2k, 历史区间内）/ ldd 仅 libc / env -i
+（health + /form-multi + /form-alias 200）/ **3.24M**（3,400,400 B，≤4.2M，+74 KB）；
+下一轮：P2 剩余（UploadFile 对象 API / Depends use_cache / File-Streaming 通用响应 / 任意异常 handler /
+Request.state / WS 精化 / TestClient）；
+2026-09-10（**决策-44 OAuth2 password flow + JWT（HS256）**（ADR-0019, P2 矩阵 #17 ✅，对标矩阵最后一项）：
 Rust bridge crypto.rs（185 行，零第三方 crate，纯 std 手写 SHA-256 FIPS 180-4 / HMAC-SHA256 RFC 2104
 （>64B key 先 sha256）/ base64url RFC 7515 宽松解码；known vectors ×12 + pyjwt-2.13 独立实现 oracle 交叉验证）
 + FFI +2（fm_hmac_sha256_b64url[_free]，malloc(n+1)+NUL 决策-36 契约）

@@ -720,7 +720,67 @@
   /secure-jwt 接受）/ binary **3.17M**（3,326,672 B，≤4.2M；
   vs 决策-43 +49 KB）。
 
-*最后更新：2026-09-10（**决策-44 OAuth2 password flow + JWT HS256**（ADR-0019, Goal-0003
+- **已决策-45**：**Form 多值/alias/desc + 422 detail parity（ADR-0020，Goal-0003
+  P2 矩阵 #5 — 对标矩阵 #5 🟡→✅）**：
+  1. **`form_params.mojo`（493 行，纯函数模块，FFI diff = 0）**：
+     `parse_form_multi`（request_response 姊妹：同 key 全部 occurrence 按序 +
+     url_decode + 裸 key→""）/ `validate_form_collect`（必填缺失 →
+     "Field required"（F 大写）+ input null；list = 全部 occurrence
+     逐元素 **collect-all**（F4/P1 实测，上游 0.141.1 query/body 同款）；标量 =
+     last-wins；loc ["body",name(,i)]）/ `apply_form_extras`（list→CSV / 标量
+     last-wins / alias wire key 绑定（原始名无效力）/ 未标注 _form_fields 字段
+     旧语义（缺失→""，/login 向后兼容））/ `form_openapi_schema`（F10 字段序
+     items/type/title/description/default）/ `form_request_body_required`
+     （仅当存在无默认 _form_types 字段时 required:true）。
+  2. **422 detail 全局 parity（P1-P5，FastAPI 0.141.1 + pydantic 2.13.5 probe）**：
+     3 个既有构造器（`params_typed._pe` / `params_query_extra.make_error_json` /
+     `body_validate.err_obj`）加 `input`（字段序 loc,msg,type,input；上游序
+     type,loc,msg,input — 差异文档化）；"field required" → "Field required"；
+     `validate_list_values` stop-on-first → **collect-all**（更正 ADR-0018
+     「首个失败即停 = 上游同款」— 0.141.1 对 query/body 均 collect-all）；
+     `parse_typed_value` float 接受 int 字面量（P6：pydantic v2 "1" → 1.0）+
+     接受 "str"（潜在 bug 修复）。
+  3. **dispatch 接线（http_server_final 2 处）**：校验段（validate_body_schema
+     后）：CT 含 urlencoded（大小写不敏感）→ `parse_form_multi(body_str)`，否则
+     空 multi（**上游同款**：非 form body → 字段全缺失 → 默认/422）；错误并入
+     既有 all_errs（422 统一出口零新分支）。注入段：`inject_form_fields`
+     （决策-28）移除 → `apply_form_extras` 单点；demo：`/form-multi`（POST；
+     "items:int[];tags:str[];count:int=0;fx:float[]=;fb:bool[]=" +
+     _param_descs）+ `/form-alias`（POST；"labels:str[]=;size:int=2" +
+     _form_aliases labels=tags）。
+  4. **OpenAPI**：`_generate_operation` form requestBody（与 _body_schema 互斥；
+     _multipart 跳过）+ components form schema（Body_<name>_<method>，命名
+     偏差 §3.5）；**附带 P0 修复（P7）**：query 参数 schema 括号配对自
+     决策-38 起错（标量分支不关对象 + `_generate_parameter` 过早关参数对象
+     且 description 落到对象外）→ /openapi.json 一直是非法 JSON（Swagger UI
+     无法渲染；子串 e2e 从未发现）— 修正 + `fmtool jsoncheck` 整文合法性
+     门禁（fmtool 新增纯 std 子命令）。
+  5. **文档化偏差（ADR-0020 §3.5 ×7）**：detail 字段序 / 嵌套缺失 input
+     近似 / bool 消息（query 短、form 完整）/ Body 命名 / 未标注字段 =
+     未声明校验 / multipart 互斥 / CSV 逗号歧义。
+  验收：e2e **294/294**（274 + 20 FM：多值 3-occ/wrap / missing F 大写 +
+  input null / 默认×3 / collect-all×3（int 双错误 + loc idx）/ alias×3
+  （wire/raw→默认/标量默认）/ /login 兼容×2 / URL 编码多值 / openapi.json
+  jsoncheck 整文 / requestBody×2（required:true / 无 required）/ query
+  collect-all×2（P1 更正））/ cargo **349/0/4**（FFI 零改动）/ clippy
+  `-D warnings` 0 警告（双 crate）/ bench 6 场景 0 errors（get_root_10k_100c
+  34.2k req/s，历史区间内）/ ldd 仅 libc / env -i 干净启动（health +
+  /form-multi + /form-alias 200）/ binary **3.24M**（3,400,400 B，≤4.2M；
+  vs 决策-44 +74 KB）。
+*最后更新：2026-09-10（**决策-45 Form 多值/alias/desc + 422 detail parity**（ADR-0020, Goal-0003
+P2 矩阵 #5）: 纯 Mojo form_params(493: parse_form_multi multi-map 全部 occurrence/validate_form_collect
+collect-all/apply_form_extras alias wire key/legacy 兼容/form_openapi_schema F10 字段序) + request_response.
+parse_form_multi + 422 全局 parity(3 构造器加 input: missing=null/parse=raw/JSON body 缺失=body 对象; "field required" → "Field required";
+validate_list_values stop-on-first → collect-all — 更正 ADR-0018 错误实测; float 接受 int 字面量 P6;
+parse_typed_value 接受 str 潜在 bug 修复) + dispatch 2 点接线(非 form CT → 空 multi = 上游同款; inject_
+form_fields 移除 → apply_form_extras 单点) + /form-multi + /form-alias demo + form requestBody OpenAPI
+(required:true 仅当无默认字段; Body_<name>_<method>); 附带 P0 修复(P7): /openapi.json 自决策-38 起非法
+JSON(参数 schema 括号配对错 + _generate_parameter 过早关对象, 子串 e2e 从未发现) — 修正 + fmtool
+jsoncheck 整文门禁(纯 std 新子命令); FFI diff = 0, 零新 crate;
+验收: e2e **294/294**（274+20 FM, 含 jsoncheck 整文 + collect-all×2 守护）/ cargo **349/0/4** /
+clippy 0 警告(双 crate) / bench 0 errors(34.2k req/s, 历史区间内) / ldd 仅 libc / env -i 干净启动
+(health+/form-multi+/form-alias 200) / **3.24M**(3,400,400 B, ≤4.2M, +74 KB);
+2026-09-10（**决策-44 OAuth2 password flow + JWT HS256**（ADR-0019, Goal-0003
 P2 矩阵 #17 — 对标矩阵最后一项）: Rust bridge crypto.rs 纯 std 手写 SHA-256/HMAC-SHA256/
 base64url(零第三方 crate, known vectors×12 + pyjwt-2.13 oracle 交叉验证) + FFI +2
 (fm_hmac_sha256_b64url[_free], 决策-36 NUL 契约) + 纯 Mojo security_jwt(497: b64url 编码/
