@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~40）**：
-- 单 binary 3.1M（3,207,192 B），ldd 仅 libc，env -i 干净启动，e2e **210 项**，cargo 323 单测
+**已达成（v0.5.1 + 决策-31~41）**：
+- 单 binary 3.1M，ldd 仅 libc，env -i 干净启动，e2e **213 项**，cargo 323 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -39,7 +39,7 @@
 | 8 | Cookie | Cookie(...) | ✅ | — | — |
 | 9 | 依赖注入 | Depends (嵌套/缓存/安全依赖) | ✅ 嵌套 | 缓存(use_cache) | §P2 |
 | 10 | 响应类型 | JSON/HTML/PlainText/File/Streaming/ORJSON/UJSON/Response | 🟡 JSON/HTML/SSE | File/Streaming 通用/ORJSON | §P1 |
-| 11 | response_model | 只返回声明字段 + exclude/include/none | ✅ 基础字段过滤（决策-35）；exclude/include/none P2 | 精化 | §P2 |
+| 11 | response_model | 只返回声明字段 + exclude/include/none | ✅ include+exclude+exclude_none（决策-35/41, ADR-0016：FastAPI 语义对齐，无模型 no-op） | — | — |
 | 12 | 状态码 | status_code 声明 | ✅ | — | — |
 | 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | 🟡 error_map | 任意异常类型 handler | §P2 |
 | 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 + GZip ✅（决策-40 env 声明式） | 用户自定义（Mojo 无闭包：声明式 env / 固定链为等价形态，扩充 P2） | §P2 |
@@ -102,7 +102,14 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P2* | 查询多值/alias、中间件 GZip、CORS 完整、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-09（**决策-40 GZip 中间件**（ADR-0015, P2 矩阵 #24）：
+*最后更新：2026-09-09（**决策-41 response_model 精化**（ADR-0016, P2 矩阵 #11 ✅）：
+FastAPI/Pydantic 三参数声明式（_response_model include + _response_exclude 剔除模型字段 +
+_response_exclude_none 剔除 null — 空串/__nested__:null 等价, "null" 字符串不算）；
+应用序 include→exclude→exclude_none; 无模型时 no-op（FastAPI 对齐）；
+单一 helper response_model_body（dispatch 14 行 → 1 行, FFI diff = 0）；
+e2e **213/213**（RM-1..7）/ cargo 323/0/4 / clippy 0 / bench 0 errors (42.2k) / ldd libc / env -i / 3.1M；
+下一轮：P2 精化（CORS 完整配置 / 查询多值+alias / OAuth2-JWT / Request.state / WS 精化 / OpenAPI custom info / ws-deflate / Form 多值 / UploadFile 对象 API）；
+前一轮：决策-40 GZip 中间件（ADR-0015, P2 矩阵 #24）：
 Starlette GZipMiddleware 声明式 env 等价（FASTAPI_MOJO_GZIP 默认关 = FastAPI 对齐；
 MIN_SIZE 500 / MAX_SIZE 1MiB；裸 token 判定不支持 q — 上游 quirk；非 304 + extra 无
 Content-Encoding）；钩子 = send_response 单点（所有响应类型必经，level 6 对齐 Starlette）；

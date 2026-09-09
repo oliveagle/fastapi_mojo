@@ -571,7 +571,32 @@
   0 警告 / ldd 仅 libc / env -i 干净启动 / bench 6 场景 0 errors
   （get_root_10k_100c 39.2k req/s，历史区间内无回归）。
 
-*最后更新：2026-09-09（**决策-40 GZip 中间件**（ADR-0015, Goal-0003 P2 矩阵 #24）：
+- **已决策-41**：**response_model 精化（exclude / exclude_none，FastAPI/
+  Pydantic 语义，声明式单 helper）**（ADR-0016，Goal-0003 P2 矩阵 #11）：
+  1. **声明式 API**：`_response_model`（include, 决策-35 既有）+
+     `_response_exclude`（从**模型字段**剔除）+ `_response_exclude_none=
+     "true"`（剔除 null 值字段 — 扁平 string dict 等价：空串 /
+     `__nested__:null`；普通值 `"null"` 是 JSON 字符串不算 null）。
+  2. **FastAPI 语义对齐**：include → exclude → exclude_none 应用序；
+     **无 `_response_model` 时三参数全 no-op**（上游同款：无 model 时
+     include/exclude 不影响响应）— /rm-noop demo + RM-7 e2e 固化。
+  3. **单一 helper**：`request_response.mojo::response_model_body(handler,
+     resp_data) -> String`（215 LOC 文件内）；dispatch 原 14 行 inline 块
+     → 1 行调用（**dispatch 净减行**，延续「新行为 = 数据 + 单点」模式）。
+  4. **demo**：/profile（4 字段模型 + exclude secret）/ /profile-none
+     （exclude_none 剔除空 note）/ /profile-keep（对照保留）/ /rm-noop
+     （KIND_ECHO 无模型 no-op）。
+  验收：e2e **213/213**（RM-1/2 语义更新 + RM-5/6/7 新增）/ cargo **323/0/4**
+  （Rust 零改动）/ clippy 0 警告 / bench 6 场景 0 errors（get_root_10k_100c
+  42.2k req/s，历史区间内）/ ldd 仅 libc / env -i 干净启动 / **FFI diff = 0** /
+  binary 3.1M（≤4.2M）。
+
+*最后更新：2026-09-09（**决策-41 response_model 精化**（ADR-0016, Goal-0003 P2 矩阵 #11）：
+FastAPI/Pydantic exclude/exclude_none 声明式三参数（_response_model include + _response_exclude 剔除模型字段 + _response_exclude_none 剔除 null）;
+应用序 include→exclude→exclude_none; 无模型时 no-op (FastAPI 对齐, /rm-noop demo + RM-7 固化);
+单一 helper response_model_body (request_response.mojo) — dispatch 14 行 inline 块 → 1 行调用 (净减行, FFI diff = 0);
+e2e **213/213** / cargo 323/0/4 / clippy 0 警告 / bench 0 errors (42.2k req/s) / ldd 仅 libc / env -i 干净启动 / 3.1M；
+2026-09-09（**决策-40 GZip 中间件**（ADR-0015, Goal-0003 P2 矩阵 #24）：
 Starlette GZipMiddleware 声明式 env 等价 (默认关 = FastAPI 对齐; MIN_SIZE 500 / MAX_SIZE 1MiB; 裸 token 判定, 不支持 q, 上游 quirk 对齐);
 钩子 = send_response 单点 (所有响应类型必经): gzip level 6 + Content-Encoding: gzip + Content-Length 更新 + Content-Type 不变;
 client 判定走 request 全局 (io.rs set_accepts_gzip, FFI diff = 0); flate2 纯 Rust miniz_oxide 后端 (无 C 路径, 静态, ldd 仍仅 libc 实测);
