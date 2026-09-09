@@ -23,6 +23,8 @@
 from router import Router, Route
 from handler import Handler
 from params_typed import get_param_types
+from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
+                         _split_top, _trim, _parse_range)
 from string_builder import StringBuilder
 from json import json_escape
 
@@ -58,14 +60,136 @@ def _type_to_openapi(t: String) -> String:
     return "string"  # default
 
 
-def _generate_parameter(param_name: String, in_: String, type_name: String, required: Bool) -> String:
-    """生成单个 OpenAPI parameter 对象 JSON 字符串."""
+def _json_str_array(csv: String) raises -> String:
+    """CSV -> JSON string 数组 ["a","b"] (决策-38 enum 输出)."""
+    var items = _split_top(csv, 44)
+    var sb = StringBuilder()
+    var first = True
+    for it in items:
+        var t = _trim(it)
+        if t == "":
+            continue
+        if not first:
+            sb.append(",")
+        first = False
+        sb.append("\"" + json_escape(t) + "\"")
+    return "[" + sb.take() + "]"
+
+
+def _openapi_default_value(fs: FieldSpec) raises -> String:
+    """default 的 JSON 字面量 (数字原样 / 字符串引号 / bool true-false / obj-arr raw)."""
+    var d = fs.default_value
+    if fs.type_name == "int" or fs.type_name == "float":
+        return d
+    if fs.type_name == "bool":
+        if d == "true" or d == "false":
+            return d
+        return "null"
+    if fs.type_name == "obj" or fs.type_name == "arr" or fs.is_array:
+        return d
+    return "\"" + json_escape(d) + "\""
+
+
+def _openapi_field_schema(fs: FieldSpec) raises -> String:
+    """单字段 schema (决策-38): type/format/enum/min-maxItems/min-maxLength/default."""
+    var sb = StringBuilder()
+    if fs.is_array:
+        sb.append("{\"type\":\"array\",\"items\":{\"type\":\"" + _type_to_openapi(fs.elem) + "\"}")
+        for c in _split_top(fs.constraints, 44):
+            var ct = _trim(c)
+            if ct.startswith("items="):
+                var pr = _parse_range(String(ct[byte=6:ct.byte_length()]))
+                if pr[0]:
+                    if pr[1] > 0:
+                        sb.append(",\"minItems\":" + String(pr[1]))
+                    if pr[2] > 0:
+                        sb.append(",\"maxItems\":" + String(pr[2]))
+        if fs.has_default():
+            sb.append(",\"default\":" + _openapi_default_value(fs))
+        sb.append("}")
+        return sb.take()
+    if fs.type_name == "obj" and fs.nested_spec != "":
+        return _openapi_object_schema(fs.nested_spec)
+    if fs.is_enum:
+        sb.append("{\"type\":\"" + _type_to_openapi(fs.type_name) + "\",\"enum\":" + _json_str_array(fs.enum_values))
+        if fs.has_default():
+            sb.append(",\"default\":" + _openapi_default_value(fs))
+        sb.append("}")
+        return sb.take()
+    sb.append("{\"type\":\"" + _type_to_openapi(fs.type_name) + "\"")
+    if fs.type_name == "int":
+        sb.append(",\"format\":\"int32\"")
+    if fs.type_name == "float":
+        sb.append(",\"format\":\"double\"")
+    if fs.type_name == "str":
+        for c in _split_top(fs.constraints, 44):
+            var ct = _trim(c)
+            if ct.startswith("len="):
+                var pr2 = _parse_range(String(ct[byte=4:ct.byte_length()]))
+                if pr2[0]:
+                    if pr2[1] > 0:
+                        sb.append(",\"minLength\":" + String(pr2[1]))
+                    if pr2[2] > 0:
+                        sb.append(",\"maxLength\":" + String(pr2[2]))
+    if fs.has_default():
+        sb.append(",\"default\":" + _openapi_default_value(fs))
+    sb.append("}")
+    return sb.take()
+
+
+def _openapi_object_schema(spec: String) raises -> String:
+    """_body_schema / 嵌套 obj{...} spec -> {"type":"object","properties":{...},"required":[...]}. """
+    var s = parse_body_schema(spec)
+    var sb = StringBuilder()
+    sb.append("{\"type\":\"object\",\"properties\":{")
+    var req = List[String]()
+    var first = True
+    for i in range(field_count(s)):
+        var fs = get_field(s, i)
+        if not first:
+            sb.append(",")
+        first = False
+        sb.append("\"" + json_escape(fs.name) + "\":" + _openapi_field_schema(fs))
+        if not fs.has_default():
+            req.append("\"" + json_escape(fs.name) + "\"")
+    sb.append("}")
+    if len(req) > 0:
+        sb.append(",\"required\":[" + ",".join(req) + "]")
+    sb.append("}")
+    return sb.take()
+
+
+def _openapi_param_schema(base: String) raises -> String:
+    """参数 schema: "int" / "str[low,high]" (enum, 决策-38)."""
+    var n = base.byte_length()
+    var i = 0
+    while i < n:
+        if ord(base[byte=i]) == 91:  # '['
+            var j = i + 1
+            var found = -1
+            while j < n:
+                if ord(base[byte=j]) == 93:
+                    found = j
+                    break
+                j += 1
+            if found > i:
+                var t = String(base[byte=0:i])
+                var vals = String(base[byte=i + 1:found])
+                if vals != "":
+                    return "{\"type\":\"" + _type_to_openapi(t) + "\",\"enum\":" + _json_str_array(vals) + "}"
+            break
+        i += 1
+    return "{\"type\":\"" + _type_to_openapi(base) + "\"}"
+
+
+def _generate_parameter(param_name: String, in_: String, type_name: String, required: Bool) raises -> String:
+    """生成单个 OpenAPI parameter 对象 JSON 字符串 (type_name 支持 enum 形式)."""
     var sb = StringBuilder()
     sb.append("{\"name\":\"" + json_escape(param_name) + "\",")
     sb.append("\"in\":\"" + in_ + "\",")
     sb.append("\"required\":" + ("true" if required else "false") + ",")
     if in_ == "path" or in_ == "query":
-        sb.append("\"schema\":{\"type\":\"" + _type_to_openapi(type_name) + "\"}}")
+        sb.append("\"schema\":" + _openapi_param_schema(type_name) + "}")
     else:  # header
         sb.append("\"schema\":{\"type\":\"string\"}}")
     return sb.take()
@@ -172,6 +296,10 @@ def _generate_operation(route: Route) raises -> String:
     if len(params) > 0:
         sb.append("\"parameters\":[" + ",".join(params) + "],")
 
+    # 决策-38: requestBody (from _body_schema declaration) -> $ref components/schemas/<name>
+    if "_body_schema" in route.handler.data and route.handler.data["_body_schema"] != "":
+        sb.append("\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" + json_escape(route.handler.name) + "\"}}}},")
+
     # responses: default 200 + _error_map 派生错误码
     var responses = StringBuilder()
     responses.append("\"200\":{\"description\":\"OK\",\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\"}}}}")
@@ -242,7 +370,25 @@ def generate_openapi(router: Router, title: String, version: String) raises -> S
             first_method = False
             sb.append("\"" + router.routes[j].method + "\":{" + _generate_operation(router.routes[j]) + "}")
         sb.append("}")
-    sb.append("}}")
+    sb.append("}")
+    # 决策-38: components/schemas (from _body_schema declaration, handler.name 去重)
+    var schemas = List[String]()
+    var s_names = List[String]()
+    for i in range(router.route_count()):
+        if "_body_schema" in router.routes[i].handler.data and router.routes[i].handler.data["_body_schema"] != "":
+            var nm = router.routes[i].handler.name
+            var dup = False
+            for x in s_names:
+                if x == nm:
+                    dup = True
+                    break
+            if not dup:
+                s_names.append(nm)
+                var sch = _openapi_object_schema(router.routes[i].handler.data["_body_schema"])
+                schemas.append("\"" + json_escape(nm) + "\":" + sch)
+    if len(schemas) > 0:
+        sb.append(",\"components\":{\"schemas\":{" + ",".join(schemas) + "}}")
+    sb.append("}")
     return sb.take()
 
 

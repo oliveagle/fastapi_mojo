@@ -11,7 +11,8 @@ from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET
 from params_query import parse_path_params, parse_query_params, url_decode, ParsedParams
 from params_json import parse_body_json
-from params_typed import validate_params, get_param_types, TypedError
+from params_typed import validate_params_collect, get_param_types
+from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import _parse_cookies, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers
 from std.ffi import external_call, CStringSlice  # (multipart via Rust bridge FFI)
@@ -512,6 +513,22 @@ def register_routes(mut router: Router) raises:
     ws_api.add_ws_route("/echo", Handler(KIND_WS_ECHO(), "ws_api_echo"))
     router.include_router(ws_api)
 
+    # 决策-38 (Goal-0003 P1, T-P1d+T-P1e): Pydantic 式 body 校验 + Field 约束 + Enum.
+    # _body_schema 声明式: name:type[=default][|约束]; 类型 str/int/float/bool/obj/arr/
+    # T[](数组)/T[enum 值]/obj{嵌套}; 约束 gt/ge/lt/le/len=N-M/items=N-M.
+    # 失败 -> 422 + FastAPI detail 数组 (loc/msg/type); 成功 -> 注入 body_<name> (含默认值).
+    var val_h = Handler(KIND_ECHO(), "validate_item")
+    val_h.set_data("message", "validated item")
+    val_h.set_data("_body_schema",
+        "name:str;price:float|gt=0;quantity:int=10;mode:str[fast,slow]=fast;tags:str[]|items=0-5;meta:obj{city:str|len=2-6;zip:int=0}")
+    router.add_route("/validate", "POST", val_h)
+
+    # Enum 参数 (T-P1e): query 参数声明 T[values] (+ 可选 =default).
+    var enum_h = Handler(KIND_ECHO(), "enum_demo")
+    enum_h.set_data("message", "enum demo")
+    enum_h.set_data("_param_types", "level:str[low,medium,high]=high")
+    router.add_route("/enum", "GET", enum_h)
+
     # F5 SSE 一次性推送 demo (Goal-0002 §1.1). 事件用 | 分隔 (避免与 data 内 , 冲突).
     var sse_h = Handler(KIND_SSE(), "sse_demo")
     sse_h.set_data("_stream_events", "hello\nworld|second event|multi\nline\nevent")
@@ -619,6 +636,9 @@ def register_routes(mut router: Router) raises:
     var ws_private_h = Handler(KIND_WS_ECHO(), "ws_private")
     ws_private_h.set_data("ws_token", "secret")  # 升级 query 必须带 token=secret
     router.add_ws_route("/ws/private", ws_private_h)
+
+    # 决策-38: _body_schema 注册期语法检查 (畸形 spec 启动即 fail, 不带入请求路径)
+    check_body_schemas(router)
 
 
 def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
@@ -873,11 +893,22 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         # 这是 dispatch 唯一一处"认识类型化"的代码; 新增类型化路由 = 仅在
                         # register_routes 用 set_data("_param_types", "name:type;name:type").
                         var type_spec = get_param_types(route_result.handler)
-                        var type_err = validate_params(type_spec, route_result.params, query_params.values)
-                        if type_err.has_error:
-                            status_line = type_err.status_line
+                        # 决策-38 (Goal-0003 P1): 参数校验 + body 校验统一为 FastAPI 422 detail
+                        # 数组 (loc/msg/type, 收集全部错误: 参数 -> ["path"/"query",x];
+                        # body -> ["body",x] + 嵌套/数组下标; Pydantic v2 风格).
+                        var perr = validate_params_collect(type_spec, route_result.params, query_params.values)
+                        var sres = validate_body_schema(route_result.handler, effective_method, body_params, body_str)
+                        var all_errs = List[String]()
+                        if not perr[0]:
+                            for pe in perr[1]:
+                                all_errs.append(pe)
+                        if not sres[0]:
+                            for se in sres[1]:
+                                all_errs.append(se)
+                        if len(all_errs) > 0:
+                            status_line = "422 Unprocessable Entity"
                             resp_data = Dict[String, String]()
-                            resp_data["detail"] = type_err.detail
+                            resp_data["detail"] = "__nested__:" + "[" + ",".join(all_errs) + "]"
                             resp_data["status"] = "422"
                         else:
                             # F2: 声明式异常映射 (Goal-0002). 命中 -> 直接返回错误响应,
@@ -891,6 +922,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                 # F3a: Request 读 headers (Goal-0002). 声明式 _reads_headers CSV.
                                 # 注入 route_result.params 前缀 header_<name>; handler 直读.
                                 var req_params = route_result.params.copy()
+                                # 决策-38: 注入 body 校验值 (含默认值) body_<name> / <父>_<子>
+                                for bk in sres[2]:
+                                    req_params["body_" + bk] = sres[2][bk]
                                 # 决策-34: 注入认证身份 (basic->auth_user / bearer->auth_token / apikey->auth_apikey)
                                 if auth_user_in != "":
                                     req_params["auth_user"] = auth_user_in

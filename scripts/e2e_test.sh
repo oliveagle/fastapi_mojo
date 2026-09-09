@@ -20,6 +20,7 @@
 #   - 服务器攻击后仍存活
 #   - Lifespan: 声明式 startup/shutdown 命令 (决策-36, LS-1..LS-4)
 #   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
+#   - Body validation: _body_schema + Field 约束 + Enum + FastAPI 422 detail (决策-38, BS-1..BS-12)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -220,7 +221,7 @@ echo "== typed params (Goal-0002 F1) =="
 # /calc/{a}/{b}: a,b 必填 int (path).
 expect_code "typed path int ok" "200" "http://127.0.0.1:$PORT/calc/3/4"
 expect_code "typed path int bad -> 422" "422" "http://127.0.0.1:$PORT/calc/abc/4"
-expect_body_contains "typed 422 detail mentions int" "not a valid int" "http://127.0.0.1:$PORT/calc/abc/4"
+expect_body_contains "typed 422 detail mentions int" "valid integer" "http://127.0.0.1:$PORT/calc/abc/4"
 expect_body_contains "typed 422 has detail field" "\"detail\"" "http://127.0.0.1:$PORT/calc/abc/4"
 
 # /typed: count int=5 (query default), verbose bool 必填.
@@ -831,6 +832,42 @@ WS_API_OUT=$("$FMTOOL" wsbench "$PORT" /api/ws/echo 2 1 2>&1)
 WS_API_OK=$(printf '%s' "$WS_API_OUT" | grep -c ',200$')
 if [[ "$WS_API_OK" == "2" ]]; then pass "AR-8 WS prefix /api/ws/echo echo OK"
 else fail "AR-8 WS prefix /api/ws/echo echo OK" "wsbench output: $WS_API_OUT"; fi
+
+# --- body validation / Field constraints / Enum (决策-38) ---------------------------
+# /validate (POST, _body_schema): name:str;price:float|gt=0;quantity:int=10;
+#   mode:str[fast,slow]=fast;tags:str[]|items=0-5;meta:obj{city:str|len=2-6;zip:int=0}
+# /enum (GET, _param_types): level:str[low,medium,high]=high
+# 422 detail = FastAPI/Pydantic v2 数组 (loc/msg/type, 全错误收集).
+echo "== body validation / Field constraints / Enum (决策-38) =="
+BV_VALID='{"name":"widget","price":9.99,"tags":["a","b"],"meta":{"city":"sh"}}'
+expect_code "BS-1a valid body -> 200" 200 "$BASE/validate" POST "$BV_VALID"
+expect_body_contains "BS-1b body_name" '"body_name": "widget"' "$BASE/validate" POST "$BV_VALID"
+expect_body_contains "BS-1c default quantity=10" '"body_quantity": "10"' "$BASE/validate" POST '{"name":"widget","price":9.99,"tags":[],"meta":{"city":"sh"}}'
+expect_body_contains "BS-1d default mode=fast" '"body_mode": "fast"' "$BASE/validate" POST '{"name":"widget","price":9.99,"tags":[],"meta":{"city":"sh"}}'
+expect_body_contains "BS-1e nested default meta_zip=0" '"body_meta_zip": "0"' "$BASE/validate" POST '{"name":"widget","price":9.99,"tags":[],"meta":{"city":"sh"}}'
+expect_body_contains "BS-1f nested meta_city" '"body_meta_city": "sh"' "$BASE/validate" POST "$BV_VALID"
+expect_body_contains "BS-1g tags array" '"body_tags": "[\"' "$BASE/validate" POST "$BV_VALID"
+expect_code "BS-2a missing required -> 422" 422 "$BASE/validate" POST '{"price":1}'
+expect_body_contains "BS-2b loc body.name" '["body","name"]' "$BASE/validate" POST '{"price":1}'
+expect_body_contains "BS-2c msg field required" '"msg":"field required"' "$BASE/validate" POST '{"price":1}'
+expect_body_contains "BS-3a float_parsing" '"type":"float_parsing"' "$BASE/validate" POST '{"name":"x","price":"abc"}'
+expect_body_contains "BS-4a gt constraint" "Input should be greater than 0" "$BASE/validate" POST '{"name":"x","price":-5}'
+expect_body_contains "BS-5a enum type" '"type":"enum"' "$BASE/validate" POST '{"name":"x","price":1,"mode":"turbo"}'
+expect_body_contains "BS-5b enum msg" "Input should be 'fast' or 'slow'" "$BASE/validate" POST '{"name":"x","price":1,"mode":"turbo"}'
+expect_body_contains "BS-6a nested loc" '["body","meta","city"]' "$BASE/validate" POST '{"name":"x","price":1,"tags":[],"meta":{"city":"s"}}'
+expect_body_contains "BS-7a items max" "at most 5 item" "$BASE/validate" POST '{"name":"x","price":1,"tags":["a","b","c","d","e","f"],"meta":{"city":"ab"}}'
+expect_body_contains "BS-8a json_invalid" '"type":"json_invalid"' "$BASE/validate" POST '{not json'
+expect_body_contains "BS-9a elem loc" '["body","tags",0]' "$BASE/validate" POST '{"name":"x","price":1,"tags":[1,2],"meta":{"city":"ab"}}'
+BV_MULTI=$(http_body "$BASE/validate" POST '{"price":-1,"mode":"turbo"}')
+BV_MULTI_N=$(printf '%s' "$BV_MULTI" | grep -o '"msg":' | wc -l | tr -d ' ')
+if [[ "$BV_MULTI_N" -ge 3 ]]; then pass "BS-10a multi-error collect ($BV_MULTI_N >= 3)"
+else fail "BS-10a multi-error collect" "got $BV_MULTI_N: $BV_MULTI"; fi
+expect_code "BS-11a enum param ok" 200 "$BASE/enum?level=low"
+expect_code "BS-11b enum param bad -> 422" 422 "$BASE/enum?level=wrong"
+expect_body_contains "BS-11c enum param loc" '["query","level"]' "$BASE/enum?level=wrong"
+expect_body_contains "BS-12a openapi components" '"components"' "$BASE/openapi.json"
+expect_body_contains "BS-12b openapi requestBody ref" '"$ref":"#/components/schemas/validate_item"' "$BASE/openapi.json"
+expect_body_contains "BS-12c openapi enum array" '"enum":["low","medium","high"]' "$BASE/openapi.json"
 
 # --- summary ---------------------------------------------------------------------
 
