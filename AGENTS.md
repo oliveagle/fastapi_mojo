@@ -624,7 +624,68 @@
   req/s, 历史区间内无回归）/ ldd 仅 libc / env -i 干净启动 /
   binary **3.1M**（3,228,368 B, ≤4.2M）。
 
-*最后更新：2026-09-10（**决策-42 CORS 完整配置**（ADR-0017, Goal-0003 P2 矩阵 #15）：
+- **已决策-43**：**查询参数精化（List 多值 / alias / description，声明式纯
+  Mojo，FFI diff = 0）**（ADR-0018，Goal-0003 P2 矩阵 #3）：
+  1. **语法扩展（`_param_types` 向后兼容；决策-38 判据：空括号 = list，
+     非空 = enum）**：`T[]` = 必填 list；`T[]=` = 可选（默认空 list，
+     FastAPI `Query([])` 的 String 世界等价 = `""`）；`T[]=1,2` = 带默认
+     list（CSV）。注册期 `set_param_type` 校验 list 默认值逐元素
+     （int/float/bool 必须可解析，否则 raise）+ **拒绝 enum-list**
+     （`str[low][]` 不可表达）。
+  2. **alias（`_param_aliases = "name=alias;..."`，query-only，path
+     豁免）**：FastAPI `Query(alias=...)` 语义 — **查询 key = alias**，
+     原始 name 无绑定效力；校验按 alias key 取值（缺失 → 默认/422）；
+     成功路径 `values[name]` **恒覆写**为绑定值（请求含 alias key →
+     last-wins 值；否则 → 默认值）；OpenAPI `parameter.name` = alias
+     （`alias` 是 Mojo 关键字 → 标识符用 `alias_name`）。
+  3. **description（`_param_descs`）**：OpenAPI parameter 级 + schema 级
+     **双处** description（上游 `Query(description=...)` 同款）；
+     path/header 循环同样支持。
+  4. **请求侧归一化（`apply_query_extras`，dispatch 成功路径单点）**：
+     list = 全部 occurrence 的 **CSV**（内部表示 = CSV 字符串，handler
+     读 `query_<key>` 得 "a,b"）/ 缺失 → 默认 CSV；alias 按 §2；path
+     跳过。**标量多值保持 last-wins**（Starlette `MultiDict.get`，上游
+     同款；`multi_values` 新增字段，`values` 行为不变，QS-R1 回归守护）。
+  5. **list 校验（`validate_list_values`，首败即停 = FastAPI 0.141.1
+     实测）**：逐元素复用决策-38 `parse_typed_value`；loc 带数组下标
+     `["query","n",1]`；int/float/bool 完整 pydantic v2 措辞（list 元素
+     bool 用完整句）；缺失 → `field required`（决策-38 既有小写，e2e
+     固化）。
+  6. **OpenAPI 扩展**：list → `{"type":"array","items":{"type":"t"},
+     "default":[...]}`（仅显式 `=` 带 default；数字裸值/string 引号）；
+     query 参数 name = alias。
+  7. **新纯模块 `params_query_extra`（364 行）+ `parse_table` 泛化**
+     （统一 alias/desc/types 声明表解析）；依赖图 `params_typed →
+     params_query_extra → params_query` **无环**（`validate_list_values`
+     函数级 back-import，调用时两侧模块已完全加载，实测可用）；demo
+     `/query-extra`（list×2 + alias×2 + desc×4）+ `/query-req`
+     （必填 list）。
+  8. **文档化偏差（ADR-0018 §3.5）**：裸 `n: list[int]` 上游 = body vs
+     本实现 `T[]` = query-list；CSV 逗号歧义（与既有 CSV 声明同类
+     取舍）；标量 bool 短消息 vs list 元素完整消息；http_server_final
+     **1173 行既有超阈值**（HEAD 1148，本 ADR 仅 +25 行接线，瘦身 =
+     独立任务）。
+  验收：e2e **248/248**（221 + 27 QS 项：多值 CSV / 单值 wrap / 空默认×2 /
+  int list / 非法元素 422×2（loc 下标）/ alias×3 / 必填缺失 422 /
+  必填正常 / OpenAPI×4 / last-wins 回归）/ cargo **335/0/4**（Rust
+  零改动）/ clippy `-D warnings` 0 警告 / bench 6 场景 0 errors
+  （get_root_10k_100c 37.3k req/s，历史区间内）/ ldd 仅 libc /
+  env -i 干净启动 / **FFI diff = 0** / binary **3.12M**（3,277,520 B，
+  ≤4.2M；vs 决策-42 +49 KB）。
+
+*最后更新：2026-09-10（**决策-43 查询参数精化**（ADR-0018, Goal-0003 P2 矩阵 #3）：
+List 多值（_param_types 语法扩展: T[] 必填 / T[]= 可选空 list / T[]=csv 带默认, 空括号 = list
+非空 = enum 决策-38; 内部表示 = 全部 occurrence 的 CSV, handler 读 query_<key> 得 "a,b";
+缺失 → 默认 CSV; 非法元素 422 首败即停 loc ["query",name,i] pydantic v2 完整措辞）
++ alias（_param_aliases, query-only path 豁免: 查询 key = alias, 原始 name 无绑定效力 —
+校验按 alias key, 成功路径 values[name] 恒覆写绑定值, OpenAPI parameter.name = alias）
++ description（_param_descs → OpenAPI parameter 级 + schema 级双处, path/header 同样支持）;
+纯 Mojo params_query_extra(364) + parse_table 泛化, 依赖图 params_typed → params_query_extra
+→ params_query 无环(validate_list_values 函数级 back-import 实测可用);
+标量多值保持 last-wins(Starlette MultiDict.get, QS-R1 回归守护); FFI diff = 0(Rust 零改动);
+验收: e2e **248/248**（+27 QS）/ cargo **335/0/4** / clippy 0 警告 / bench 0 errors
+（37.3k req/s）/ ldd 仅 libc / env -i 干净启动 / **3.12M**（3,277,520 B, ≤4.2M）；
+2026-09-10（**决策-42 CORS 完整配置**（ADR-0017, Goal-0003 P2 矩阵 #15）：
 Starlette CORSMiddleware 声明式 env 等价（FASTAPI_MOJO_CORS_ORIGINS CSV/`*` 默认 `*` +
 _METHODS 7 方法 + _HEADERS CSV/`*` 默认 Content-Type,Authorization + _CREDENTIALS 默认 false +
 _MAX_AGE 默认 600 = Starlette）；普通响应仅当请求带被允许 Origin（通配 → `*` / 白名单或

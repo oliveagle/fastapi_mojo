@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~42）**：
-- 单 binary 3.1M，ldd 仅 libc，env -i 干净启动，e2e **221 项**，cargo 335 单测
+**已达成（v0.5.1 + 决策-31~43）**：
+- 单 binary 3.12M，ldd 仅 libc，env -i 干净启动，e2e **248 项**，cargo 335 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -24,7 +24,8 @@
   **Lifespan startup/shutdown (决策-36)**/**APIRouter prefix/tags/deps + include_router (决策-37)**/
   **Pydantic 式 body 校验 (嵌套/Field 约束/Enum/422 全收集, 决策-38)**/
   **GZip 中间件 (FASTAPI_MOJO_GZIP env 声明式, Rust bridge flate2 纯 Rust, 决策-40)**/
-  **CORS 完整配置 (Starlette CORSMiddleware 声明式 env 等价, 决策-42)**
+  **CORS 完整配置 (Starlette CORSMiddleware 声明式 env 等价, 决策-42)**/
+  **查询参数精化 (List 多值 / alias / description, 声明式纯 Mojo, 决策-43)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -32,11 +33,11 @@
 |---|------|-------------|------|------|------|
 | 1 | 路径方法 | GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD + 405+Allow | ✅ | PATCH 未单独注册(走通用) | 补 PATCH |
 | 2 | 路径参数 | `{param}` + 类型 + 约束 | ✅ 类型化 | 约束(gt/lt/regex) | §P2 |
-| 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 类型化 | 多值 List、alias | §P2 |
+| 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 多值 List/alias/desc（决策-43, ADR-0018：T[] 空括号 list 语法 + _param_aliases query-only + _param_descs → OpenAPI 双处） | 标量 bool 短消息 vs list 完整消息 + CSV 逗号歧义（均文档化, ADR-0018 §3.5, e2e 守护） | — |
 | 4 | 请求体 | Pydantic 模型 / dict / 嵌套 | ✅ 声明式 spec（决策-38） | validator 自定义回调 = Mojo 无闭包，声明式约束词表为等价形态（扩充 P2） | — |
 | 5 | Form | Form(...) 多值 | 🟡 单值 | 多值 | §P2 |
 | 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 字节+b64 | UploadFile 对象 API | §P2 |
-| 7 | Header | Header(...) | ✅ | alias/desc | §P2 |
+| 7 | Header | Header(...) | ✅ desc（决策-43, _param_descs → OpenAPI） | alias | §P2 |
 | 8 | Cookie | Cookie(...) | ✅ | — | — |
 | 9 | 依赖注入 | Depends (嵌套/缓存/安全依赖) | ✅ 嵌套 | 缓存(use_cache) | §P2 |
 | 10 | 响应类型 | JSON/HTML/PlainText/File/Streaming/ORJSON/UJSON/Response | 🟡 JSON/HTML/SSE | File/Streaming 通用/ORJSON | §P1 |
@@ -75,7 +76,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 - Enum 类型
 
 ### P2（后续 — 精化/完备）
-- 查询多值 / alias / desc
+- 查询多值 / alias / desc ✅（决策-43, ADR-0018）
 - 中间件自定义（GZip ✅ 决策-40；自定义逻辑 = 声明式 env 扩充）
 - CORS 完整配置 ✅（决策-42, ADR-0017）
 - 任意异常类型 handler
@@ -100,10 +101,23 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias、中间件 GZip、CORS 完整、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-42 CORS 完整配置**（ADR-0017, P2 矩阵 #15 ✅）：
+*最后更新：2026-09-10（**决策-43 查询参数精化**（ADR-0018, P2 矩阵 #3 ✅）：
+List 多值（_param_types 语法扩展: T[] 必填 / T[]= 可选空 list / T[]=csv 带默认, 空括号 = list 非空 = enum 决策-38;
+list = 全部 occurrence 的 CSV 内部表示, handler 读 query_<key> 得 "a,b"; 缺失 → 默认 CSV; 非法元素 422 首败即停
+loc ["query",name,i], pydantic v2 完整措辞）
++ alias（_param_aliases, query-only path 豁免: 查询 key = alias, 原始 name 无绑定效力 — 校验按 alias key,
+成功路径 values[name] 恒覆写绑定值, OpenAPI parameter.name = alias）
++ description（_param_descs → OpenAPI parameter 级 + schema 级双处, path/header 同样支持）;
+纯 Mojo params_query_extra（364）+ parse_table 泛化, 依赖图无环（params_typed → params_query_extra → params_query）;
+标量多值保持 last-wins（Starlette, QS-R1 回归守护）; FFI diff = 0（Rust 零改动）;
+e2e **248/248**（+27 QS）/ cargo **335/0/4** / clippy 0 警告 / bench 0 errors（37.3k）/
+ldd libc / env -i / **3.12M**（3,277,520 B, ≤4.2M）；
+下一轮：P2 剩余（Form 多值 / UploadFile 对象 API / Depends use_cache / File-Streaming 通用响应 /
+任意异常 handler / OAuth2-JWT（需 SHA-256+HMAC in Rust bridge）/ Request.state / WS 精化 / TestClient）；
+2026-09-10（**决策-42 CORS 完整配置**（ADR-0017, P2 矩阵 #15 ✅）：
 Starlette CORSMiddleware 声明式 env 等价（FASTAPI_MOJO_CORS_ORIGINS CSV/`*` 默认 `*` +
 _METHODS 默认 7 + _HEADERS CSV/`*` 默认 Content-Type,Authorization（未设置 ≠ `*`）+
 _CREDENTIALS 默认 false + _MAX_AGE 默认 600 = Starlette）；
