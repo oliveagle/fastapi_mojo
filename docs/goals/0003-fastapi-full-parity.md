@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~43）**：
-- 单 binary 3.12M，ldd 仅 libc，env -i 干净启动，e2e **248 项**，cargo 335 单测
+**已达成（v0.5.1 + 决策-31~44）**：
+- 单 binary 3.17M，ldd 仅 libc，env -i 干净启动，e2e **274 项**，cargo 349 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -25,7 +25,8 @@
   **Pydantic 式 body 校验 (嵌套/Field 约束/Enum/422 全收集, 决策-38)**/
   **GZip 中间件 (FASTAPI_MOJO_GZIP env 声明式, Rust bridge flate2 纯 Rust, 决策-40)**/
   **CORS 完整配置 (Starlette CORSMiddleware 声明式 env 等价, 决策-42)**/
-  **查询参数精化 (List 多值 / alias / description, 声明式纯 Mojo, 决策-43)**
+  **查询参数精化 (List 多值 / alias / description, 声明式纯 Mojo, 决策-43)**/
+  **OAuth2/JWT (password grant + JWT HS256, Rust crypto 原语 + 纯 Mojo 协议层, 决策-44)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -47,7 +48,7 @@
 | 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 + GZip ✅（决策-40 env 声明式） | 用户自定义（Mojo 无闭包：声明式 env / 固定链为等价形态，扩充 P2） | §P2 |
 | 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | ✅ 声明式 env 等价（决策-42, ADR-0017：ORIGINS/METHODS/HEADERS/CREDENTIALS/MAX_AGE + 普通响应条件附带 + 预检 204/400 动态） | 预检 400 体为本实现 JSON 简化 + 裸 OPTIONS 204 超集（均文档化, e2e 守护） | — |
 | 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ | tags/prefix/custom | §P2 |
-| 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ Basic/Bearer/APIKey（决策-34）；OAuth2/JWT P2 | OAuth2/JWT | §P2 |
+| 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ 全量（决策-34 Basic/Bearer/APIKey + 决策-44 OAuth2/JWT，ADR-0019：/token password grant（宽松 form 422 全收集）+ JWT HS256（alg 白名单 + exp/nbf/sub）+ get_current_user = sub→auth_user + OpenAPI securitySchemes） | 文档化偏差（空 Bearer → 401 非 403；sub 空串也拒；_auth_users CSV = 凭据声明式等价，ADR-0019 §3.5，e2e 守护） | — |
 | 18 | APIRouter | include_router(prefix/tags/dependencies) | ✅ include 时合并，dispatch 零改动（决策-37，ADR-0013）；OpenAPI tags + path 分组 | — | — |
 | 19 | Lifespan | startup/shutdown (context manager) | ✅ 声明式 env 命令（决策-36，Mojo 无闭包的等价形态）；失败→服务不启动 | — | — |
 | 20 | Pydantic | 嵌套模型/Field 约束/validator/enum/自定义类型 | ✅ 嵌套+Field 约束+enum（决策-38，声明式 spec 等价形态） | 约束词表扩充（P2） | §P2 |
@@ -79,6 +80,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 - 查询多值 / alias / desc ✅（决策-43, ADR-0018）
 - 中间件自定义（GZip ✅ 决策-40；自定义逻辑 = 声明式 env 扩充）
 - CORS 完整配置 ✅（决策-42, ADR-0017）
+- OAuth2/JWT（password grant + JWT HS256）✅（决策-44, ADR-0019）
 - 任意异常类型 handler
 - UploadFile 对象 API
 - WebSocket 精化
@@ -101,10 +103,28 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-43 查询参数精化**（ADR-0018, P2 矩阵 #3 ✅）：
+*最后更新：2026-09-10（**决策-44 OAuth2 password flow + JWT（HS256）**（ADR-0019, P2 矩阵 #17 ✅，对标矩阵最后一项）：
+Rust bridge crypto.rs（185 行，零第三方 crate，纯 std 手写 SHA-256 FIPS 180-4 / HMAC-SHA256 RFC 2104
+（>64B key 先 sha256）/ base64url RFC 7515 宽松解码；known vectors ×12 + pyjwt-2.13 独立实现 oracle 交叉验证）
++ FFI +2（fm_hmac_sha256_b64url[_free]，malloc(n+1)+NUL 决策-36 契约）
++ 纯 Mojo security_jwt（497：3-part 切分 / flat JSON claims / check_oauth2 / handle_oauth2_token）；
+FastAPI 0.141.1 + pyjwt 2.13 逐条 probe 对齐（宽松 form 模型：grant_type 可选（存在须 ^password$ 否则 422 pattern mismatch）/
+username+password 必填（422 missing 全收集）/ 凭据错 401 "Incorrect email or password"；
+gate：无头 / 非 bearer scheme（大小写不敏感）401 "Not authenticated" / 校验失败（含空 Bearer）401
+"Could not validate credentials" — 修正早期 403 假设）；
+/token + /token-exp（ttl=-1）+ /secure-jwt 路由 + KIND_OAUTH2_TOKEN（201）dispatch 特例
++ OpenAPI securitySchemes.OAuth2PasswordBearer（bearerFormat: JWT）+ operation 级 security；
+oauth2 分支放 dispatch（避免 FFI 闭包破坏 security.mojo JIT 自检，ADR-0019 §3.5-2；security.mojo 与 HEAD 字节一致）；
+FFI diff = +2，零新 crate；
+e2e **274/274**（248+26 OT：签发 / 服务端 token / 401 多态 / 422 pattern+missing / 宽松 grant / gate / pyjwt fixture T1..T5 / ttl=-1 / OpenAPI）
+/ cargo **349/0/4**（+14 crypto）/ clippy 0 警告（双 crate）/ bench 0 errors（41.2k）/ ldd libc / env -i /
+**3.17M**（3,326,672 B，≤4.2M，+49 KB）；
+下一轮：P2 剩余（Form 多值 / UploadFile 对象 API / Depends use_cache / File-Streaming 通用响应 /
+任意异常 handler / Request.state / WS 精化 / TestClient）；
+2026-09-10（**决策-43 查询参数精化**（ADR-0018, P2 矩阵 #3 ✅）：
 List 多值（_param_types 语法扩展: T[] 必填 / T[]= 可选空 list / T[]=csv 带默认, 空括号 = list 非空 = enum 决策-38;
 list = 全部 occurrence 的 CSV 内部表示, handler 读 query_<key> 得 "a,b"; 缺失 → 默认 CSV; 非法元素 422 首败即停
 loc ["query",name,i], pydantic v2 完整措辞）

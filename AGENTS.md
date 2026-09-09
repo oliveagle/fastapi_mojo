@@ -673,7 +673,69 @@
   env -i 干净启动 / **FFI diff = 0** / binary **3.12M**（3,277,520 B，
   ≤4.2M；vs 决策-42 +49 KB）。
 
-*最后更新：2026-09-10（**决策-43 查询参数精化**（ADR-0018, Goal-0003 P2 矩阵 #3）：
+- **已决策-44**：**OAuth2 password flow + JWT（HS256）— Rust crypto 原语
+  + 纯 Mojo 协议层，对标矩阵最后一项**（ADR-0019，Goal-0003 P2 矩阵 #17）：
+  1. **Rust `bridge/crypto.rs`（185 行，零第三方 crate，纯 std 手写）**：
+     SHA-256（FIPS 180-4）/ HMAC-SHA256（RFC 2104，>64B key 先 sha256）/
+     base64url（RFC 7515 §2.1；decode 宽松：忽略 `=`/空白、容忍 `+/`、
+     非法字符 None、尾 bits 丢弃）；known vectors ×12 + **pyjwt-2.13
+     独立实现 oracle 交叉验证**（同一 signing_input 签名逐字符相等）。
+  2. **FFI +2（最小面，决策-36 NUL 契约）**：`fm_hmac_sha256_b64url(key,
+     key_len, msg, msg_len) -> CSlice`（malloc(n+1)+NUL；len>0 显式长度
+     二进制安全，=0/null 回退 NUL 截断）+ `fm_hmac_sha256_b64url_free`
+     （libc free）。
+  3. **`security_jwt.mojo`（497 行，纯 Mojo 协议层）**：b64url 编码 /
+     3-part 切分（恰 3 段非空）/ flat JSON claims 扫描（转义 + UTF-8）/
+     `check_oauth2`（OAuth2PasswordBearer 等价：无头/非 bearer scheme
+     （大小写不敏感）→ 401 "Not authenticated"；param = 首个空格后全部
+     （可空）→ 校验失败（含空 token）→ 401 "Could not validate
+     credentials"；成功 → auth_user=sub）/ `handle_oauth2_token`
+     （0.141.1 宽松 form 模型：grant_type 可选（存在须 `^password$`
+     否则 422 pattern mismatch）、username/password 必填（422 missing
+     全收集）、凭据错 401 "Incorrect email or password"、成功签发
+     `{sub,username,iat,exp}` HS256 JWT）。
+  4. **0.141.1 语义修正 ×2（本 ADR probe 复测，推翻早期假设）**：
+     grant_type **缺省 → 200**（宽松模型，非 400）；空 Bearer → **401
+     "Could not validate credentials"**（非 403 — pyjwt DecodeError 统一
+     映射）。
+  5. **dispatch 3 处接线**：`/token` + `/token-exp`（ttl=-1 测试钩子）+
+     `/secure-jwt` 路由；auth gate `_auth=oauth2` → `check_oauth2`
+     （放 dispatch 而非 check_auth：避免 FFI 闭包破坏 security.mojo 的
+     JIT 自检，ADR-0019 §3.5-2）；`KIND_OAUTH2_TOKEN`（201）特例覆写
+     （需 body，SSE 同型）；auth 失败 `resp_data["status"]` 从
+     status_line 推导（不再硬编码 401）。
+  6. **OpenAPI**：oauth2 路由 → `components.securitySchemes.
+     OAuth2PasswordBearer`（`{type:http,scheme:bearer,bearerFormat:JWT}`）
+     + operation 级 `security:[{OAuth2PasswordBearer:[]}]`（与既有
+     components.schemas 合并）。
+  7. **文档化偏差（ADR-0019 §3.5）**：sub 空串也拒（更严格）/ oauth2
+     分支位置（JIT 边界）/ 响应含服务端公共 meta 字段（全路由统一约定）/
+     `_auth_users` CSV = 教程硬编码凭据的声明式等价。
+  验收：e2e **274/274**（248 + 26 OT 项：签发×3 / 服务端 token 可用×2 /
+  凭据错 401×3 / 422 pattern+missing×4 / grant 宽松 / gate×4（含 fmtool
+  raw 空 Bearer）/ pyjwt fixture T1..T5×5 / ttl=-1 / OpenAPI×2）/
+  cargo **349/0/4**（335 → +14 crypto）/ clippy `-D warnings` 0 警告
+  （双 crate）/ bench 6 场景 0 errors（get_root_10k_100c 41.2k req/s，
+  历史区间内）/ ldd 仅 libc / env -i 干净启动（含 /token 签发 +
+  /secure-jwt 接受）/ binary **3.17M**（3,326,672 B，≤4.2M；
+  vs 决策-43 +49 KB）。
+
+*最后更新：2026-09-10（**决策-44 OAuth2 password flow + JWT HS256**（ADR-0019, Goal-0003
+P2 矩阵 #17 — 对标矩阵最后一项）: Rust bridge crypto.rs 纯 std 手写 SHA-256/HMAC-SHA256/
+base64url(零第三方 crate, known vectors×12 + pyjwt-2.13 oracle 交叉验证) + FFI +2
+(fm_hmac_sha256_b64url[_free], 决策-36 NUL 契约) + 纯 Mojo security_jwt(497: b64url 编码/
+3-part 切分/flat JSON claims/check_oauth2/handle_oauth2_token); FastAPI 0.141.1 逐条 probe
+对齐(宽松 form 模型: grant_type 可选(存在须 ^password$ 否则 422 pattern mismatch)/
+username+password 必填(422 missing 全收集)/凭据错 401 "Incorrect email or password";
+gate: 无头/非 bearer scheme 401 "Not authenticated"/校验失败(含空 Bearer)401
+"Could not validate credentials" — 修正早期 403 假设); /token + /token-exp(ttl=-1) +
+/secure-jwt 路由 + KIND_OAUTH2_TOKEN(201) dispatch 特例 + OpenAPI securitySchemes.
+OAuth2PasswordBearer(bearerFormat:JWT); FFI diff = +2, 零新 crate;
+验收: e2e **274/274**(248+26 OT, 含 pyjwt 独立签发 fixture T1..T5 + fmtool raw 空 Bearer)/
+cargo **349/0/4**(+14 crypto) / clippy 0 警告(双 crate) / bench 0 errors(41.2k req/s,
+历史区间内) / ldd 仅 libc / env -i 干净启动(含 /token+/secure-jwt) / **3.17M**(3,326,672 B,
+≤4.2M, +49 KB);
+2026-09-10（**决策-43 查询参数精化**（ADR-0018, Goal-0003 P2 矩阵 #3）：
 List 多值（_param_types 语法扩展: T[] 必填 / T[]= 可选空 list / T[]=csv 带默认, 空括号 = list
 非空 = enum 决策-38; 内部表示 = 全部 occurrence 的 CSV, handler 读 query_<key> 得 "a,b";
 缺失 → 默认 CSV; 非法元素 422 首败即停 loc ["query",name,i] pydantic v2 完整措辞）
