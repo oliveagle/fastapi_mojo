@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~45）**：
-- 单 binary 3.24M，ldd 仅 libc，env -i 干净启动，e2e **294 项**，cargo 349 单测
+**已达成（v0.5.1 + 决策-31~46）**：
+- 单 binary 3.4M，ldd 仅 libc，env -i 干净启动，e2e **312 项**，cargo 354 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -27,7 +27,9 @@
   **CORS 完整配置 (Starlette CORSMiddleware 声明式 env 等价, 决策-42)**/
   **查询参数精化 (List 多值 / alias / description, 声明式纯 Mojo, 决策-43)**/
   **OAuth2/JWT (password grant + JWT HS256, Rust crypto 原语 + 纯 Mojo 协议层, 决策-44)**/
-  **Form 多值/alias/desc + 422 detail parity (List 多值 / alias / desc / input / collect-all, 声明式纯 Mojo, 决策-45)**
+  **Form 多值/alias/desc + 422 detail parity (List 多值 / alias / desc / input / collect-all, 声明式纯 Mojo, 决策-45)**/
+  **UploadFile 对象 API (file/bytes 声明 + 422 parity U2-U5/U9 + 对象操作 head/range/sha256/save + multipart
+  OpenAPI, 声明式纯 Mojo + FFI +1, 决策-46)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -38,7 +40,7 @@
 | 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 多值 List/alias/desc/collect-all（决策-43/45, ADR-0018/0020：T[] 语法 + alias query-only + desc 双处；元素校验 **collect-all** — ADR-0020 更正 ADR-0018「首败即停 = 上游同款」错误实测） | 标量 bool 短消息 vs list 完整消息 + CSV 逗号歧义（均文档化, ADR-0018 §3.5, e2e 守护） | — |
 | 4 | 请求体 | Pydantic 模型 / dict / 嵌套 | ✅ 声明式 spec（决策-38） | validator 自定义回调 = Mojo 无闭包，声明式约束词表为等价形态（扩充 P2） | — |
 | 5 | Form | Form(...) 多值 / alias / desc | ✅ 全量（决策-45, ADR-0020：List 多值 = 全部 occurrence / 标量 last-wins / alias wire key（原始名无效力）/ _param_descs → OpenAPI；422 = "Field required" + input + list collect-all；/login 未标注字段旧语义兼容） | 未标注字段 = 未声明校验（不 422）+ CSV 逗号歧义（均文档化, ADR-0020 §3.5, e2e FM 守护） | — |
-| 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 字节+b64 | UploadFile 对象 API | §P2 |
+| 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 全量（决策-46, ADR-0021：file/bytes 声明（`[]`/`=可选`）+ 422 parity（U2 value_error 完整措辞 / U3 string_type 稳定子集 / U4 last-wins / U5 非 multipart 全缺失 / U9 bytes 双路）+ 对象操作（head/range/sha256/save 原子）+ multipart OpenAPI（contentMediaType 四形态 / required 仅当必填字段）；size = 实际字节（U1） | 文档化偏差 ×7（ADR-0021 §3.5：U9 上游 500 不复制 / input 稳定子集 / Body 命名 / save `..` 守卫 / 未声明不校验 / 空默认 = required（上游 optional, p8, 不修）/ missing de-dup） | — |
 | 7 | Header | Header(...) | ✅ desc（决策-43, _param_descs → OpenAPI） | alias | §P2 |
 | 8 | Cookie | Cookie(...) | ✅ | — | — |
 | 9 | 依赖注入 | Depends (嵌套/缓存/安全依赖) | ✅ 嵌套 | 缓存(use_cache) | §P2 |
@@ -84,7 +86,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 - CORS 完整配置 ✅（决策-42, ADR-0017）
 - OAuth2/JWT（password grant + JWT HS256）✅（决策-44, ADR-0019）
 - 任意异常类型 handler
-- UploadFile 对象 API
+- UploadFile 对象 API ✅（决策-46, ADR-0021）
 - WebSocket 精化
 - OpenAPI tags/prefix
 
@@ -105,10 +107,38 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、异常 handler、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-45 Form 多值/alias/desc + 422 detail parity**（ADR-0020, P2 矩阵 #5 ✅）：
+*最后更新：2026-09-10（**决策-46 UploadFile 对象 API**（ADR-0021, P2 矩阵 #6 ✅）：
+Rust bridge multipart.rs 重构（解析 helpers pub(crate) + b64_decode/to_hex/sha256_hex_of（lock-free 纯 std 手写）+
+part_save（原子 .tmp→rename）+ parts getter field 5=sha256hex 解析期预算（🔴 修复非重入 Mutex 读路径自锁死锁隐患）
++ 测试拆出 multipart_tests.rs（17））+ FFI +1 mp_part_save（NUL 契约决策-36；`..` 穿越守卫在 Mojo 层 _path_safe）
++ 纯 Mojo 新模块 ×4（file_params 427：_file_types file|bytes/[]/= + _file_aliases + validate_file_collect（U2
+value_error 上游完整措辞 / U4 last-wins / U5 非 multipart 全缺失 / unknown_type）+ apply_file_extras（file_ keys：
+size = 实际字节 U1 / alias → 声明名 / text → bytes 字段（U9）/ text → form（U8）/ list _count+_list_json）
++ file_form_check 126：U3 string_type（input = 稳定子集 {filename,size,headers} — 上游 _file/_max_mem_size 等
+env 细节排除）+ 声明 file 字段 claim 的 part 不参与 + file_ops_ffi 195：snapshot_mp_parts 单一 FFI 快照点
+（失败 = 空 = U5）+ _file_ops head:N/range:S:L/sha256/save:PATH（alias-aware，输出 key = 声明名）
++ openapi_multipart 145：U7 四形态 schema（字段序 type/contentMediaType/title/description / optional anyOf-null /
+list items）+ key 序 properties/type/required/title + required 仅当必填字段 + Body_<handler.name>_<method>）
++ dispatch（决策-32 旧注入移除 → CT 检测 → snapshot → filtered text map（U8）/ parse_form_multi（urlencoded）/
+空（U5）→ validate_file_collect 恒执行 → 422 de-dup（p7 presence 胜，整串精确匹配）→ 成功路径
+apply_file_extras + apply_file_ops（conn 活跃，快照重读安全））
++ demo /upload-file（doc:file + alias docfile + opt:file= + docs:file[] + note:str 必填 + ops sha256 + descs）/
+/upload-bytes（raw:bytes= + small:bytes= 全 optional + ops head/range/save）+ OpenAPI multipart requestBody
+（与 _body_schema 互斥；urlencoded 分支保留）
++ 文档化偏差 ×7（ADR-0021 §3.5：U9 上游 500 不复制 / string_type input 稳定子集 / Body_<handler.name>_<method>
+命名 / save `..` 守卫安全超集 / 未声明字段不校验（决策-32 兼容）/ name:type= = required（上游 Form("")/Form(None)
+= optional，p8 — 本决策不修，ripple 决策-43/45 面）/ file part 使 form 字段「存在」→ missing 422 de-dup）
+验收：e2e **312/312**（294+18 MP8–MP23b：sha256 vs sha256sum / head+range b64 / save roundtrip cmp /
+all-optional 非 CT 200 / required-missing ×2 / value_error alias / string_type 稳定子集 / list count+顺序 /
+bytes-text / bytes-file / no-CT ×3 / urlencoded ×2 / openapi 子串 / jsoncheck 整文 / text→form / alias ×2）
++ MP4 语义修正（size = 实际字节 U1；b64 长 344 → 256）/ cargo **354/0/4**（+5 净）/ clippy 0 警告（双 crate）/
+bench 0 errors（34.3k req/s，历史区间内）/ ldd 仅 libc / env -i 干净启动（health + /upload-file + /upload-bytes 200）/
+**3.4M**（3,531,472 B，≤4.2M，+131 KB）/ `find src -name '*.c'` = 0 保持；
+下一轮：P2 剩余（Depends use_cache / File-Streaming 通用响应 / 任意异常 handler / Request.state / WS 精化 / TestClient）；
+2026-09-10（**决策-45 Form 多值/alias/desc + 422 detail parity**（ADR-0020, P2 矩阵 #5 ✅）：
 纯 Mojo form_params（493：parse_form_multi multi-map（同 key 全部 occurrence 按序, url_decode, 裸 key→""）/ validate_form_collect
 （缺失 → "Field required" F 大写 + input null；list = 全部 occurrence 逐元素 **collect-all**；标量 = last-wins；
 loc ["body",name(,i)]）/ apply_form_extras（list→CSV / 标量 last-wins / alias wire key 绑定（原始名无效力）/ 未标注

@@ -767,7 +767,88 @@
   34.2k req/s，历史区间内）/ ldd 仅 libc / env -i 干净启动（health +
   /form-multi + /form-alias 200）/ binary **3.24M**（3,400,400 B，≤4.2M；
   vs 决策-44 +74 KB）。
-*最后更新：2026-09-10（**决策-45 Form 多值/alias/desc + 422 detail parity**（ADR-0020, Goal-0003
+- **已决策-46**：**UploadFile 对象 API — 文件字段声明 / 422 parity / 对象操作 /
+  multipart OpenAPI（ADR-0021，Goal-0003 P2 矩阵 #6 — 对标矩阵 #6 ✅ 全量）**：
+  1. **Rust bridge（`multipart.rs` 重构 +249/-146 净 -28；`ffi.rs` +`mp_part_save`；
+     零新 crate）**：解析 helper 提取 `pub(crate)`（boundary/attr/header 线）+
+     新增 `b64_decode` / `to_hex` / **`sha256_hex_of`（lock-free 纯 std 手写，
+     ADR-0010 SHA-1 同先例）** / **`part_save`（原子 `.tmp`→rename，无半文件）**；
+     parts getter **field 5 = sha256hex（解析期预算 — 🔴 修复读路径非重入 Mutex
+     自锁死锁隐患**）；`part_sha256_hex` `#[cfg(test)]`（dead-code 清零）；测试
+     拆出 `multipart_tests.rs`（17 = 原 12 平移 + 5 新）；`mp_part_save` C ABI
+     （NUL 契约决策-36；**`..` 穿越守卫在 Mojo 层** `_path_safe`）。
+  2. **Mojo 新模块 ×4（纯逻辑零 FFI，均 <500 行）**：`file_params`（427：
+     `MpParts` parallel lists / `_file_types` `file|bytes`+`[]`+`=` 声明 /
+     `_file_aliases` / `validate_file_collect`（**U2 value_error**（上游完整
+     措辞 "Expected UploadFile, received: <class 'str'>"）/ **U4 last-wins** /
+     **U5 非 multipart 全缺失** / unknown_type）/ `_decl_of`（声明名或 alias 值
+     命中）/ `apply_file_extras`（`file_<声明名>_*` key：**size = 实际字节
+     U1** / text → 声明 **bytes** 字段（U9 双路）/ text → form（U8）/
+     list → `_count`+`_list_json`））+ `file_form_check`（126：**U3
+     string_type**（input = 稳定子集 `{filename,size,headers}`）+ 声明 file
+     字段 claim 的 part 不参与）+ `file_ops_ffi`（195：`snapshot_mp_parts`
+     **单一 FFI 快照点**（失败 = 空 = U5）/ `_file_ops` `head:N|range:S:L|
+     sha256|save:PATH`（alias-aware，输出 key = 声明名））+ `openapi_multipart`
+     （145：**U7 四形态 schema**（字段序 type/contentMediaType/title/
+     description；optional anyOf-null；list items）+ **key 序
+     properties/type/required/title** + required 仅当必填字段 +
+     `Body_<handler.name>_<method>`）。
+  3. **422 parity（FastAPI 0.141.1 + pydantic 2.13.5 p1–p8 逐条实测）**：文本 →
+     UploadFile = U2 value_error（input = 原文）；文件 → 声明 `str` form =
+     **单条** U3 string_type（p7：file-then-text → 200 文本；list = 逐
+     occurrence loc idx）；非 multipart CT（无 CT/urlencoded/json）= 所有文件
+     字段 missing 422（U5）；**de-dup（p7 presence 胜）**：form 字段有 file
+     part → 其 canonical missing 422 **整串精确匹配**丢弃（只丢同字段 missing）。
+  4. **dispatch 接线（`http_server_final` 1210 → 1238，净 +28）**：决策-32 旧
+     注入（`_mp_read_field`/`inject_multipart_fields`）移除 → CT 检测 →
+     `snapshot_mp_parts` → filtered text map（multipart，file 声明名/alias
+     不进 map）/ `parse_form_multi`（urlencoded）/ 空（U5）→
+     `validate_file_collect` **恒执行** → 422 de-dup → 成功路径
+     `apply_file_extras` + `apply_file_ops`（conn 仍活跃，快照重读安全）；
+     OpenAPI：`_generate_operation` multipart 分支（与 `_body_schema` 互斥；
+     urlencoded 分支保留回归）+ components 按 `multipart_route` 分流。
+     demo：`/upload-file`（`doc:file` + alias `docfile` + `opt:file=` +
+     `docs:file[]` + `note:str` 必填 + `_file_ops doc:sha256` + `_param_descs`）
+     / `/upload-bytes`（`raw:bytes=` + `small:bytes=` 全 optional + ops
+     `head:4`/`range:1:3`/`save`）。
+  5. **文档化偏差（ADR-0021 §3.5 ×7）**：U9 上游 500 不复制（bytes 接受
+     text/file 双路）/ string_type input 稳定子集（上游 `_file/_max_mem_size`
+     等 env 细节排除）/ `Body_` 命名（上游 fn+route+method）/ save `..`
+     守卫 = 安全超集 / 未声明字段不校验（决策-32 兼容）/ **`name:type=` =
+     required**（上游 `Form("")`/`Form(None)` = optional，p8 — 本决策不修，
+     ripple 决策-43/45 面）/ U3 missing de-dup（presence 胜）。
+  验收：e2e **312/312**（294 + 18 MP8–MP23b：sha256 vs `sha256sum` / head+range
+  b64 / save roundtrip `cmp` / all-optional 非 CT 200 / required-missing ×2 /
+  value_error alias / string_type 稳定子集 / list count+顺序 / bytes-text /
+  bytes-file / no-CT ×3 / urlencoded ×2 / openapi 子串 / jsoncheck 整文 /
+  text→form / alias ×2）+ MP4 语义修正（size = 实际字节 U1，256 非 b64 长 344）/
+  cargo **354/0/4**（+5 净）/ clippy `-D warnings` 0 警告（双 crate）/ bench 6
+  场景 0 errors（get_root_10k_100c 34.3k req/s，历史区间内）/ ldd 仅 libc /
+  env -i 干净启动（health + /upload-file + /upload-bytes 200）/ binary **3.4M**
+  （3,531,472 B，≤4.2M；vs 决策-45 +131 KB）/ `find src -name '*.c'` = 0 保持。
+*最后更新：2026-09-10（**决策-46 UploadFile 对象 API**（ADR-0021, Goal-0003 P2 矩阵 #6）：
+Rust bridge multipart.rs 重构（helpers pub(crate) + b64_decode/to_hex/sha256_hex_of lock-free 纯 std +
+part_save 原子 .tmp→rename + getter field 5=sha256hex 解析期预算 — 修复非重入 Mutex 读路径自锁死锁隐患 +
+multipart_tests.rs 拆分 17 测）+ FFI +1 mp_part_save（NUL 契约；.. 守卫在 Mojo _path_safe）
++ 纯 Mojo 新模块 ×4（file_params 427: _file_types file|bytes/[]/= + U2 value_error(上游完整措辞)/U4
+last-wins/U5 非 multipart 全缺失/apply_file_extras(size=实际字节 U1, alias→声明名, text→bytes U9/text→form
+U8, list _count+_list_json) / file_form_check 126: U3 string_type 稳定子集(上游 env 细节排除) /
+file_ops_ffi 195: snapshot_mp_parts 单一 FFI 快照点 + head/range/sha256/save / openapi_multipart 145:
+U7 四形态 schema(字段序 type/contentMediaType/title/description, key 序 properties/type/required/title,
+required 仅当必填字段)）
++ dispatch（决策-32 旧注入移除 → CT 检测 → snapshot → filtered text map(U8)/parse_form_multi(urlencoded)/空(U5) →
+validate_file_collect 恒执行 → 422 de-dup(p7 presence 胜, 整串精确匹配) → 成功路径 apply_file_extras/ops）
++ demo /upload-file（alias docfile + opt:file= + docs:file[] + note:str 必填 + ops sha256 + descs）/ /upload-bytes
+（raw:bytes= + small:bytes= 全 optional + ops head/range/save）+ OpenAPI multipart requestBody（与 _body_schema
+互斥；urlencoded 保留）
++ 文档化偏差 ×7（ADR-0021 §3.5: U9 上游 500 不复制 / input 稳定子集 / Body_<handler.name>_<method> 命名 /
+save .. 守卫安全超集 / 未声明字段不校验 / name:type= = required（上游 Form("") = optional, p8 — 不修, ripple
+决策-43/45）/ U3 missing de-dup（presence 胜））
+验收: e2e **312/312**（294+18 MP8–MP23b, 含 MP4 size→实际字节修正 344→256）/ cargo **354/0/4**（+5 净:
+b64 decode ×2 / sha256 向量 / save ×2）/ clippy 0 警告(双 crate) / bench 0 errors(34.3k req/s, 历史区间内) /
+ldd 仅 libc / env -i 干净启动(health+/upload-file+/upload-bytes 200) / **3.4M**(3,531,472 B, ≤4.2M, +131 KB) /
+C 清零保持;
+2026-09-10（**决策-45 Form 多值/alias/desc + 422 detail parity**（ADR-0020, Goal-0003
 P2 矩阵 #5）: 纯 Mojo form_params(493: parse_form_multi multi-map 全部 occurrence/validate_form_collect
 collect-all/apply_form_extras alias wire key/legacy 兼容/form_openapi_schema F10 字段序) + request_response.
 parse_form_multi + 422 全局 parity(3 构造器加 input: missing=null/parse=raw/JSON body 缺失=body 对象; "field required" → "Field required";
