@@ -545,7 +545,38 @@
   clippy `-D warnings` 0 警告 / e2e **205/205**（MP4 恢复绿）/ ldd 仅 libc /
   env -i 干净启动 / bench 0 errors（41.9k req/s 无回归）/ binary 3.1M。
 
-*最后更新：2026-09-09（**决策-38 Pydantic 式 body 校验 + Field 约束 + Enum**（ADR-0014, Goal-0003 P1 T-P1d+T-P1e 全部达成）：
+- **已决策-40**：**GZip 响应压缩（Starlette GZipMiddleware 声明式 env 等价，
+  Rust bridge flate2 纯 Rust）**（ADR-0015，Goal-0003 P2 矩阵 #24）：
+  1. **env API（默认关 = FastAPI 对齐）**：`FASTAPI_MOJO_GZIP=1` /
+     `FASTAPI_MOJO_GZIP_MIN_SIZE`（500, 对齐 Starlette）/
+     `FASTAPI_MOJO_GZIP_MAX_SIZE`（1MiB 内存保护）；进程启动一次读取
+     （`Mutex<Option>` 缓存，非 OnceLock — 提供 `#[cfg(test)]` 重置钩子隔离
+     env 全局副作用，conn `sys_close` no-op 同模式）。
+  2. **压缩条件（Starlette 对齐）**：client `Accept-Encoding` 含**裸 token**
+     gzip/x-gzip（**不支持 q** — 上游 quirk）+ include_body + body 非空 +
+     min/max 窗口 + 非 304 + extra 无 Content-Encoding（头名判定）。
+  3. **钩子 = `send_response` 单点**（所有响应类型必经）：body 换 gzip 字节
+     （level 6 对齐 Starlette）+ 响应头追加 `Content-Encoding: gzip`（extra
+     行 `\r\n` 合并）+ Content-Length = 压缩后长度 + Content-Type 不变。
+  4. **client 判定走 request 全局**：io.rs 解析 header 时
+     `set_accepts_gzip(parse::accepts_gzip)`（CurrentRequest 新字段 +
+     reset）—— worker 单请求串行模型内，**FFI diff = 0**。
+  5. **依赖**：Cargo.toml 唯一第三方 = **flate2（纯 Rust miniz_oxide 后端，
+     无 C 路径，静态链接）** — 本 ADR 是其首个落地用途（ws-deflate 预置的
+     同一依赖）；**实测 ldd 仍仅 libc**（3,207,192 B = 3.1M）。
+  验收：e2e **210/210**（+GZ-1..5：默认关/启用 gzip 头/无 AE identity/
+  min_size 门/gunzip roundtrip 逐字节）/ cargo test **323/0/4**（+9+1：
+  should_gzip 矩阵 / env 读取 / text+binary 0..255 roundtrip / accepts_gzip
+  x4 / request set-reset / send socketpair 全链路）/ clippy `-D warnings`
+  0 警告 / ldd 仅 libc / env -i 干净启动 / bench 6 场景 0 errors
+  （get_root_10k_100c 39.2k req/s，历史区间内无回归）。
+
+*最后更新：2026-09-09（**决策-40 GZip 中间件**（ADR-0015, Goal-0003 P2 矩阵 #24）：
+Starlette GZipMiddleware 声明式 env 等价 (默认关 = FastAPI 对齐; MIN_SIZE 500 / MAX_SIZE 1MiB; 裸 token 判定, 不支持 q, 上游 quirk 对齐);
+钩子 = send_response 单点 (所有响应类型必经): gzip level 6 + Content-Encoding: gzip + Content-Length 更新 + Content-Type 不变;
+client 判定走 request 全局 (io.rs set_accepts_gzip, FFI diff = 0); flate2 纯 Rust miniz_oxide 后端 (无 C 路径, 静态, ldd 仍仅 libc 实测);
+e2e **210/210** (+GZ-1..5) / cargo **323/0/4** / clippy 0 警告 / bench 0 errors (39.2k req/s) / env -i 干净启动 / **3.1M** (≤4.2M)；
+2026-09-09（**决策-38 Pydantic 式 body 校验 + Field 约束 + Enum**（ADR-0014, Goal-0003 P1 T-P1d+T-P1e 全部达成）：
 `_body_schema` 声明式 spec (str/int/float/bool/obj/arr + T[](数组) + T[values](enum) + obj{嵌套}; gt/ge/lt/le/len/items 约束; 注册期 fail-fast);
 统一 422 detail (FastAPI/Pydantic v2 loc/msg/type, 参数+body 全错误收集, __nested__: 直通) + Enum 参数 (query/path T[values]) +
 OpenAPI components/schemas 自动生成 (requestBody $ref, 单一事实源, 修复既有 2 处字面量 BUG); 两文件拆分 (spec 315/校验 313, 均 <500);

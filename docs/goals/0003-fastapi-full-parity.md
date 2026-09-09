@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~39）**：
-- 单 binary 3.1M，ldd 仅 libc，env -i 干净启动，e2e **205 项**，cargo 312 单测
+**已达成（v0.5.1 + 决策-31~40）**：
+- 单 binary 3.1M（3,207,192 B），ldd 仅 libc，env -i 干净启动，e2e **210 项**，cargo 323 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -22,7 +22,8 @@
   多 worker/静态文件/HTML 响应/生产化(Docker+systemd+nginx)/**安全认证
   (HTTPBasic/HTTPBearer/APIKey, 决策-34)**/**response_model 字段过滤 (决策-35)**/
   **Lifespan startup/shutdown (决策-36)**/**APIRouter prefix/tags/deps + include_router (决策-37)**/
-  **Pydantic 式 body 校验 (嵌套/Field 约束/Enum/422 全收集, 决策-38)**
+  **Pydantic 式 body 校验 (嵌套/Field 约束/Enum/422 全收集, 决策-38)**/
+  **GZip 中间件 (FASTAPI_MOJO_GZIP env 声明式, Rust bridge flate2 纯 Rust, 决策-40)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -41,7 +42,7 @@
 | 11 | response_model | 只返回声明字段 + exclude/include/none | ✅ 基础字段过滤（决策-35）；exclude/include/none P2 | 精化 | §P2 |
 | 12 | 状态码 | status_code 声明 | ✅ | — | — |
 | 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | 🟡 error_map | 任意异常类型 handler | §P2 |
-| 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 | 用户自定义+GZip | §P2 |
+| 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 + GZip ✅（决策-40 env 声明式） | 用户自定义（Mojo 无闭包：声明式 env / 固定链为等价形态，扩充 P2） | §P2 |
 | 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | 🟡 preflight | 完整配置 | §P2 |
 | 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ | tags/prefix/custom | §P2 |
 | 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ Basic/Bearer/APIKey（决策-34）；OAuth2/JWT P2 | OAuth2/JWT | §P2 |
@@ -51,7 +52,7 @@
 | 21 | Enum | 枚举参数/响应 | ✅ query/path/body enum + 422 + OpenAPI enum 数组（决策-38） | — | — |
 | 22 | Request 对象 | state/client/url.full_url/query_params | 🟡 部分 | state | §P2 |
 | 23 | WebSocket 进阶 | close(code)/exception_handler/send_text/bytes/json | 🟡 部分 | 精化 | §P2 |
-| 24 | 压缩 | GZipMiddleware | ❌ | — | §P2 |
+| 24 | 压缩 | GZipMiddleware | ✅ env 声明式（决策-40, ADR-0015：FASTAPI_MOJO_GZIP* + send_response 单点 + flate2 纯 Rust） | — | — |
 | 25 | TestClient | 测试客户端 | ❌(dev 工具) | — | 低优先 |
 
 ## 2. 优先级与计划
@@ -74,7 +75,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 
 ### P2（后续 — 精化/完备）
 - 查询多值 / alias / desc
-- 中间件自定义 + GZip
+- 中间件自定义（GZip ✅ 决策-40；自定义逻辑 = 声明式 env 扩充）
 - CORS 完整配置
 - 任意异常类型 handler
 - UploadFile 对象 API
@@ -101,7 +102,16 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P2* | 查询多值/alias、中间件 GZip、CORS 完整、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-09（**T-P1d + T-P1e 达成（决策-38, ADR-0014）— P1 全部闭环**：
+*最后更新：2026-09-09（**决策-40 GZip 中间件**（ADR-0015, P2 矩阵 #24）：
+Starlette GZipMiddleware 声明式 env 等价（FASTAPI_MOJO_GZIP 默认关 = FastAPI 对齐；
+MIN_SIZE 500 / MAX_SIZE 1MiB；裸 token 判定不支持 q — 上游 quirk；非 304 + extra 无
+Content-Encoding）；钩子 = send_response 单点（所有响应类型必经，level 6 对齐 Starlette）；
+client 判定走 request 全局（io.rs set_accepts_gzip，FFI diff = 0）；
+flate2 纯 Rust miniz_oxide（无 C 路径，静态，ldd 实测仍仅 libc，3.1M）；
+e2e **210/210**（+GZ-1..5）/ cargo **323/0/4** / clippy 0 警告 / bench 0 errors（39.2k req/s）/ env -i 干净启动；
+**决策-38/39**（ADR-0014 + multipart UTF-8 豁免 P0 修复）同轮落地（见下）；
+下一轮：P2 精化（CORS 完整配置 / 查询多值+alias / response_model exclude-include / OAuth2-JWT / Request.state / WS 精化 / OpenAPI custom info / ws-deflate）；
+前一轮：T-P1d + T-P1e 达成（决策-38, ADR-0014）— P1 全部闭环：
 Pydantic 式 body 校验（`_body_schema` 声明式 spec：嵌套/Field 约束/enum/数组/默认值）+
 统一 FastAPI 422 detail（loc/msg/type，参数+body 全错误收集）+ Enum 参数（query/path）+
 OpenAPI components/schemas 自动生成（requestBody $ref，单一事实源）；
