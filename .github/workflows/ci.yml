@@ -7,7 +7,7 @@
 #   4. 单元测试（各 .mojo 自检）
 #   5. e2e 集成测试（scripts/e2e_test.sh，79 项检查含 WebSocket（含 ADR-0007 增强 / ADR-0008 并发 / ADR-0009 精化），CI 可重复）
 #
-# 依赖：mojo 1.0.0（pip install modular）、gcc、binutils、curl
+# 依赖：Mojo 1.0.0（pip install "mojo==1.0.0"，装出 site-packages/modular/ namespace 包）、gcc、binutils、curl
 name: CI
 
 on:
@@ -45,10 +45,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc g++ binutils curl
 
-      - name: Install Mojo (modular)
+      # Mojo 1.0.0 的 PyPI 发行名是 `mojo`（Dockerfile.full / 决策-31 G3 实测）。
+      # 不再裸装 `modular`：该名字在 PyPI 现指向 CalVer 线（25.x/26.x），
+      # 其 wheel 是 namespace 包（无 __init__.py → __file__=None），
+      # 且裸装 = 未来任一发布都可能静默改变布局。pin 1.0.0 = 所有本地门禁
+      # （e2e/bench/cargo/ldd）验证过的同一 runtime。
+      - name: Install Mojo (mojo==1.0.0)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install modular
+          python -m pip install "mojo==1.0.0"
 
       # Rust toolchain (ADR-0010, decision-19). 仓库 pin 在
       # src/fastapi_mojo_rs/rust-toolchain.toml (channel 1.97.1).
@@ -67,12 +72,21 @@ jobs:
           curl --version | head -1
           cargo --version
           rustc --version
-          python -c "import modular, os; print('modular lib:', os.path.join(os.path.dirname(modular.__file__), 'lib'))"
+          # Mojo 1.0.0 wheel = namespace 包（import 得到 __file__=None，
+          # 原 import-modular 一行必崩）。改用 marker 文件探测 — 与
+          # build_single.sh find_modular_lib 同一判据（libKGENCompilerRTShared.so）。
+          MODFILE="$(find "$pythonLocation/lib" -maxdepth 5 -name libKGENCompilerRTShared.so 2>/dev/null | head -1)"
+          [[ -n "$MODFILE" ]] || { echo "ERROR: Mojo runtime lib (libKGENCompilerRTShared.so) not found under $pythonLocation"; exit 1; }
+          echo "mojo runtime lib: $MODFILE"
 
-      # 确定性地导出 MODULAR_LIB，供 build_single.sh 使用（其自动定位的兜底之外的首选）
+      # 确定性地导出 MODULAR_LIB，供 build_single.sh 使用（其自动定位的兜底之外的首选）。
+      # setup-python 装在 /opt/hostedtoolcache/…（不在 build_single.sh 的自动探测候选里），
+      # 故必须显式导出。探测 = marker 文件（namespace 包无 __file__，import 方案不可用）。
       - name: Export MODULAR_LIB
         run: |
-          MODLIB="$(python -c 'import modular, os; print(os.path.join(os.path.dirname(modular.__file__), "lib"))')"
+          set -e
+          MODLIB="$(find "$pythonLocation/lib" -maxdepth 5 -name libKGENCompilerRTShared.so -printf '%h\n' 2>/dev/null | head -1)"
+          [[ -n "$MODLIB" ]] || { echo "ERROR: Mojo runtime lib not found under $pythonLocation"; exit 1; }
           echo "MODULAR_LIB=$MODLIB" >> "$GITHUB_ENV"
           ls -1 "$MODLIB"
 
