@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~46）**：
-- 单 binary 3.4M，ldd 仅 libc，env -i 干净启动，e2e **312 项**，cargo 354 单测
+**已达成（v0.5.1 + 决策-31~47）**：
+- 单 binary 3.4M，ldd 仅 libc，env -i 干净启动，e2e **319 项**，cargo 354 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -29,7 +29,9 @@
   **OAuth2/JWT (password grant + JWT HS256, Rust crypto 原语 + 纯 Mojo 协议层, 决策-44)**/
   **Form 多值/alias/desc + 422 detail parity (List 多值 / alias / desc / input / collect-all, 声明式纯 Mojo, 决策-45)**/
   **UploadFile 对象 API (file/bytes 声明 + 422 parity U2-U5/U9 + 对象操作 head/range/sha256/save + multipart
-  OpenAPI, 声明式纯 Mojo + FFI +1, 决策-46)**
+  OpenAPI, 声明式纯 Mojo + FFI +1, 决策-46)**/
+  **Depends use_cache (每请求 memo 表, 默认 cached / _depends_nocache = use_cache=False, 声明式纯 Mojo,
+  决策-47)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -43,7 +45,7 @@
 | 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 全量（决策-46, ADR-0021：file/bytes 声明（`[]`/`=可选`）+ 422 parity（U2 value_error 完整措辞 / U3 string_type 稳定子集 / U4 last-wins / U5 非 multipart 全缺失 / U9 bytes 双路）+ 对象操作（head/range/sha256/save 原子）+ multipart OpenAPI（contentMediaType 四形态 / required 仅当必填字段）；size = 实际字节（U1） | 文档化偏差 ×7（ADR-0021 §3.5：U9 上游 500 不复制 / input 稳定子集 / Body 命名 / save `..` 守卫 / 未声明不校验 / 空默认 = required（上游 optional, p8, 不修）/ missing de-dup） | — |
 | 7 | Header | Header(...) | ✅ desc（决策-43, _param_descs → OpenAPI） | alias | §P2 |
 | 8 | Cookie | Cookie(...) | ✅ | — | — |
-| 9 | 依赖注入 | Depends (嵌套/缓存/安全依赖) | ✅ 嵌套 | 缓存(use_cache) | §P2 |
+| 9 | 依赖注入 | Depends (嵌套/缓存/安全依赖) | ✅ 全量（决策-47, ADR-0022：默认 cached = 每请求 memo 表（菱形/三重菱形 1 次，值同源，P9-1/5）+ `_depends_nocache` = use_cache=False（P9-2/4）+ 嵌套 nocache 结果入库供 cached 引用复用（P9-3）+ 每请求作用域 + `_dep_calls` 观测超集；APIRouter 对称扩展 `base_deps_nocache`/`include_router(deps_nc=)`；FFI diff = 0） | 文档化偏差 ×4（ADR-0022 §3.5：per-name memo vs per-dependant / _dep_calls 超集 / 基础依赖恒 cached / 解析序先 cached 后 nocache） | — |
 | 10 | 响应类型 | JSON/HTML/PlainText/File/Streaming/ORJSON/UJSON/Response | 🟡 JSON/HTML/SSE | File/Streaming 通用/ORJSON | §P1 |
 | 11 | response_model | 只返回声明字段 + exclude/include/none | ✅ include+exclude+exclude_none（决策-35/41, ADR-0016：FastAPI 语义对齐，无模型 no-op） | — | — |
 | 12 | 状态码 | status_code 声明 | ✅ | — | — |
@@ -107,10 +109,32 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、异常 handler、WS 精化、OpenAPI tags | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、异常 handler、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-46 UploadFile 对象 API**（ADR-0021, P2 矩阵 #6 ✅）：
+*最后更新：2026-09-10（**决策-47 Depends use_cache**（ADR-0022, P2 矩阵 #9 ✅）：
+每请求 memo 表（dep_cache 106 行，append-only，find 取最新条 = P9-3 覆写语义，calls_of = 实际派发
+次数）— 上游 0.141.1 probe P9-1..P9-5 逐条对齐：默认 _depends = cached（upstream use_cache=True；
+菱形/三重菱形共享 dep 每请求仅派发 1 次，所有引用值同源，P9-1/5 — 决策-33「各路径独立解析」收紧
+为上游语义）+ _depends_nocache（新增）= use_cache=False（route 级/嵌套级，恒重新派发，P9-2/4）+
+**P9-3 关键 nuance**（nocache 派发的结果同样写入 memo — 写入无条件，use_cache=False 仅跳过查找；
+后续 cached 引用直接复用 = calls 1 次）+ 每请求 cache 作用域（P9-1 第二请求再派发）
++ dispatch_dep/resolve_depends 加 nocache/cache 参数（子依赖递归双表；解析序先 cached 后 nocache
+CSV，确定性）+ _dep_calls=true 声明门控注入 <dep>_calls（observability 超集，上游无此面；未声明
+= 零输出）+ APIRouter 对称扩展（router.mojo 495：base_deps_nocache + set_base_deps_nocache +
+include_router(deps_nc=)，WS 同步合并）
++ demo dc_tick/dc_auth（默认 cached）/dc_auth2（嵌套 nocache）+ /di-cache（菱形 1 次）/ /di-nocache
+（route nocache 2 次）/ /di-mix（嵌套 nocache 1 次，P9-3）
++ 文档化偏差 ×4（ADR-0022 §3.5：per-name memo vs per-dependant（声明式等价 — dep 无 per-reference
+参数面）/ _dep_calls observability 超集 / APIRouter 基础依赖恒 cached（无 per-base-dep nocache
+声明面）/ 解析序先 cached 后 nocache（上游 = 参数声明序））
+验收：e2e **319/319**（312+7 DC：P9-1 菱形 1 次 / P9-1 值同源 / P9-2 route nocache 2 次 / P9-3
+嵌套 nocache 1 次 / 每请求作用域 / /di 回归零泄漏 / APIRouter 回归零泄漏）/ cargo **354/0/4**
+（FFI diff = 0）/ clippy 0 警告（双 crate）/ dep_cache_selftest 16 check 全绿（JIT）/ bench 0 errors
+（34.8k req/s，历史区间内）/ ldd 仅 libc / env -i 干净启动（health + /di-cache 200 + calls=1）/
+**3.4M**（3,556,048 B，≤4.2M，+25 KB）/ `find src -name '*.c'` = 0 保持；
+下一轮：P2 剩余（File-Streaming 通用响应 / 任意异常 handler / Request.state / WS 精化 / TestClient）；
+2026-09-10（**决策-46 UploadFile 对象 API**（ADR-0021, P2 矩阵 #6 ✅）：
 Rust bridge multipart.rs 重构（解析 helpers pub(crate) + b64_decode/to_hex/sha256_hex_of（lock-free 纯 std 手写）+
 part_save（原子 .tmp→rename）+ parts getter field 5=sha256hex 解析期预算（🔴 修复非重入 Mutex 读路径自锁死锁隐患）
 + 测试拆出 multipart_tests.rs（17））+ FFI +1 mp_part_save（NUL 契约决策-36；`..` 穿越守卫在 Mojo 层 _path_safe）

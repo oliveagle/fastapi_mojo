@@ -826,7 +826,62 @@
   场景 0 errors（get_root_10k_100c 34.3k req/s，历史区间内）/ ldd 仅 libc /
   env -i 干净启动（health + /upload-file + /upload-bytes 200）/ binary **3.4M**
   （3,531,472 B，≤4.2M；vs 决策-45 +131 KB）/ `find src -name '*.c'` = 0 保持。
-*最后更新：2026-09-10（**决策-46 UploadFile 对象 API**（ADR-0021, Goal-0003 P2 矩阵 #6）：
+- **已决策-47**：**Depends use_cache — 每请求 memo 表（cached / nocache
+  双语义，ADR-0022，Goal-0003 P2 矩阵 #9 — 对标矩阵 #9 ✅ 全量）**：
+  1. **`dep_cache.mojo`（106 行，纯数据层，FFI diff = 0）**：`DepCache`
+     memo 表（parallel Lists；**append-only**：每次实际派发一条，
+     `find` 取**最新条** = P9-3 覆写语义）+ `find` / `append` /
+     `inject`（memo 重注入 = 与首次注入完全一致）/ `calls_of`（memo
+     条数 = 实际派发次数，P9 计数）/ `unique_names` + `inject_dep_calls`
+     （`_dep_calls=true` 声明门控 → `<dep>_calls` 注入）。
+  2. **上游语义逐条对齐（FastAPI 0.141.1 + starlette 1.6.0 probe P9-1..P9-5）**：
+     **默认 = cached**（upstream `use_cache=True`）：菱形 / 三重菱形共享
+     dep 每请求**仅派发 1 次**，所有引用值同源（P9-1/P9-5；决策-33「各
+     路径独立解析」收紧 — 向上游对齐）；**`_depends_nocache`（新增）=
+     `use_cache=False`**：恒重新派发（route 级 / 嵌套级均可，P9-2/P9-4）；
+     **P9-3 关键 nuance**：nocache 派发的结果**同样入库**（写入无条件，
+     False 仅跳过查找）→ 后续 cached 引用直接复用（P9-3 实测 calls==1）；
+     **每请求作用域**（P9-1 第二请求再派发）。
+  3. **dispatch 接线（`http_server_final` 1238 → 1332，+94）**：
+     `dispatch_dep` 加 `nocache: Bool` + `mut cache: DepCache`（子依赖
+     递归处理 `_depends` + `_depends_nocache` 双表；visited 环检测优先
+     于 memo）；`resolve_depends` 加第二循环（**解析序：先 cached CSV
+     后 nocache CSV** — 确定性）；dispatch 每请求创建单一 memo 表 +
+     `inject_dep_calls`（未声明 = no-op，既有 `/di`、`/api/*` 响应体零
+     变化）。
+  4. **APIRouter 对称扩展（`router.mojo` 495 ≤500）**：`base_deps_nocache`
+     + `set_base_deps_nocache` + `include_router(deps_nc=)`（与
+     `_depends`/`_tags` 三层合并同构，WS 同步）。demo：`dc_tick` /
+     `dc_auth`（默认 cached）/ `dc_auth2`（嵌套 nocache）+ `/di-cache`
+     （菱形）/ `/di-nocache` / `/di-mix`（均 `_dep_calls=true`）。
+  5. **文档化偏差（ADR-0022 §3.5 ×4）**：per-name memo vs per-dependant
+     （声明式等价 — dep 无 per-reference 参数面）/ `_dep_calls` =
+     observability 超集（上游无此面）/ APIRouter 基础依赖恒 cached（无
+     per-base-dep nocache 声明面）/ 解析序 = 先 cached 后 nocache
+     （上游 = 参数声明序；dep 集合相同时结果等价）。
+  验收：e2e **319/319**（312 + 7 DC：菱形 1 次（P9-1）/ 值同源 / route
+  nocache 2 次（P9-2）/ 嵌套 nocache 1 次（P9-3）/ 每请求作用域 / `/di`
+  回归 / APIRouter 回归）/ cargo **354/0/4**（FFI 零改动）/ clippy
+  `-D warnings` 0 警告（双 crate）/ `dep_cache_selftest` 16 check 全绿 /
+  bench 6 场景 0 errors（get_root_10k_100c 34.8k req/s，历史区间内）/
+  ldd 仅 libc / env -i 干净启动（health + /di-cache 200）/ binary **3.4M**
+  （3,556,048 B，≤4.2M；vs 决策-46 +25 KB）/ `find src -name '*.c'` = 0
+  保持。
+*最后更新：2026-09-10（**决策-47 Depends use_cache**（ADR-0022, Goal-0003 P2 矩阵 #9）：
+每请求 memo 表 dep_cache(106, append-only, find 取最新条 = P9-3 覆写语义, calls_of = 实际派发次数) +
+dispatch_dep/resolve_depends 加 nocache/cache 参数（子依赖递归双表: _depends = 默认 cached
+（upstream use_cache=True, 菱形/三重菱形每请求 1 次 — 决策-33「各路径独立」收紧对齐）/ _depends_nocache
+= use_cache=False（route/嵌套级, P9-2/4）+ P9-3 关键 nuance（nocache 派发结果同样入库, 写入无条件）+
+每请求作用域（P9-1 第二请求））+ _dep_calls=true 声明门控注入 <dep>_calls（observability 超集）+
+router.mojo base_deps_nocache + include_router(deps_nc=) 对称扩展（495 ≤500）
++ demo /di-cache（菱形）/ /di-nocache / /di-mix（嵌套 nocache）+ dc_tick/dc_auth/dc_auth2
++ 文档化偏差 ×4（ADR-0022 §3.5: per-name memo vs per-dependant（声明式等价）/ _dep_calls 超集 /
+基础依赖恒 cached / 解析序先 cached 后 nocache）
+验收: e2e **319/319**（312+7 DC, 含 P9-1/2/3 三语义 + 每请求作用域 + /di 与 APIRouter 零泄漏回归）/
+cargo **354/0/4**（FFI diff = 0）/ clippy 0 警告(双 crate) / dep_cache_selftest 16 check /
+bench 0 errors(34.8k req/s, 历史区间内) / ldd 仅 libc / env -i 干净启动(health+/di-cache 200) /
+**3.4M**(3,556,048 B, ≤4.2M, +25 KB) / C 清零保持;
+2026-09-10（**决策-46 UploadFile 对象 API**（ADR-0021, Goal-0003 P2 矩阵 #6）：
 Rust bridge multipart.rs 重构（helpers pub(crate) + b64_decode/to_hex/sha256_hex_of lock-free 纯 std +
 part_save 原子 .tmp→rename + getter field 5=sha256hex 解析期预算 — 修复非重入 Mutex 读路径自锁死锁隐患 +
 multipart_tests.rs 拆分 17 测）+ FFI +1 mp_part_save（NUL 契约；.. 守卫在 Mojo _path_safe）
