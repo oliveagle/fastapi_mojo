@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~41）**：
-- 单 binary 3.1M，ldd 仅 libc，env -i 干净启动，e2e **213 项**，cargo 323 单测
+**已达成（v0.5.1 + 决策-31~42）**：
+- 单 binary 3.1M，ldd 仅 libc，env -i 干净启动，e2e **221 项**，cargo 335 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -23,7 +23,8 @@
   (HTTPBasic/HTTPBearer/APIKey, 决策-34)**/**response_model 字段过滤 (决策-35)**/
   **Lifespan startup/shutdown (决策-36)**/**APIRouter prefix/tags/deps + include_router (决策-37)**/
   **Pydantic 式 body 校验 (嵌套/Field 约束/Enum/422 全收集, 决策-38)**/
-  **GZip 中间件 (FASTAPI_MOJO_GZIP env 声明式, Rust bridge flate2 纯 Rust, 决策-40)**
+  **GZip 中间件 (FASTAPI_MOJO_GZIP env 声明式, Rust bridge flate2 纯 Rust, 决策-40)**/
+  **CORS 完整配置 (Starlette CORSMiddleware 声明式 env 等价, 决策-42)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -43,7 +44,7 @@
 | 12 | 状态码 | status_code 声明 | ✅ | — | — |
 | 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | 🟡 error_map | 任意异常类型 handler | §P2 |
 | 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 + GZip ✅（决策-40 env 声明式） | 用户自定义（Mojo 无闭包：声明式 env / 固定链为等价形态，扩充 P2） | §P2 |
-| 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | 🟡 preflight | 完整配置 | §P2 |
+| 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | ✅ 声明式 env 等价（决策-42, ADR-0017：ORIGINS/METHODS/HEADERS/CREDENTIALS/MAX_AGE + 普通响应条件附带 + 预检 204/400 动态） | 预检 400 体为本实现 JSON 简化 + 裸 OPTIONS 204 超集（均文档化, e2e 守护） | — |
 | 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ | tags/prefix/custom | §P2 |
 | 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ Basic/Bearer/APIKey（决策-34）；OAuth2/JWT P2 | OAuth2/JWT | §P2 |
 | 18 | APIRouter | include_router(prefix/tags/dependencies) | ✅ include 时合并，dispatch 零改动（决策-37，ADR-0013）；OpenAPI tags + path 分组 | — | — |
@@ -76,7 +77,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 ### P2（后续 — 精化/完备）
 - 查询多值 / alias / desc
 - 中间件自定义（GZip ✅ 决策-40；自定义逻辑 = 声明式 env 扩充）
-- CORS 完整配置
+- CORS 完整配置 ✅（决策-42, ADR-0017）
 - 任意异常类型 handler
 - UploadFile 对象 API
 - WebSocket 精化
@@ -102,7 +103,20 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P2* | 查询多值/alias、中间件 GZip、CORS 完整、异常 handler、UploadFile、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-09（**决策-41 response_model 精化**（ADR-0016, P2 矩阵 #11 ✅）：
+*最后更新：2026-09-10（**决策-42 CORS 完整配置**（ADR-0017, P2 矩阵 #15 ✅）：
+Starlette CORSMiddleware 声明式 env 等价（FASTAPI_MOJO_CORS_ORIGINS CSV/`*` 默认 `*` +
+_METHODS 默认 7 + _HEADERS CSV/`*` 默认 Content-Type,Authorization（未设置 ≠ `*`）+
+_CREDENTIALS 默认 false + _MAX_AGE 默认 600 = Starlette）；
+普通响应仅当请求带被允许 Origin（通配 → `*` / 白名单或 credentials → 回显 / 不允许 → 无头 —
+C 时代「每响应必带 `*`」偏差移除, 文档化）；预检 204/400 动态（origin/ACRM/ACHR 越界 →
+400 JSON, 裸 OPTIONS → 204 通配超集）；FFI diff = 0（send_preflight_response 签名不变）,
+零新增依赖（std only）；
+e2e **221/221**（CRS-1..8）/ cargo **335/0/4** / clippy 0 警告 / bench 0 errors（36.0k）/
+ldd libc / env -i / 3.1M；
+下一轮：P2 精化（查询多值+alias / Form 多值 / UploadFile 对象 API / Depends use_cache /
+任意异常 handler / OAuth2-JWT / Request.state / WS 精化 / File-Streaming 通用响应 /
+OpenAPI custom / ws-deflate）；
+2026-09-09（**决策-41 response_model 精化**（ADR-0016, P2 矩阵 #11 ✅）：
 FastAPI/Pydantic 三参数声明式（_response_model include + _response_exclude 剔除模型字段 +
 _response_exclude_none 剔除 null — 空串/__nested__:null 等价, "null" 字符串不算）；
 应用序 include→exclude→exclude_none; 无模型时 no-op（FastAPI 对齐）；

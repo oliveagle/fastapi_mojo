@@ -591,7 +591,49 @@
   42.2k req/s，历史区间内）/ ldd 仅 libc / env -i 干净启动 / **FFI diff = 0** /
   binary 3.1M（≤4.2M）。
 
-*最后更新：2026-09-09（**决策-41 response_model 精化**（ADR-0016, Goal-0003 P2 矩阵 #11）：
+- **已决策-42**：**CORS 完整配置（Starlette CORSMiddleware 声明式 env 等价，
+  零新增依赖）**（ADR-0017，Goal-0003 P2 矩阵 #15）：
+  1. **env API（默认 = C 时代线上行为 + Starlette max_age）**：
+     `FASTAPI_MOJO_CORS_ORIGINS`（CSV 或 `*`，**默认 `*`**）/ `_METHODS`
+     （默认 7 方法）/ `_HEADERS`（CSV 或 `*`，默认 Content-Type,
+     Authorization；**未设置 ≠ `*`**）/ `_CREDENTIALS`（默认 false）/
+     `_MAX_AGE`（默认 **600** = Starlette；C 时代 86400 → 对齐上游）；
+     进程一次读取 `Mutex<Option>` + `#[cfg(test)]` reset/clear 钩子
+     （GZip 同模式，三测试文件共享 `__test_clear_env()`）。
+  2. **普通响应（`build_response_headers` 单点, Starlette 对齐）**：仅当
+     请求带**被允许** Origin 时附带 CORS 头 — 通配且无 credentials → `*`；
+     白名单命中或 credentials → **回显** origin（`*`+credentials 非法 →
+     回显, 上游同款）；credentials → `+ Allow-Credentials: true`；
+     不允许/无 Origin → **不带任何 CORS 头**（C 时代「每响应必带 `*`」
+     **偏差移除**, 文档化；浏览器只在带 Origin 的跨源响应上读 CORS 头）。
+  3. **预检（FFI `send_preflight_response(fd)` 签名不变, 204/400 动态）**：
+     origin 不在白名单 → 400；ACRM ∉ methods（大小写不敏感）→ 400；
+     ACHR ⊄ headers（`*` 放行）→ 400（JSON 错误体, Starlette
+     `_build_pre_response` 400 语义）；通过 → 204 + [ACAO 回显/`*`] +
+     [ACAC] + [ACAM] + [ACAH] + Max-Age；裸 OPTIONS（无 Origin, C 时代
+     行为）→ 204 通配超集（文档化超集, e2e 守护）。
+  4. **request 全局（FFI NUL 终止契约, 决策-36）**：CurrentRequest 新增
+     origin[256]/acrm[64]/achr[256]+lens（截断+`[len]=0`）；io.rs 两个
+     `set_http_fields` 调用点写三元组（`get_header_value_ci` 纯函数）；
+     `CORS_HEADERS` 常量删除 → `cors::normal_cors_lines` 动态行。
+     **FFI diff = 0, 零新增 Cargo 依赖（std only）**。
+  验收：e2e **221/221**（+CRS-1..8：裸 OPTIONS/通配/回显+credentials/
+  不允许无头/预检 204 全头集/ACRM 400/origin 400/ACHR 400）/ cargo
+  **335/0/4**（323 → +12：cors_tests 10 + response 净增 2）/ clippy
+  `-D warnings` 0 警告 / bench 6 场景 0 errors（get_root_10k_100c 36.0k
+  req/s, 历史区间内无回归）/ ldd 仅 libc / env -i 干净启动 /
+  binary **3.1M**（3,228,368 B, ≤4.2M）。
+
+*最后更新：2026-09-10（**决策-42 CORS 完整配置**（ADR-0017, Goal-0003 P2 矩阵 #15）：
+Starlette CORSMiddleware 声明式 env 等价（FASTAPI_MOJO_CORS_ORIGINS CSV/`*` 默认 `*` +
+_METHODS 7 方法 + _HEADERS CSV/`*` 默认 Content-Type,Authorization + _CREDENTIALS 默认 false +
+_MAX_AGE 默认 600 = Starlette）；普通响应仅当请求带被允许 Origin（通配 → `*` / 白名单或
+credentials → 回显 / 不允许 → 无头 — C 时代「每响应必带 `*`」偏差移除, 文档化）；
+预检 204/400 动态（越界 → 400 JSON, 裸 OPTIONS → 204 通配超集）, FFI `send_preflight_response`
+签名不变（**FFI diff = 0**, 零新增依赖 std only）；
+验收: e2e **221/221**（+CRS-1..8）/ cargo **335/0/4** / clippy 0 警告 / bench 0 errors
+（36.0k req/s）/ ldd 仅 libc / env -i 干净启动 / **3.1M**（≤4.2M）；
+2026-09-09（**决策-41 response_model 精化**（ADR-0016, Goal-0003 P2 矩阵 #11）：
 FastAPI/Pydantic exclude/exclude_none 声明式三参数（_response_model include + _response_exclude 剔除模型字段 + _response_exclude_none 剔除 null）;
 应用序 include→exclude→exclude_none; 无模型时 no-op (FastAPI 对齐, /rm-noop demo + RM-7 固化);
 单一 helper response_model_body (request_response.mojo) — dispatch 14 行 inline 块 → 1 行调用 (净减行, FFI diff = 0);
