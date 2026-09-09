@@ -50,6 +50,13 @@ pub struct CurrentRequest {
     pub last_status_len: usize,
     /// 决策-40: 当前请求 Accept-Encoding 含 gzip/x-gzip (send_response GZip 判定用).
     pub accepts_gzip: bool,
+    /// 决策-42: 当前请求 CORS 三元组 (Origin / ACRM / ACHR; 空 = 未带).
+    pub origin: [u8; 256],
+    pub origin_len: usize,
+    pub acrm: [u8; 64],
+    pub acrm_len: usize,
+    pub achr: [u8; 256],
+    pub achr_len: usize,
     /// F3a: 最近一次按名查询的请求 header 值 (NUL 结尾, 供 get_request_header_slice 读).
     /// 在 conn.rs::extract_header_value_to_current 写入; 多次查询会覆盖, 串行调用安全.
     pub hdr_value: [u8; 512],
@@ -77,6 +84,12 @@ impl CurrentRequest {
             last_status: [0u8; 32],
             last_status_len: 0,
             accepts_gzip: false,
+            origin: [0u8; 256],
+            origin_len: 0,
+            acrm: [0u8; 64],
+            acrm_len: 0,
+            achr: [0u8; 256],
+            achr_len: 0,
             hdr_value: [0u8; 512],
             hdr_value_len: 0,
         }
@@ -172,8 +185,52 @@ pub fn reset_request_fields() {
     g.last_status_len = 0;
     g.last_status = [0u8; 32];
     g.accepts_gzip = false;
+    g.origin_len = 0;
+    g.acrm_len = 0;
+    g.achr_len = 0;
     g.hdr_value_len = 0;
     g.hdr_value = [0u8; 512];
+}
+
+/// NUL 终止拷贝 (决策-36 FFI 契约: 缓冲 [len]=0): 截断到 cap-1, 返回实际长度.
+fn copy_field(dst: &mut [u8], src: Option<&[u8]>) -> usize {
+    match src {
+        Some(b) => {
+            let n = b.len().min(dst.len() - 1);
+            dst[..n].copy_from_slice(&b[..n]);
+            dst[n] = 0;
+            n
+        }
+        None => 0,
+    }
+}
+
+/// 决策-42: 记录当前请求 CORS 三元组 (io.rs 解析 header 时调用; None = 未带).
+pub fn set_cors_request(origin: Option<&[u8]>, acrm: Option<&[u8]>, achr: Option<&[u8]>) {
+    let mut g = lock_current();
+    g.origin_len = copy_field(&mut g.origin, origin);
+    g.acrm_len = copy_field(&mut g.acrm, acrm);
+    g.achr_len = copy_field(&mut g.achr, achr);
+}
+
+/// 决策-42: 当前请求 Origin (无 = None; 值拷贝 — 锁不外借).
+fn field_str(buf: &[u8], len: usize) -> Option<String> {
+    if len == 0 {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+    }
+}
+
+pub fn current_origin() -> Option<String> {
+    let g = lock_current();
+    field_str(&g.origin, g.origin_len)
+}
+
+/// 决策-42: 当前请求 Access-Control-Request-Method / Headers (无 = None).
+pub fn current_cors_request() -> (Option<String>, Option<String>) {
+    let g = lock_current();
+    (field_str(&g.acrm, g.acrm_len), field_str(&g.achr, g.achr_len))
 }
 
 /// 决策-40: 记录当前请求 Accept-Encoding 是否含 gzip (io.rs 解析完 header 时调用).

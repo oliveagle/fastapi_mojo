@@ -81,14 +81,18 @@ fn json_escape_non_utf8_passthrough() {
 
 #[test]
 fn response_headers_close() {
+    // 决策-42: request 全局无 Origin → 不带任何 CORS 行（Starlette 对齐;
+    // C 时代「每响应必带 *」偏差已移除, 显式 reset 防其他测试泄漏）。
+    super::request::reset_request_fields();
     let h = build_response_headers("200 OK", "application/json", 12, false, None);
     let s = String::from_utf8(h).unwrap();
     assert!(s.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(s.contains("\r\nContent-Type: application/json\r\n"));
     assert!(s.contains("\r\nContent-Length: 12\r\n"));
     assert!(s.contains("\r\nConnection: close\r\n"));
-    assert!(s.contains("\r\nAccess-Control-Allow-Origin: *\r\n"));
+    assert!(!s.contains("Access-Control"), "no Origin → no CORS lines");
     assert!(s.ends_with("\r\n\r\n"));
+    super::request::reset_request_fields();
 }
 
 #[test]
@@ -113,30 +117,98 @@ fn response_headers_empty_extra() {
 }
 
 #[test]
-fn response_headers_include_cors_full_set() {
-    let h = build_response_headers("200 OK", "x", 0, true, None);
-    let s = String::from_utf8(h).unwrap();
-    for line in [
-        "Access-Control-Allow-Origin: *",
-        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS",
-        "Access-Control-Allow-Headers: Content-Type, Authorization",
-        "Access-Control-Max-Age: 86400",
-    ] {
-        assert!(s.contains(line), "missing CORS line: {line}");
-    }
+fn response_headers_cors_dynamic() {
+    // 决策-42: CORS 行 = f(request Origin, env config), 不再是固定常量。
+    cors_env_clear();
+    super::request::reset_request_fields();
+
+    // 1) 无 Origin → 0 行
+    let s = String::from_utf8(build_response_headers("200 OK", "x", 0, true, None)).unwrap();
+    assert!(!s.contains("Access-Control"));
+
+    // 2) 默认通配 + Origin → ACAO *（credentials 关 → 无 credentials 行）
+    super::request::set_cors_request(Some(b"http://example.com"), None, None);
+    let s = String::from_utf8(build_response_headers("200 OK", "x", 0, true, None)).unwrap();
+    assert!(s.contains("Access-Control-Allow-Origin: *"));
+    assert!(!s.contains("Access-Control-Allow-Credentials"));
+
+    // 3) 白名单命中 + credentials → 回显 origin + credentials 行
+    std::env::set_var("FASTAPI_MOJO_CORS_ORIGINS", "http://a.com,http://b.com");
+    std::env::set_var("FASTAPI_MOJO_CORS_CREDENTIALS", "true");
+    super::cors::__test_reset_config();
+    super::request::set_cors_request(Some(b"http://b.com"), None, None);
+    let s = String::from_utf8(build_response_headers("200 OK", "x", 0, true, None)).unwrap();
+    assert!(s.contains("Access-Control-Allow-Origin: http://b.com"));
+    assert!(s.contains("Access-Control-Allow-Credentials: true"));
+
+    // 4) 白名单未命中 → 0 行（浏览器自行拦截, 上游同款）
+    super::request::set_cors_request(Some(b"http://evil.com"), None, None);
+    let s = String::from_utf8(build_response_headers("200 OK", "x", 0, true, None)).unwrap();
+    assert!(!s.contains("Access-Control"));
+
+    // cleanup: 不泄漏到后续测试
+    super::request::reset_request_fields();
+    cors_env_clear();
+}
+
+/// 决策-42 测试隔离: 清 FASTAPI_MOJO_CORS_* env + cors config 缓存
+/// (--test-threads=1 顺序纪律; 复用 cors.rs 共享钩子, 断言 panic 跳过
+/// 结尾清理的防御纵深)。
+fn cors_env_clear() {
+    super::cors::__test_clear_env();
 }
 
 // ---------- build_preflight_response ----------
 
 #[test]
-fn preflight_exact_bytes() {
-    let expected = b"HTTP/1.1 204 No Content\r\n\
-Content-Length: 0\r\n\
-Connection: close\r\n\
-Access-Control-Allow-Origin: *\r\n\
-Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n\
-Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
-Access-Control-Max-Age: 86400\r\n\
-\r\n";
-    assert_eq!(build_preflight_response(), expected);
+fn preflight_bare_options_default() {
+    // 决策-42 动态版: 无 Origin/ACRM/ACHR（裸 OPTIONS, C 端口既有行为）→
+    // 204 + 通配 ACAO + Max-Age 600（Starlette; C 时代 86400 → 对齐上游）;
+    // ACRM/ACHR 未带 → 不带 Allow-Methods/Allow-Headers（Starlette 预检
+    // 响应含 Allow-Methods 是默认 7 方法集超集, 本实现按需输出, e2e 守护）。
+    cors_env_clear();
+    super::request::reset_request_fields();
+    let s = String::from_utf8(build_preflight_response()).unwrap();
+    assert!(s.starts_with("HTTP/1.1 204 No Content\r\n"));
+    assert!(s.contains("Access-Control-Allow-Origin: *\r\n"));
+    assert!(s.contains("Access-Control-Max-Age: 600\r\n"));
+    assert!(s.contains("Content-Length: 0\r\n"));
+    assert!(s.contains("Connection: close\r\n"));
+    assert!(s.ends_with("\r\n\r\n"));
+    super::request::reset_request_fields();
+}
+
+#[test]
+fn preflight_204_with_acrm_achr_max_age() {
+    cors_env_clear();
+    std::env::set_var("FASTAPI_MOJO_CORS_ORIGINS", "http://a.com");
+    std::env::set_var("FASTAPI_MOJO_CORS_MAX_AGE", "120");
+    super::cors::__test_reset_config();
+    super::request::reset_request_fields();
+    super::request::set_cors_request(Some(b"http://a.com"), Some(b"POST"), Some(b"Content-Type, Authorization"));
+    let s = String::from_utf8(build_preflight_response()).unwrap();
+    assert!(s.starts_with("HTTP/1.1 204 No Content\r\n"));
+    assert!(s.contains("Access-Control-Allow-Origin: http://a.com\r\n"));
+    assert!(s.contains("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"));
+    assert!(s.contains("Access-Control-Allow-Headers: Content-Type, Authorization\r\n"));
+    assert!(s.contains("Access-Control-Max-Age: 120\r\n"));
+    assert!(s.contains("Content-Length: 0\r\n"));
+    super::request::reset_request_fields();
+    cors_env_clear();
+}
+
+#[test]
+fn preflight_400_origin_not_allowed() {
+    cors_env_clear();
+    std::env::set_var("FASTAPI_MOJO_CORS_ORIGINS", "http://a.com");
+    super::cors::__test_reset_config();
+    super::request::reset_request_fields();
+    super::request::set_cors_request(Some(b"http://evil.com"), Some(b"POST"), Some(b"Content-Type"));
+    let s = String::from_utf8(build_preflight_response()).unwrap();
+    assert!(s.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+    assert!(s.contains("Content-Type: application/json\r\n"));
+    assert!(s.contains(r#""error":"origin not allowed""#));
+    assert!(s.contains(r#""status":"400 Bad Request""#));
+    super::request::reset_request_fields();
+    cors_env_clear();
 }

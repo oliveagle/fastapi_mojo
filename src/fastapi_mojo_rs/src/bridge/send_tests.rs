@@ -111,7 +111,15 @@ fn send_all_writes_entire_payload() {
 #[test]
 fn send_response_keepalive_true() {
     let mut cp = ConnPair::new();
+    // 决策-42: CORS 行 = f(request Origin, env config) — 显式设 Origin + 清
+    // CORS env/config (默认通配 → ACAO *), 保留真 fd 路径 CORS 行覆盖;
+    // 结尾 reset 防泄漏到后续测试。
+    // (reset_request_fields 会置 close_after_response=true, keep-alive 须在
+    //  reset 之后声明)
+    super::cors::__test_clear_env();
+    super::request::reset_request_fields();
     super::request::set_close_after_response(false);
+    super::request::set_cors_request(Some(b"http://e2e.test"), None, None);
     let rc = send_response(cp.b, "200 OK", "text/plain", b"hello", true, None);
     assert_eq!(rc, 0);
     assert_last_status("200 OK");
@@ -124,6 +132,8 @@ fn send_response_keepalive_true() {
     assert!(hs.contains("Connection: keep-alive\r\n"));
     assert!(hs.contains("Access-Control-Allow-Origin: *\r\n"));
     assert_eq!(body_after_headers(&resp), b"hello");
+    super::request::reset_request_fields();
+    super::cors::__test_clear_env();
 }
 
 #[test]

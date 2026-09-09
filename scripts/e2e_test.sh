@@ -22,6 +22,7 @@
 #   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
 #   - Body validation: _body_schema + Field 约束 + Enum + FastAPI 422 detail (决策-38, BS-1..BS-12)
 #   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
+#   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #
 # 用法:
@@ -950,6 +951,119 @@ fi
 kill -TERM "$GZ_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$GZ_PID" 2>/dev/null
+
+# --- CORS 完整配置 (决策-42, ADR-0017, Goal-0003 P2 矩阵 #15) -------------------
+# Starlette CORSMiddleware 声明式 env 等价形态:
+#   FASTAPI_MOJO_CORS_ORIGINS (CSV 或 *, 默认 * = 通配) / _METHODS (默认 7 方法) /
+#   _HEADERS (CSV 或 *, 默认 Content-Type, Authorization) / _CREDENTIALS (默认 false) /
+#   _MAX_AGE (默认 600 = Starlette; C 时代 86400 已对齐上游).
+# 普通响应: 仅请求带被允许 Origin 时输出 (通配 → *, 白名单/credentials → 回显;
+#   credentials → + Allow-Credentials: true; 不被允许 → 不带任何 CORS 头).
+# 预检 (OPTIONS): origin 不允许 / ACRM 越界 / ACHR 越界 → 400 JSON; 通过 → 204 +
+#   动态头集; 裸 OPTIONS (无 Origin) → 204 通配超集 (C 时代行为, 浏览器无差异).
+# 零 python3 (Track B 决策-22): curl -D 抓头 + grep.
+echo "== CORS (决策-42) =="
+CRS_PORT=$((PORT + 102))
+CRS_LOG="$TMP/cors.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+    FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_CORS_ORIGINS="http://a.com,http://b.com" \
+    FASTAPI_MOJO_CORS_CREDENTIALS=true \
+    FASTAPI_MOJO_CORS_MAX_AGE=120 \
+    "$BIN" --port "$CRS_PORT" \
+    > "$CRS_LOG" 2>&1 ) &
+CRS_PID=$!
+CRS_READY=0
+for _ in $(seq 1 30); do
+    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$CRS_PORT/health"; then
+        CRS_READY=1; break
+    fi
+    sleep 0.3
+done
+# 发一次请求, 头/体分别落盘, 打印 http code (\r 已剥, grep 大小写不敏感)
+crs_req() { # [curl args...]
+    curl -s --max-time 5 -D "$TMP/crs_hdr" -o "$TMP/crs_body" "$@" >/dev/null 2>&1
+    tr -d '\r' < "$TMP/crs_hdr" > "$TMP/crs_hdr_c"
+    head -1 "$TMP/crs_hdr_c" | awk '{print $2}'
+}
+crs_has_hdr() { # pattern (grep -Ei 对 crs_hdr_c)
+    grep -Eiq "$1" "$TMP/crs_hdr_c"
+}
+if [[ "$CRS_READY" == 1 ]]; then
+    CRS_BASE="http://127.0.0.1:$CRS_PORT"
+    # CRS-1: 裸 OPTIONS / (主 server 默认通配, 无 Origin) → 204 + ACAO * (C 时代回归)
+    code=$(crs_req -X OPTIONS "$BASE/")
+    if [[ "$code" == "204" ]] && crs_has_hdr '^access-control-allow-origin: *\*$'; then
+        pass "CRS-1 bare OPTIONS → 204 + ACAO *"
+    else
+        fail "CRS-1 bare OPTIONS → 204 + ACAO *" "code=$code"
+    fi
+    # CRS-2: 主 server 默认通配: GET + Origin → ACAO *
+    crs_req -H 'Origin: http://example.com' "$BASE" >/dev/null
+    if crs_has_hdr '^access-control-allow-origin: *\*$'; then
+        pass "CRS-2 wildcard config + Origin → ACAO *"
+    else
+        fail "CRS-2 wildcard config + Origin → ACAO *"
+    fi
+    # CRS-3: 白名单命中 + credentials → 回显 origin + Allow-Credentials: true
+    crs_req -H 'Origin: http://a.com' "$CRS_BASE/health" >/dev/null
+    if crs_has_hdr '^access-control-allow-origin: *http://a\.com$' && crs_has_hdr '^access-control-allow-credentials: *true$'; then
+        pass "CRS-3 allowed origin → echo + credentials"
+    else
+        fail "CRS-3 allowed origin → echo + credentials"
+    fi
+    # CRS-4: 白名单未命中 → 不带任何 CORS 头
+    crs_req -H 'Origin: http://evil.com' "$CRS_BASE/health"
+    if crs_has_hdr 'access-control'; then
+        fail "CRS-4 disallowed origin → no CORS headers" "server emitted CORS for evil.com"
+    else
+        pass "CRS-4 disallowed origin → no CORS headers"
+    fi
+    # CRS-5: 预检通过 → 204 + 回显 + credentials + methods + headers + Max-Age 120
+    code=$(crs_req -X OPTIONS -H 'Origin: http://a.com' \
+        -H 'Access-Control-Request-Method: POST' \
+        -H 'Access-Control-Request-Headers: Content-Type' "$CRS_BASE/health")
+    if [[ "$code" == "204" ]] \
+        && crs_has_hdr '^access-control-allow-origin: *http://a\.com$' \
+        && crs_has_hdr '^access-control-allow-credentials: *true$' \
+        && crs_has_hdr '^access-control-allow-methods: *GET, POST, PUT, DELETE, HEAD, OPTIONS$' \
+        && crs_has_hdr '^access-control-allow-headers: *Content-Type, Authorization$' \
+        && crs_has_hdr '^access-control-max-age: *120$'; then
+        pass "CRS-5 preflight allowed → 204 + full header set (Max-Age 120)"
+    else
+        fail "CRS-5 preflight allowed → 204 + full header set" "code=$code"
+    fi
+    # CRS-6: ACRM 越界 (PATCH 不在默认 7 方法) → 400 JSON
+    code=$(crs_req -X OPTIONS -H 'Origin: http://a.com' \
+        -H 'Access-Control-Request-Method: PATCH' "$CRS_BASE/health")
+    if [[ "$code" == "400" ]] && grep -q '"error":"method not allowed"' "$TMP/crs_body"; then
+        pass "CRS-6 preflight ACRM out of allow_methods → 400"
+    else
+        fail "CRS-6 preflight ACRM out of allow_methods → 400" "code=$code body=$(cat "$TMP/crs_body")"
+    fi
+    # CRS-7: origin 不在白名单 → 400 JSON
+    code=$(crs_req -X OPTIONS -H 'Origin: http://evil.com' \
+        -H 'Access-Control-Request-Method: GET' "$CRS_BASE/health")
+    if [[ "$code" == "400" ]] && grep -q '"error":"origin not allowed"' "$TMP/crs_body"; then
+        pass "CRS-7 preflight origin not allowed → 400"
+    else
+        fail "CRS-7 preflight origin not allowed → 400" "code=$code body=$(cat "$TMP/crs_body")"
+    fi
+    # CRS-8: ACHR 越界 (X-Nope 不在默认头集) → 400 JSON
+    code=$(crs_req -X OPTIONS -H 'Origin: http://a.com' \
+        -H 'Access-Control-Request-Method: GET' \
+        -H 'Access-Control-Request-Headers: X-Nope' "$CRS_BASE/health")
+    if [[ "$code" == "400" ]] && grep -q '"error":"requested header not allowed"' "$TMP/crs_body"; then
+        pass "CRS-8 preflight ACHR out of allow_headers → 400"
+    else
+        fail "CRS-8 preflight ACHR out of allow_headers → 400" "code=$code body=$(cat "$TMP/crs_body")"
+    fi
+else
+    fail "CRS side server did not start" "see $CRS_LOG"
+fi
+kill -TERM "$CRS_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$CRS_PID" 2>/dev/null
 
 # --- summary ---------------------------------------------------------------------
 
