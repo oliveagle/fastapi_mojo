@@ -1,23 +1,21 @@
 # src/fastapi_mojo/params_typed.mojo
 #
-# F1: 类型化 Path/Query/Body 参数校验 (Goal-0002 §1.1).
+# F1: 类型化 Path/Query 参数校验 (Goal-0002 §1.1) + 决策-43 List 多值/alias.
 #
-# 设计:
-#   - 声明式: 类型标注存在 Handler.data["_param_types"], 格式 "name:type;name:type".
-#     value 格式: "int" | "float" | "bool" | "string" | "int=10" (带默认值).
-#   - 必填: 缺失必填参数 (path/query 均无且无默认值) -> 422.
-#   - 校验失败: 返回 TypedError {status: "422 Unprocessable Entity",
-#     detail: "<param>: ..."}, JSON 响应统一 detail 字段 (FastAPI 语义).
-#   - 校验通过: handler 无感, ParamDict 仍是 String (类型转换由 handler 视需要做).
+# 声明式 (扩展点在 register_routes, 核心零改动): _param_types =
+#   "name:type;..." ("int" / "int=10" / "int[]" (List) / "int[]=1,2" /
+#   "str[low,high]" (enum, 决策-38); 空括号 = list, 非空 = enum);
+#   _param_aliases = "name=alias" (决策-43: query key = alias, 原始 name
+#   无绑定效力). 校验失败 -> 422 + FastAPI detail 数组 (loc/msg/type, 全收集;
+#   list 元素 loc 带下标 i, 首个失败即停, 上游同款). 标量多值 = last-wins
+#   (Starlette); list = 全部 occurrence. 校验通过 -> handler 无感 (String dict).
 #
-# 显式 dispatch 扩展点 (与 ADR-0004 run_handler 模式一致):
-#   validate_params(type_spec, path_params, query_params) -> TypedError
-#   类型标注只在 register_routes 用 set_data("_param_types", ...) 声明.
-#
-# Mojo 1.0.0 约束: 无 match -> if/elif; 无闭包 -> 数据 + 单点 dispatch;
-#   String[byte=i] 与 char 字面量比较用 ord() 统一处理 (避免 String/Span 混淆).
+# 依赖方向: params_typed -> params_query_extra -> params_query (无环;
+# validate_list_values 在 params_query_extra, 函数内 back-import 本模块).
+# Mojo 1.0.0: 无 match -> if/elif; String[byte=i] 字节比较用 ord() 统一.
 
 from handler import Handler
+from params_query_extra import validate_list_values, split_csv, parse_table
 from json import json_escape
 
 
@@ -45,26 +43,28 @@ struct TypedError:
 struct TypeSpec:
     """单个参数的类型规格. base_type 必填; default_value 空 = 无默认值."""
     var base_type: String     # "int" | "float" | "bool" | "string"
-    var default_value: String  # "" = 无默认; 其它 = 默认值字符串 (字面量)
+    var default_value: String  # "" = 无默认; 其它 = 默认值字符串 (字面量/list CSV)
+    var is_list: Bool
+    var default_present: Bool  # spec 是否显式带 '=' (list 的有默认判据)
 
-    def __init__(out self, base_type: String, default_value: String):
+    def __init__(out self, base_type: String, default_value: String, is_list: Bool, default_present: Bool):
         self.base_type = base_type
         self.default_value = default_value
+        self.is_list = is_list
+        self.default_present = default_present
 
     def has_default(self) -> Bool:
+        if self.is_list:
+            # list: 仅显式 '=' 算有默认 ("int[]=" = 空 list 默认, FastAPI Query([]))
+            return self.default_present
         return self.default_value != ""
 
 
-def _is_known_type(t: String) -> Bool:
-    return t == "int" or t == "float" or t == "bool" or t == "string"
-
-
 def parse_type_spec(raw: String) -> TypeSpec:
-    """解析 "int" / "int=10" / "bool=false" / "string" -> TypeSpec.
-
+    """解析 "int" / "int=10" / "int[]" -> TypeSpec.
     - base_type 必须已知, 否则返回 base_type=raw (由校验层判错).
-    - 有 '=' 但 default 空 -> default_value="" (视为无默认, 由校验层判错).
-    不 raise (hot path 友好): 错误留给 validate_params 报告."""
+    - 有 '=' 但 default 空 -> list = 空默认; 标量 = 由校验层判错.
+    不 raise (hot path 友好): 错误留给校验层报告."""
     var n = raw.byte_length()
     var eq = -1
     for i in range(n):
@@ -72,36 +72,46 @@ def parse_type_spec(raw: String) -> TypeSpec:
             eq = i
             break
     if eq < 0:
-        return TypeSpec(raw, "")
+        return TypeSpec(raw, "", parse_base(raw).is_list, False)
     var base = String(raw[byte=0:eq])
     var default = String(raw[byte=eq + 1:n])
-    return TypeSpec(base, default)
+    return TypeSpec(base, default, parse_base(base).is_list, True)
 
 
-# ---------- 基础类型解析 (决策-38: 支持 T[values] enum) ----------
+# ---------- 基础类型解析 (决策-38 enum + 决策-43 list) ----------
 
 struct ParsedBase:
-    """基础类型解析结果 (ok + 类型名 + enum 值表)."""
+    """基础类型解析结果. ok=False = 畸形/未知类型."""
     var ok: Bool
     var type_name: String
     var is_enum: Bool
+    var is_list: Bool  # 决策-43: 空括号 "int[]"
     var values_csv: String
 
     def __init__(out self):
         self.ok = False
         self.type_name = ""
         self.is_enum = False
+        self.is_list = False
         self.values_csv = ""
 
     def __init__(out self, type_name: String, is_enum: Bool, values_csv: String):
         self.ok = True
         self.type_name = type_name
         self.is_enum = is_enum
+        self.is_list = False
+        self.values_csv = values_csv
+
+    def __init__(out self, type_name: String, is_enum: Bool, values_csv: String, is_list: Bool):
+        self.ok = True
+        self.type_name = type_name
+        self.is_enum = is_enum
+        self.is_list = is_list
         self.values_csv = values_csv
 
 
 def parse_base(raw: String) -> ParsedBase:
-    """解析基础类型: "int" / "str[low,high]" (enum, 决策-38). 畸形 -> ok=False."""
+    """解析基础类型: "int" / "str[low,high]" (enum) / "int[]" (list). 畸形 -> ok=False."""
     var n = raw.byte_length()
     var i = 0
     while i < n:
@@ -118,8 +128,12 @@ def parse_base(raw: String) -> ParsedBase:
             var base = String(raw[byte=0:i])
             var vals = String(raw[byte=i + 1:found])
             if base == "str" or base == "string":
+                if vals == "":
+                    return ParsedBase("str", False, "", True)
                 return ParsedBase("str", True, vals)
             if base == "int" or base == "float" or base == "bool":
+                if vals == "":
+                    return ParsedBase(base, False, "", True)
                 return ParsedBase(base, True, vals)
             return ParsedBase()
         i += 1
@@ -130,64 +144,27 @@ def parse_base(raw: String) -> ParsedBase:
     return ParsedBase()
 
 
-def _enum_in(v: String, csv: String) -> Bool:
-    """v 是否在 enum 值表 (CSV) 中 (trim 后精确匹配)."""
-    var n = csv.byte_length()
-    var start = 0
-    var i = 0
-    while i <= n:
-        var is_sep = (i == n) or (ord(csv[byte=i]) == 44)
-        if is_sep:
-            if i > start:
-                var piece = String(csv[byte=start:i])
-                var b = 0
-                var e = piece.byte_length()
-                while b < e and (ord(piece[byte=b]) == 32 or ord(piece[byte=b]) == 9):
-                    b += 1
-                while e > b and (ord(piece[byte=e - 1]) == 32 or ord(piece[byte=e - 1]) == 9):
-                    e -= 1
-                if e > b and String(piece[byte=b:e]) == v:
-                    return True
-            start = i + 1
-        i += 1
+def _enum_in(v: String, csv: String) raises -> Bool:
+    """v 是否在 enum 值表 (CSV) 中 (split_csv trim 后精确匹配)."""
+    var pieces = split_csv(csv)
+    for piece in pieces:
+        if piece == v:
+            return True
     return False
 
 
-def _enum_msg(csv: String) -> String:
+def _enum_msg(csv: String) raises -> String:
     """FastAPI enum 消息: "Input should be 'a' or 'b'". """
-    var n = csv.byte_length()
-    var start = 0
-    var i = 0
+    var pieces = split_csv(csv)
+    var parts = List[String]()
+    for piece in pieces:
+        parts.append("'" + piece + "'")
     var sb = ""
-    var count = 0
-    var total = 0
-    # 先数总数
-    var j = 0
-    while j <= n:
-        var is_sep2 = (j == n) or (ord(csv[byte=j]) == 44)
-        if is_sep2:
-            if j > start:
-                total += 1
-            start = j + 1
-        j += 1
-    while i <= n:
-        var is_sep = (i == n) or (ord(csv[byte=i]) == 44)
-        if is_sep:
-            if i > start:
-                var piece = String(csv[byte=start:i])
-                var b = 0
-                var e = piece.byte_length()
-                while b < e and (ord(piece[byte=b]) == 32 or ord(piece[byte=b]) == 9):
-                    b += 1
-                while e > b and (ord(piece[byte=e - 1]) == 32 or ord(piece[byte=e - 1]) == 9):
-                    e -= 1
-                if e > b:
-                    if count > 0:
-                        sb = sb + (" or " if count == total - 1 else ", ")
-                    sb = sb + "'" + String(piece[byte=b:e]) + "'"
-                    count += 1
-            start = i + 1
-        i += 1
+    var n = len(parts)
+    for i in range(n):
+        if i > 0:
+            sb = sb + (" or " if i == n - 1 else ", ")
+        sb = sb + parts[i]
     return "Input should be " + sb
 
 
@@ -218,7 +195,7 @@ def _is_int_literal(s: String) -> Bool:
 
 def _is_float_literal(s: String) -> Bool:
     """True if s is a float literal (sign? intpart '.' intpart (exp)?).
-    Accepts 'inf' / '-inf' / 'nan'. 必须含小数点或指数 (区别于 int)."""
+    Accepts 'inf' / '-inf' / 'nan'; 必须含小数点或指数 (区别于 int)."""
     var n = s.byte_length()
     if n == 0:
         return False
@@ -242,24 +219,16 @@ def _is_float_literal(s: String) -> Bool:
             if seen_exp:
                 return False
             seen_exp = True
-            # exponent must be followed by at least one digit
-            if i + 1 >= n:
-                return False
             var j = i + 1
-            var ej = ord(s[byte=j])
-            if ej == 43 or ej == 45:  # '+' '-'
+            if j < n and (ord(s[byte=j]) == 43 or ord(s[byte=j]) == 45):  # '+' '-'
                 j += 1
-                if j >= n:
-                    return False
-            var exp_ok = False
+            if j >= n:
+                return False  # 指数必须至少一位数字
             while j < n:
                 var e2 = ord(s[byte=j])
                 if e2 < 48 or e2 > 57:
                     return False
-                exp_ok = True
                 j += 1
-            if not exp_ok:
-                return False
             break
         elif c < 48 or c > 57:
             return False
@@ -282,17 +251,15 @@ def _parse_bool_literal(s: String) -> Tuple[Bool, Bool]:
 
 def parse_typed_value(type_name: String, raw: String) -> Tuple[Bool, String]:
     """把字符串 raw 按 type_name 解析; 成功 -> (True, 类型化字面量字符串).
-    类型化字面量 (与 json_serialize 一致):
-      int/float -> 数字串; bool -> "true"/"false"; string -> 原样.
-    失败 -> (False, "")."""
+    类型化字面量 (与 json_serialize 一致): int/float -> 数字串; bool ->
+    "true"/"false"; string -> 原样. 失败 -> (False, "")."""
     if type_name == "string":
         return (True, raw)
-    if type_name == "int":
-        if not _is_int_literal(raw):
-            return (False, "")
-        return (True, raw)
-    if type_name == "float":
-        if not _is_float_literal(raw):
+    if type_name == "int" or type_name == "float":
+        var ok = _is_int_literal(raw)
+        if type_name == "float":
+            ok = _is_float_literal(raw)
+        if not ok:
             return (False, "")
         return (True, raw)
     if type_name == "bool":
@@ -305,15 +272,18 @@ def parse_typed_value(type_name: String, raw: String) -> Tuple[Bool, String]:
     return (False, "")
 
 
-# ---------- 校验入口 (validate_params) ----------
+# ---------- 校验入口 ----------
 
 def validate_params_collect(type_spec: Dict[String, String],
                             path_params: Dict[String, String],
-                            query_params: Dict[String, String]) raises -> Tuple[Bool, List[String]]:
-    """统一校验 (决策-38 collect 模式): 收集全部错误 (FastAPI loc/msg/type JSON 对象).
-    优先 path_params; path 无则查 query_params; 都无则看 default_value.
-    loc: path 参数 -> ["path",name]; query 参数 -> ["query",name].
-    支持 T[values] enum (决策-38). 此函数不改入参 dict, 严格按声明顺序遍历."""
+                            query_params: Dict[String, String],
+                            query_multi: Dict[String, List[String]],
+                            aliases: Dict[String, String]) raises -> Tuple[Bool, List[String]]:
+    """统一校验 (决策-38 collect + 决策-43 list/alias): 收集全部错误
+    (loc/msg/type). 优先 path; 否则 query (alias 声明时按 alias key);
+    都无则看 default. loc: path -> ["path",name]; query -> ["query",name]
+    (list 元素 + 下标 i). 标量 = last-wins; list = 全部 occurrence 逐元素
+    校验 (首个失败即停, 上游同款). 不改入参 dict."""
     var errs = List[String]()
     if len(type_spec) == 0:
         return (True, errs^)
@@ -330,14 +300,37 @@ def validate_params_collect(type_spec: Dict[String, String],
             errs.append(_pe(loc, "unknown type for parameter '" + k + "': " + ts.base_type, "unknown_type"))
             continue
 
-        # 取值: path 优先 -> query -> default
+        # 取值: path 优先 (alias 不适用 path); query 按 alias key
+        var lookup = k
+        if not in_path and k in aliases:
+            lookup = aliases[k]
+
+        if ts.is_list:
+            # 决策-43: list 参数 (path 命中时按单值校验 — path 恒单值, 宽松)
+            if in_path:
+                var one = List[String]()
+                one.append(path_params[k])
+                validate_list_values(pb.type_name, one^, k, errs)
+                continue
+            var vals: List[String]
+            if lookup in query_multi:
+                vals = query_multi[lookup].copy()
+            elif ts.has_default():
+                var d = ts.default_value
+                vals = split_csv(d)
+            else:
+                errs.append(_pe(loc, "field required", "missing"))
+                continue
+            validate_list_values(pb.type_name, vals^, k, errs)
+            continue
+
         var raw = ""
         var has_value = False
         if in_path:
             raw = path_params[k]
             has_value = True
-        elif k in query_params:
-            raw = query_params[k]
+        elif lookup in query_params:
+            raw = query_params[lookup]
             has_value = True
         elif ts.has_default():
             raw = ts.default_value
@@ -368,8 +361,10 @@ def validate_params_collect(type_spec: Dict[String, String],
 def validate_params(type_spec: Dict[String, String],
                     path_params: Dict[String, String],
                     query_params: Dict[String, String]) raises -> TypedError:
-    """(兼容入口) 统一校验; 失败时 detail = 首个错误对象. 主路径用 validate_params_collect."""
-    var r = validate_params_collect(type_spec, path_params, query_params)
+    """(兼容入口) 统一校验; 失败时 detail = 首个错误对象. 主路径用 collect.
+    无 list/alias 输入 (传空 dict; 决策-43 能力走 validate_params_collect)."""
+    var r = validate_params_collect(type_spec, path_params, query_params,
+                                    Dict[String, List[String]](), Dict[String, String]())
     if r[0]:
         return TypedError()
     return TypedError("422 Unprocessable Entity", r[1][0])
@@ -379,12 +374,26 @@ def validate_params(type_spec: Dict[String, String],
 
 def set_param_type(mut handler: Handler, name: String, type_spec: String) raises:
     """把类型规格写入 handler.data["_param_types"].
-    注册时校验类型名/enum 值表/默认值合法性 (避免 hot path 失败)."""
+    注册时校验类型名/enum 值表/默认值合法性 (避免 hot path 失败).
+    决策-43: list 默认 CSV 逐元素校验; enum list 不可表达 -> 拒绝."""
     var ts = parse_type_spec(type_spec)
     var pb = parse_base(ts.base_type)
     if not pb.ok:
         raise Error("set_param_type: unknown type '" + ts.base_type + "' for '" + name + "'")
-    if pb.is_enum:
+    if ts.is_list:
+        if pb.is_enum:
+            raise Error("set_param_type: enum-list not expressible for '" + name +
+                        "' (non-empty brackets = enum, empty = list)")
+        if ts.has_default():
+            var defs = split_csv(ts.default_value)
+            var i = 0
+            while i < len(defs):
+                var pr = parse_typed_value(pb.type_name, defs[i])
+                if not pr[0]:
+                    raise Error("set_param_type: bad list default element '" + defs[i] +
+                                "' for type '" + pb.type_name + "' on parameter '" + name + "'")
+                i += 1
+    elif pb.is_enum:
         if ts.has_default() and not _enum_in(ts.default_value, pb.values_csv):
             raise Error("set_param_type: enum default '" + ts.default_value +
                         "' not in values for parameter '" + name + "'")
@@ -403,29 +412,85 @@ def set_param_type(mut handler: Handler, name: String, type_spec: String) raises
 
 def get_param_types(handler: Handler) raises -> Dict[String, String]:
     """从 handler.data["_param_types"] 解析成 Dict[name, type_spec]."""
-    var out = Dict[String, String]()
     if "_param_types" not in handler.data:
-        return out^
-    var raw = handler.data["_param_types"]
-    if raw == "":
-        return out^
-    var n = raw.byte_length()
-    var start = 0
-    var i = 0
-    while i <= n:
-        var is_sep = (i == n) or (ord(raw[byte=i]) == 59)  # ';'
-        if is_sep:
-            if i > start:
-                var pair = String(raw[byte=start:i])
-                var colon = -1
-                for j in range(pair.byte_length()):
-                    if ord(pair[byte=j]) == 58:  # ':'
-                        colon = j
-                        break
-                if colon > 0:
-                    var k = String(pair[byte=0:colon])
-                    var v = String(pair[byte=colon + 1:pair.byte_length()])
-                    out[k] = v
-            start = i + 1
-        i += 1
-    return out^
+        return Dict[String, String]()
+    return parse_table(handler.data["_param_types"], 59, 58, True)
+
+
+# ---------- 自测 ----------
+
+import std.os
+from params_query import parse_query_params
+
+
+def check(cond: Bool, msg: String) raises:
+    """真检查 (Mojo 1.0.0 assert 是 no-op, 决策-38 教训)."""
+    if not cond:
+        print("FAIL: " + msg)
+        std.os.abort()
+
+
+def _has(s: String, sub: String) -> Bool:
+    """子串检查 (自测)."""
+    var sn = sub.byte_length()
+    var sl = s.byte_length()
+    if sn == 0 or sn > sl:
+        return False
+    for i in range(sl - sn + 1):
+        var j = 0
+        while j < sn:
+            if s[byte=i + j] != sub[byte=j]:
+                break
+            j += 1
+        if j == sn:
+            return True
+    return False
+
+
+def _t(csv: String) raises -> Dict[String, String]:
+    """自测输入: 紧凑 "k=v;..." 表 -> Dict."""
+    return parse_table(csv, 59, 61, True)
+
+
+def vrun(spec: String, path: String, flat: String, multi: String, alias_name: String) raises -> Tuple[Bool, List[String]]:
+    var tm = _t(multi)
+    var qm = Dict[String, List[String]]()
+    for k in tm:
+        qm[k] = split_csv(tm[k])
+    return validate_params_collect(parse_table(spec, 59, 58, True), _t(path), _t(flat), qm, _t(alias_name))
+
+
+def main() raises:
+    print("Testing typed params (list/alias, 决策-43)...")
+
+    var ts = parse_type_spec("int[]")
+    check(ts.is_list and not ts.has_default(), "int[] list no default")
+    ts = parse_type_spec("int[]=")
+    check(ts.is_list and ts.has_default() and ts.default_value == "", "int[]= empty default")
+    check(parse_type_spec("int[]=1,2").default_value == "1,2", "list csv default")
+    check(parse_type_spec("int=10").has_default() and not parse_type_spec("int=10").is_list, "scalar default")
+    check(not parse_type_spec("str[low,high]").is_list, "enum not list")
+    check(parse_base("int[]").is_list and not parse_base("int[]").is_enum, "parse_base int[]")
+
+    var r = vrun("n:int[]", "", "", "n=1,2,3", "")
+    check(r[0], "list multi ok")
+    r = vrun("n:int[]", "", "", "", "")
+    check(not r[0] and _has(r[1][0], "missing") and _has(r[1][0], "[\"query\",\"n\"]"), "list missing loc")
+    r = vrun("n:int[]", "", "", "n=1,zz", "")
+    check(not r[0] and _has(r[1][0], "[\"query\",\"n\",1]") and _has(r[1][0], "int_parsing"), "list bad elem idx")
+    r = vrun("n:int[]=", "", "", "", "")
+    check(r[0] and vrun("n:int[]=1,2", "", "", "", "")[0], "list defaults (empty/csv) pass")
+    check(not vrun("n:bool[]", "", "", "n=zz", "")[0], "list bool bad elem")
+
+    r = vrun("limit:int=10", "", "lmt=5", "", "limit=lmt")
+    check(r[0], "alias lookup ok")
+    r = vrun("limit:int=10", "", "limit=9", "", "limit=lmt")
+    check(r[0], "raw name ignored (default used)")
+    check(parse_query_params("q=1&q=2").values["q"] == "2", "scalar last-wins")
+    r = vrun("q:int", "", "q=zz", "", "")
+    check(not r[0] and _has(r[1][0], "int_parsing"), "scalar int parse error")
+    check(vrun("item_id:int", "item_id=42", "item_id=99", "", "")[0], "path priority")
+    r = vrun("level:str[low,high]=high", "", "level=mid", "", "")
+    check(not r[0] and _has(r[1][0], "enum"), "enum reject")
+
+    print("typed params test completed!")

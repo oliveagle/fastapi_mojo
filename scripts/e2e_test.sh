@@ -1065,6 +1065,47 @@ kill -TERM "$CRS_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$CRS_PID" 2>/dev/null
 
+# --- Query 精化 (决策-43, ADR-0018, Goal-0003 P2 矩阵 #3) -----------------------
+# /query-extra: tag:str[]= / nums:int[]= / level alias=lvl / limit alias=lmt.
+#   list 多值 = 全部 occurrence 的 CSV; alias: 只按 alias key 绑定, 原始 name
+#   无绑定效力 (响应 query_<name> = 绑定值 = alias 值或默认值).
+# /query-req: n:int[] 必填 (无默认) -> 缺失 422.
+echo "== Query extras (决策-43) =="
+expect_code "QS-1 list multi 200" 200 "$BASE/query-extra?tag=a&tag=b"
+expect_body_contains "QS-1 list csv" '"query_tag": "a,b"' "$BASE/query-extra?tag=a&tag=b"
+expect_body_contains "QS-2 list single wrap" '"query_tag": "only"' "$BASE/query-extra?tag=only"
+expect_code "QS-3 list defaults empty" 200 "$BASE/query-extra"
+expect_body_contains "QS-3 tag default empty" '"query_tag": ""' "$BASE/query-extra"
+expect_body_contains "QS-3 nums default empty" '"query_nums": ""' "$BASE/query-extra"
+expect_body_contains "QS-4 int list" '"query_nums": "1,2"' "$BASE/query-extra?nums=1&nums=2"
+expect_code "QS-5 list bad elem 422" 422 "$BASE/query-extra?nums=1&nums=zz"
+expect_body_contains "QS-5 elem loc idx 1" '["query","nums",1]' "$BASE/query-extra?nums=1&nums=zz"
+expect_body_contains "QS-5 int_parsing" '"type":"int_parsing"' "$BASE/query-extra?nums=1&nums=zz"
+expect_code "QS-6 list bad elem idx 0" 422 "$BASE/query-extra?nums=zz"
+expect_body_contains "QS-6 loc idx 0" '["query","nums",0]' "$BASE/query-extra?nums=zz"
+expect_body_contains "QS-7 alias value" '"query_level": "low"' "$BASE/query-extra?lvl=low"
+expect_body_contains "QS-8 raw name ignored (default)" '"query_level": "high"' "$BASE/query-extra?level=low"
+expect_body_contains "QS-9 alias limit" '"query_limit": "5"' "$BASE/query-extra?lmt=5"
+expect_body_contains "QS-10 raw limit ignored (default)" '"query_limit": "10"' "$BASE/query-extra?limit=9"
+expect_code "QS-11 required list missing" 422 "$BASE/query-req"
+expect_body_contains "QS-11 missing loc" '["query","n"]' "$BASE/query-req"
+expect_body_contains "QS-11 field required" '"msg":"field required"' "$BASE/query-req"
+expect_code "QS-12 required list ok" 200 "$BASE/query-req?n=1&n=2"
+expect_body_contains "QS-12 n csv" '"query_n": "1,2"' "$BASE/query-req?n=1&n=2"
+# QS-13: OpenAPI — alias name / array+items / 空 list 默认 / description
+QS_API=$(http_body "$BASE/openapi.json")
+if [[ "$QS_API" == *'"name":"lmt"'* ]]; then pass "QS-13a openapi alias name"
+else fail "QS-13a openapi alias name" "missing parameter name lmt"; fi
+if [[ "$QS_API" == *'"type":"array"'* && "$QS_API" == *'"items":{"type":"string"}'* ]]; then pass "QS-13b openapi array items"
+else fail "QS-13b openapi array items" "missing array schema"; fi
+if [[ "$QS_API" == *'"default":[]'* ]]; then pass "QS-13c openapi empty list default"
+else fail "QS-13c openapi empty list default" "missing default []"; fi
+if [[ "$QS_API" == *'"description":"Page size"'* ]]; then pass "QS-13d openapi description"
+else fail "QS-13d openapi description" "missing description"; fi
+# 回归: /typed 标量多值 last-wins (Starlette)
+expect_code "QS-R1 scalar last-wins 200" 200 "$BASE/typed?count=1&count=2&verbose=true"
+expect_body_contains "QS-R1 count last-wins" '"query_count": "2"' "$BASE/typed?count=1&count=2&verbose=true"
+
 # --- summary ---------------------------------------------------------------------
 
 echo

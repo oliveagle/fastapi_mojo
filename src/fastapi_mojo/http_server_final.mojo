@@ -12,6 +12,7 @@ from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KI
 from params_query import parse_path_params, parse_query_params, url_decode, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params_collect, get_param_types
+from params_query_extra import apply_query_extras, get_param_aliases
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import _parse_cookies, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
@@ -529,6 +530,24 @@ def register_routes(mut router: Router) raises:
     enum_h.set_data("_param_types", "level:str[low,medium,high]=high")
     router.add_route("/enum", "GET", enum_h)
 
+    # 决策-43 (Goal-0003 P2 #3): query 精化 — List 多值 / alias / description.
+    #   tag:str[]= (可选空 list) / nums:int[]= (可选 list) /
+    #   level alias=lvl / limit alias=lmt (alias: 原始 name 无绑定效力,
+    #   只按 alias key 取值; OpenAPI parameter.name = alias).
+    var qe_h = Handler(KIND_ECHO(), "query_extra")
+    qe_h.set_data("message", "query extras demo")
+    qe_h.set_data("_param_types",
+                  "tag:str[]=;nums:int[]=;level:str[low,medium,high]=high;limit:int=10")
+    qe_h.set_data("_param_aliases", "level=lvl;limit=lmt")
+    qe_h.set_data("_param_descs", "tag=Comma separated tags;nums=Numeric list;level=Log level;limit=Page size")
+    router.add_route("/query-extra", "GET", qe_h)
+
+    # 必填 list (无 '=' 默认) -> 缺失 422 (loc ["query","n"]).
+    var qr_h = Handler(KIND_ECHO(), "query_req_list")
+    qr_h.set_data("message", "required list demo")
+    qr_h.set_data("_param_types", "n:int[]")
+    router.add_route("/query-req", "GET", qr_h)
+
     # F5 SSE 一次性推送 demo (Goal-0002 §1.1). 事件用 | 分隔 (避免与 data 内 , 冲突).
     var sse_h = Handler(KIND_SSE(), "sse_demo")
     sse_h.set_data("_stream_events", "hello\nworld|second event|multi\nline\nevent")
@@ -917,10 +936,13 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         # 这是 dispatch 唯一一处"认识类型化"的代码; 新增类型化路由 = 仅在
                         # register_routes 用 set_data("_param_types", "name:type;name:type").
                         var type_spec = get_param_types(route_result.handler)
+                        var aliases = get_param_aliases(route_result.handler)
                         # 决策-38 (Goal-0003 P1): 参数校验 + body 校验统一为 FastAPI 422 detail
-                        # 数组 (loc/msg/type, 收集全部错误: 参数 -> ["path"/"query",x];
+                        # 数组 (loc/msg/type, 收集全部错误: 参数 -> ["path"/"query",x] (+
+                        # 决策-43 list 元素下标 i; alias 按 alias key 取值);
                         # body -> ["body",x] + 嵌套/数组下标; Pydantic v2 风格).
-                        var perr = validate_params_collect(type_spec, route_result.params, query_params.values)
+                        var perr = validate_params_collect(type_spec, route_result.params,
+                                                           query_params.values, query_params.multi_values, aliases)
                         var sres = validate_body_schema(route_result.handler, effective_method, body_params, body_str)
                         var all_errs = List[String]()
                         if not perr[0]:
@@ -935,6 +957,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                             resp_data["detail"] = "__nested__:" + "[" + ",".join(all_errs) + "]"
                             resp_data["status"] = "422"
                         else:
+                            # 决策-43 (Goal-0003 P2 #3): 成功路径 list 多值/alias 归一化 —
+                            # values[key] = list CSV / alias 绑定值 (原始 name 覆写: 无绑定效力).
+                            apply_query_extras(query_params, type_spec, aliases, route_result.params)
                             # F2: 声明式异常映射 (Goal-0002). 命中 -> 直接返回错误响应,
                             # 不进 run_handler. 这是 dispatch 唯一一处"认识 _error_map"的代码.
                             var exc = match_error_map(route_result.handler,

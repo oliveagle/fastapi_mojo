@@ -149,7 +149,7 @@ jobs:
         run: |
           set -e
           cd src/fastapi_mojo
-          for f in json params_query params_json router string_builder test_all; do
+          for f in json params_query params_json router string_builder params_typed params_query_extra test_all; do
             echo "=== mojo run $f.mojo ==="
             mojo run "$f.mojo"
           done

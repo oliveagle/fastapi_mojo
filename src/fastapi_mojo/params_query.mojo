@@ -4,6 +4,9 @@
 #
 #   - parse_query_params: URL-decode 到原始字节后 UTF-8 解码; 支持 ?flag
 #     (无值)、值中含 '='、畸形 %XX (保留字面量)。
+#   - 多值 (决策-43): multi_values 保留每个 key 的全部 occurrence (occurrence
+#     顺序); values = 扁平视图 (last-wins, Starlette MultiDict.get 语义 —
+#     与 FastAPI 标量参数行为一致: ?q=a&q=b -> "b")。
 #   - parse_path_params: 按 {param} 模式提取路径参数。
 #   - ParsedParams: values + types (类型标记, P4.4 类型化)。
 #
@@ -19,6 +22,7 @@ struct ParsedParams:
     var param_count: Int
     var values: Dict[String, String]
     var types: Dict[String, String]  # "string"/"int"/"float"/"bool"/"null"/"object"/"array"
+    var multi_values: Dict[String, List[String]]  # 决策-43: 每 key 全部 occurrence (顺序)
 
     def __init__(out self):
         self.has_error = False
@@ -26,6 +30,7 @@ struct ParsedParams:
         self.param_count = 0
         self.values = Dict[String, String]()
         self.types = Dict[String, String]()
+        self.multi_values = Dict[String, List[String]]()
 
     def __init__(out self, param_count: Int, values: Dict[String, String]):
         self.has_error = False
@@ -33,6 +38,7 @@ struct ParsedParams:
         self.param_count = param_count
         self.values = values.copy()
         self.types = Dict[String, String]()
+        self.multi_values = Dict[String, List[String]]()
 
     def __init__(out self, param_count: Int, values: Dict[String, String], types: Dict[String, String]):
         self.has_error = False
@@ -40,6 +46,7 @@ struct ParsedParams:
         self.param_count = param_count
         self.values = values.copy()
         self.types = types.copy()
+        self.multi_values = Dict[String, List[String]]()
 
     def __init__(out self, error_msg: String):
         self.has_error = True
@@ -47,6 +54,13 @@ struct ParsedParams:
         self.param_count = 0
         self.values = Dict[String, String]()
         self.types = Dict[String, String]()
+        self.multi_values = Dict[String, List[String]]()
+
+    def get_multi(self, key: String) raises -> List[String]:
+        """决策-43: key 的全部 occurrence; 无该 key -> 空 List (不插入)."""
+        if key in self.multi_values:
+            return self.multi_values[key].copy()
+        return List[String]()
 
     def type_of(self, key: String) raises -> String:
         """Value type; untyped params (query/path) are "string"."""
@@ -133,12 +147,13 @@ def url_decode(s: String) -> String:
     return decode_utf8_bytes(bs)
 
 
-def parse_query_params(query: String) -> ParsedParams:
+def parse_query_params(query: String) raises -> ParsedParams:
     """Parse query string into key-value Dict (URL-decoded)."""
     if query == "":
         return ParsedParams(0, Dict[String, String]())
 
     var params = Dict[String, String]()
+    var multi = Dict[String, List[String]]()
     var pairs = query.split("&")
     for i in range(len(pairs)):
         var pair = String(pairs[i])
@@ -152,18 +167,37 @@ def parse_query_params(query: String) -> ParsedParams:
                 eq = k
                 break
             k += next_codepoint_len(pair, k)
+        var uk: String
+        var uv: String
         if eq < 0:
             # ?flag — boolean flag, empty value
-            params[url_decode(pair)] = ""
+            uk = url_decode(pair)
+            uv = ""
         else:
-            var key = String(pair[byte=0 : eq])
-            var val = String(pair[byte=eq+1 : pair.byte_length()])
-            params[url_decode(key)] = url_decode(val)
+            uk = url_decode(String(pair[byte=0 : eq]))
+            uv = url_decode(String(pair[byte=eq+1 : pair.byte_length()]))
+        # values = 扁平 last-wins (FastAPI 标量语义); multi = 全部 occurrence
+        params[uk] = uv
+        if uk in multi:
+            multi[uk].append(uv)
+        else:
+            multi[uk] = [uv]
 
-    return ParsedParams(len(params), params)
+    var out = ParsedParams(len(params), params)
+    out.multi_values = multi^
+    return out^
 
 
-# ---------- JSON parsing ----------
+# ---------- 自测 ----------
+
+import std.os
+
+def check(cond: Bool, msg: String) raises:
+    """真检查: Mojo 1.0.0 `assert` 是 no-op (实测, 决策-38 教训);
+    用 std.os.abort() 产生非零退出."""
+    if not cond:
+        print("FAIL: " + msg)
+        std.os.abort()
 
 
 def main() raises:
@@ -195,5 +229,20 @@ def main() raises:
 
     var r5 = parse_query_params("")
     assert r5.param_count == 0, "empty query"
+
+    # 决策-43: 多值 (List 参数) + 扁平 last-wins (Starlette/FastAPI 标量语义)
+    var r6 = parse_query_params("tag=a&tag=b&tag=c")
+    check(r6.values["tag"] == "c", "multi scalar last-wins")
+    check(r6.multi_values["tag"] == ["a", "b", "c"], "multi list all occurrences")
+    check(r6.get_multi("nope") == [], "get_multi absent -> empty")
+
+    var r7 = parse_query_params("n=1&x=9&n=2")
+    check(r7.multi_values["n"] == ["1", "2"], "interleaved order")
+    check(r7.multi_values["x"] == ["9"], "single occurrence")
+    check(r7.values["x"] == "9", "single flat value")
+
+    var r8 = parse_query_params("flag&flag2=v")
+    check(r8.multi_values["flag"] == [""], "bare flag -> empty value")
+    check(r8.multi_values["flag2"] == ["v"], "flag2")
 
     print("Mojo params (query/path) test completed!")
