@@ -98,3 +98,5 @@ mod ws_session_ffi_tests;
 #[cfg(test)]
 mod state_tests;
 
+#[cfg(test)]
+mod multipart_tests;

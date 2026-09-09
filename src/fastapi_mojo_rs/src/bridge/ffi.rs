@@ -77,6 +77,7 @@ use super::multipart::{
     get_part_count as mp_get_part_count_inner,
     get_part_field_len as mp_get_part_field_len_inner,
     get_part_field_byte as mp_get_part_field_byte_inner,
+    part_save as mp_part_save_inner,
 };
 use super::io::ws_pump_now as io_ws_pump_now;
 use super::ws_session_ffi::{
@@ -631,4 +632,16 @@ pub extern "C" fn mp_part_field_len(i: c_int, field: c_int) -> c_long {
 #[no_mangle]
 pub extern "C" fn mp_part_field_byte(i: c_int, field: c_int, idx: c_long) -> c_long {
     mp_get_part_field_byte_inner(i as usize, field, idx) as c_long
+}
+
+// 决策-46 (ADR-0021): part body 写盘 (UploadFile save 等价).
+// path: NUL-terminated (Mojo CStringSlice 契约). 0 成功 / -1 失败
+// (b64 空 / 解码失败 / fs 失败). 路径穿越检查在 Mojo 层 (_file_save).
+#[no_mangle]
+pub extern "C" fn mp_part_save(i: c_int, path: *const c_char) -> c_int {
+    if path.is_null() {
+        return -1;
+    }
+    let p = unsafe { c_str_lossy(path) };
+    mp_part_save_inner(i as usize, &p) as c_int
 }

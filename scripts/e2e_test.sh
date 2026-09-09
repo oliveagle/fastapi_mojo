@@ -26,6 +26,9 @@
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
 #     (决策-45, FM-1..FM-20; OpenAPI JSON 合法性 jsoncheck 门禁)
+#   - UploadFile 对象 API: _file_types file/bytes + 422 (U2 value_error / U3 string_type /
+#     U4 last-wins / U5 全缺失) + _file_ops (head/range/sha256/save) + multipart OpenAPI
+#     (决策-46, MP8..MP23b; size = 实际字节 U1; MP1..MP7 决策-32 存量)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -634,8 +637,8 @@ EXP_RAW=$(base64 -w0 "$MP_DIR/raw.bin")
 MP4=$(curl -sS -m 5 -X POST -F 'raw=@'"$MP_DIR/raw.bin"';type=application/octet-stream' "$BASE/upload")
 if [[ "$MP4" == *'"file_raw_body_b64": "'"$EXP_RAW"'"'* ]]; then pass "MP4 binary 0..255 body preserved via base64"
 else fail "MP4 binary 0..255 body preserved via base64" "want_len=${#EXP_RAW} body: ${MP4:0:120}"; fi
-if [[ "$MP4" == *'"file_raw_size": "344"'* ]]; then pass "MP4 file_size = b64 length (344)"
-else fail "MP4 file_size = b64 length (344)" "body: ${MP4:0:120}"; fi
+if [[ "$MP4" == *'"file_raw_size": "256"'* ]]; then pass "MP4 file_size = actual raw bytes (256, U1; not b64 len 344)"
+else fail "MP4 file_size = actual raw bytes (256)" "body: ${MP4:0:120}"; fi
 
 # MP5: 大文件 (300KB, 内存阈值内) -> 200 + size 正确.
 perl -e 'srand(42); print pack("C*", map { int(rand(256)) } 1..(300*1024))' > "$MP_DIR/large.bin"
@@ -654,6 +657,123 @@ else fail "MP6 Chinese filename preserved" "body: ${MP6:0:160}"; fi
 MP7=$(curl -sS -m 5 -X POST -H 'Content-Type: multipart/form-data; boundary=none' --data-binary 'not a multipart body' "$BASE/upload")
 if [[ "$MP7" == *'"message": "multipart upload demo"'* && "$MP7" != *'"file_'* ]]; then pass "MP7 malformed multipart -> 200 no file fields (no crash)"
 else fail "MP7 malformed multipart -> 200 no file fields (no crash)" "body: ${MP7:0:160}"; fi
+
+# --- UploadFile object API (决策-46, ADR-0021) -----------------------------------
+# /upload-file: _file_types="doc:file;opt:file=;docs:file[]" + _file_aliases
+#   doc=docfile + _form_types="note:str" (required) + _file_ops="doc:sha256".
+# /upload-bytes: _file_types="raw:bytes=;small:bytes=" (all optional) +
+#   _file_ops="raw:head:4;raw:range:1:3;raw:save:/tmp/fm_upload/raw.bin".
+# U1 size=实际字节 / U2 value_error / U3 string_type / U4 last-wins / U5 全缺失 /
+# U8 文本 part 供给 form / U9 bytes 接受文本 / alias = wire key.
+echo "== UploadFile object API (决策-46, ADR-0021) =="
+UP_DIR="$TMP/up46"
+mkdir -p "$UP_DIR"
+printf 'doc-content-46' > "$UP_DIR/doc.txt"
+printf 'abcdefghij' > "$UP_DIR/b10.bin"
+printf 's1-content' > "$UP_DIR/s1.txt"
+printf 's2-content' > "$UP_DIR/s2.txt"
+
+# MP8: _file_ops sha256 == sha256sum; alias docfile -> 声明名 key file_doc_*; U1 size.
+MP8=$(curl -sS -m 5 -X POST -F 'docfile=@'"$UP_DIR/doc.txt"';type=text/plain' -F 'note=n8' -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
+SHA8=$(sha256sum "$UP_DIR/doc.txt" | awk '{print $1}')
+if [[ "$MP8" == *'"file_doc_sha256": "'"$SHA8"'"'* && "$MP8" == *'"file_doc_size": "14"'* && "$MP8" == *'"uploadfile demo"'* ]]; then pass "MP8 _file_ops sha256 == sha256sum (alias->declared key, size=raw bytes U1)"
+else fail "MP8 _file_ops sha256" "want sha=$SHA8 size=14 body: ${MP8:0:240}"; fi
+
+# MP9: _file_ops head:4 / range:1:3 -> b64 (动态计算, python-free).
+H9=$(head -c 4 "$UP_DIR/b10.bin" | base64 -w0)
+R9=$(tail -c +2 "$UP_DIR/b10.bin" | head -c 3 | base64 -w0)
+MP9=$(curl -sS -m 5 -X POST -F 'raw=@'"$UP_DIR/b10.bin"';type=application/octet-stream' "$BASE/upload-bytes")
+if [[ "$MP9" == *'"file_raw_head_b64": "'"$H9"'"'* && "$MP9" == *'"file_raw_range_b64": "'"$R9"'"'* ]]; then pass "MP9 _file_ops head:4 + range:1:3 -> b64 (abcd / bcd)"
+else fail "MP9 _file_ops head/range" "want head=$H9 range=$R9 body: ${MP9:0:240}"; fi
+
+# MP10: _file_ops save:PATH 原子写 (.tmp->rename) + saved_ok/saved_path.
+find /tmp/fm_upload -delete 2>/dev/null
+mkdir -p /tmp/fm_upload
+MP10=$(curl -sS -m 5 -X POST -F 'raw=@'"$UP_DIR/b10.bin"';type=application/octet-stream' "$BASE/upload-bytes")
+if [[ "$MP10" == *'"file_raw_saved_ok": "true"'* && "$MP10" == *'"file_raw_saved_path": "/tmp/fm_upload/raw.bin"'* ]]; then pass "MP10 _file_ops save -> saved_ok true + path"
+else fail "MP10 _file_ops save" "body: ${MP10:0:240}"; fi
+if cmp -s "$UP_DIR/b10.bin" /tmp/fm_upload/raw.bin; then pass "MP10b save roundtrip byte-identical (cmp)"
+else fail "MP10b save roundtrip" "ls: $(ls -la /tmp/fm_upload 2>&1 | head -3)"; fi
+
+# MP11: all-optional (bytes) + 非 multipart CT -> U5 空 parts -> 200 无 file_*.
+MP11=$(curl -sS -m 5 -X POST -H 'Content-Type: application/json' --data '{}' "$BASE/upload-bytes")
+if [[ "$MP11" == *'"uploadbytes demo"'* && "$MP11" != *'"file_raw"'* ]]; then pass "MP11 all-optional non-multipart CT -> 200 no file_* (U5)"
+else fail "MP11 all-optional non-multipart" "body: ${MP11:0:200}"; fi
+
+# MP12: required 缺失 (doc + docs) -> 422 ×2 missing (note 提供).
+MP12_CODE=$(curl -sS -m 5 -o "$TMP/mp12_body" -w '%{http_code}' -X POST -F 'note=n12' "$BASE/upload-file")
+MP12=$(cat "$TMP/mp12_body")
+N12=$(printf '%s' "$MP12" | grep -o '"type":"missing"' | wc -l | tr -d ' ')
+if [[ "$MP12_CODE" == "422" && "$N12" == "2" && "$MP12" == *'"loc":["body","doc"],"'* && "$MP12" == *'"loc":["body","docs"],"'* ]]; then pass "MP12 required missing (doc+docs) -> 422 ×2 missing"
+else fail "MP12 required missing" "code=$MP12_CODE n=$N12 body: ${MP12:0:240}"; fi
+
+# MP13: 文本 part -> 声明 file 字段 (alias docfile) -> U2 value_error (上游完整措辞).
+MP13_CODE=$(curl -sS -m 5 -o "$TMP/mp13_body" -w '%{http_code}' -X POST -F 'docfile=txtval' -F 'note=n13' -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
+MP13=$(cat "$TMP/mp13_body")
+if [[ "$MP13_CODE" == "422" && "$MP13" == *'"type":"value_error"'* && "$MP13" == *'Expected UploadFile, received'* && "$MP13" == *'"loc":["body","doc"],"'* && "$MP13" == *'"input":"txtval"'* ]]; then pass "MP13 text part -> file field (alias) -> 422 value_error (U2)"
+else fail "MP13 value_error" "code=$MP13_CODE body: ${MP13:0:240}"; fi
+
+# MP14: 文件 part -> 声明 form 字段 (note:str) -> U3 string_type, input =
+# 稳定子集 {filename,size,headers{content-disposition}}.
+MP14_CODE=$(curl -sS -m 5 -o "$TMP/mp14_body" -w '%{http_code}' -X POST -F 'note=@'"$UP_DIR/doc.txt" -F 'docfile=@'"$UP_DIR/doc.txt" -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
+MP14=$(cat "$TMP/mp14_body")
+if [[ "$MP14_CODE" == "422" && "$MP14" == *'"type":"string_type"'* && "$MP14" == *'"loc":["body","note"],"'* && "$MP14" == *'"filename":"doc.txt","size":14'* && "$MP14" == *'name=\"note\"; filename=\"doc.txt\"'* ]]; then pass "MP14 file part -> form field -> 422 string_type (U3, input=stable subset)"
+else fail "MP14 string_type" "code=$MP14_CODE body: ${MP14:0:280}"; fi
+
+# MP15: list 声明 (docs:file[]) -> count + list_json 顺序 (s1 先 s2) + 标量 last-wins.
+MP15=$(curl -sS -m 5 -X POST -F 'docs=@'"$UP_DIR/s1.txt" -F 'docs=@'"$UP_DIR/s2.txt" -F 'docfile=@'"$UP_DIR/doc.txt" -F 'note=n15' "$BASE/upload-file")
+LJ15=$(printf '%s' "$MP15" | awk '{i=index($0,"file_docs_list_json"); if(i>0) print substr($0,i)}')
+if [[ "$MP15" == *'"file_docs_count": "2"'* && "$MP15" == *'"file_docs_filename": "s2.txt"'* && "$LJ15" == *s1.txt*s2.txt* ]]; then pass "MP15 list file[] -> count=2 + list_json order (s1,s2) + scalar last-wins (U4)"
+else fail "MP15 list" "body: ${MP15:0:280}"; fi
+
+# MP16: bytes 字段接受文本 part (U9): raw=abcdef -> size 6 + head/range/body b64.
+MP16=$(curl -sS -m 5 -X POST -F 'raw=abcdef' "$BASE/upload-bytes")
+if [[ "$MP16" == *'"file_raw_size": "6"'* && "$MP16" == *'"file_raw_body_b64": "YWJjZGVm"'* && "$MP16" == *'"file_raw_head_b64": "YWJjZA=="'* && "$MP16" == *'"file_raw_range_b64": "YmNk"'* ]]; then pass "MP16 bytes field accepts text part (U9) -> size 6 + head/range b64"
+else fail "MP16 bytes-with-text" "body: ${MP16:0:240}"; fi
+
+# MP17: bytes 字段接受文件 part (U9) -> size 10 + body b64 逐字节.
+EXP17=$(base64 -w0 "$UP_DIR/b10.bin")
+MP17=$(curl -sS -m 5 -X POST -F 'raw=@'"$UP_DIR/b10.bin"';type=application/octet-stream' "$BASE/upload-bytes")
+if [[ "$MP17" == *'"file_raw_size": "10"'* && "$MP17" == *'"file_raw_body_b64": "'"$EXP17"'"'* && "$MP17" == *'"file_raw_saved_ok": "true"'* ]]; then pass "MP17 bytes field accepts file part (U9) -> size 10 + body b64 + save"
+else fail "MP17 bytes-with-file" "body: ${MP17:0:240}"; fi
+
+# MP18: 无 CT (非 multipart, U5) -> /upload-file 三必填 (doc/docs/note) 全缺失 422 ×3.
+MP18_CODE=$(curl -sS -m 5 -o "$TMP/mp18_body" -w '%{http_code}' -X POST "$BASE/upload-file")
+MP18=$(cat "$TMP/mp18_body")
+N18=$(printf '%s' "$MP18" | grep -o '"type":"missing"' | wc -l | tr -d ' ')
+if [[ "$MP18_CODE" == "422" && "$N18" == "3" && "$MP18" == *'"loc":["body","note"],"'* ]]; then pass "MP18 no Content-Type -> 422 ×3 missing (U5)"
+else fail "MP18 no CT" "code=$MP18_CODE n=$N18 body: ${MP18:0:240}"; fi
+
+# MP19: urlencoded CT (非 multipart, U5) + note 提供 -> 仅 doc/docs 缺失 422 ×2.
+MP19_CODE=$(curl -sS -m 5 -o "$TMP/mp19_body" -w '%{http_code}' -X POST -H 'Content-Type: application/x-www-form-urlencoded' --data 'note=n19' "$BASE/upload-file")
+MP19=$(cat "$TMP/mp19_body")
+N19F=$(printf '%s' "$MP19" | grep -o '"type":"missing"' | wc -l | tr -d ' ')
+if [[ "$MP19_CODE" == "422" && "$N19F" == "2" && "$MP19" != *'"loc":["body","note"],"'* ]]; then pass "MP19 urlencoded CT -> 422 ×2 missing (doc+docs), note present (U5)"
+else fail "MP19 urlencoded CT" "code=$MP19_CODE n=$N19F body: ${MP19:0:240}"; fi
+
+# MP20: /openapi.json multipart body schema (U7) 关键子串.
+MP20=$(curl -sS -m 5 "$BASE/openapi.json")
+if [[ "$MP20" == *'"contentMediaType":"application/octet-stream"'* && "$MP20" == *'"Body_upload_file_post"'* && "$MP20" == *'"required":["docfile","docs","note"]'* && "$MP20" == *'"multipart/form-data"'* ]]; then pass "MP20 openapi.json: contentMediaType + Body_upload_file_post + required + multipart/form-data"
+else fail "MP20 openapi substrings" "body: ${MP20:0:200}"; fi
+
+# MP21: /openapi.json 完整文档 JSON 合法 (fmtool jsoncheck, python-free).
+curl -sS -m 5 "$BASE/openapi.json" > "$TMP/oapi46.json"
+if "$FMTOOL" jsoncheck "$TMP/oapi46.json" >/dev/null; then pass "MP21 openapi.json full doc valid JSON (fmtool jsoncheck)"
+else fail "MP21 openapi jsoncheck" "$(head -c 200 "$TMP/oapi46.json")"; fi
+
+# MP22: 文本 part 供给声明 form 字段 (U8): note=hello.
+MP22=$(curl -sS -m 5 -X POST -F 'note=hello' -F 'docfile=@'"$UP_DIR/doc.txt" -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
+if [[ "$MP22" == *'"form_note": "hello"'* && "$MP22" == *'"file_doc_filename": "doc.txt"'* ]]; then pass "MP22 multipart text part feeds declared form field (U8) -> form_note=hello"
+else fail "MP22 text->form" "body: ${MP22:0:240}"; fi
+
+# MP23: alias = wire key: docfile -> 200 (声明名 key); doc (声明名做 wire) -> 无效力 -> 422 doc missing.
+MP23A=$(curl -sS -m 5 -X POST -F 'docfile=@'"$UP_DIR/doc.txt" -F 'note=n23' -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
+if [[ "$MP23A" == *'"file_doc_filename": "doc.txt"'* && "$MP23A" == *'"uploadfile demo"'* ]]; then pass "MP23a alias wire key (docfile) -> 200 + declared-name key"
+else fail "MP23a alias 200" "body: ${MP23A:0:240}"; fi
+MP23B_CODE=$(curl -sS -m 5 -o "$TMP/mp23b_body" -w '%{http_code}' -X POST -F 'doc=@'"$UP_DIR/doc.txt" -F 'note=n23' -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
+MP23B=$(cat "$TMP/mp23b_body")
+if [[ "$MP23B_CODE" == "422" && "$MP23B" == *'"type":"missing"'* && "$MP23B" == *'"loc":["body","doc"],"'* ]]; then pass "MP23b declared-name as wire (doc) has no binding -> 422 missing"
+else fail "MP23b declared-name no binding" "code=$MP23B_CODE body: ${MP23B:0:240}"; fi
 
 # --- Security (决策-34, Goal-0003 P0): HTTPBasic / HTTPBearer / APIKey --------------
 # /basic: HTTPBasic (_auth=basic, _auth_users="admin:secret;user:pass123", realm=MyApp).

@@ -114,6 +114,12 @@ def _fe(loc: String, msg: String, type_name: String, input_json: String) -> Stri
     return "{\"loc\":" + loc + ",\"msg\":\"" + json_escape(msg) + "\",\"type\":\"" + type_name + "\",\"input\":" + input_json + "}"
 
 
+def missing_err_json(k: String) raises -> String:
+    """Field k canonical missing 422 error string (exact-match dedup,
+    decision-46 dispatch: file part makes field present, drop missing)."""
+    return _fe("[\"body\",\"" + json_escape(k) + "\"]", "Field required", "missing", "null")
+
+
 def _elem_err_msg(type_name: String) -> Tuple[String, String]:
     """(msg, type): 元素/标量 parse 失败消息 (上游完整措辞, 与 params 侧同源)."""
     if type_name == "int":

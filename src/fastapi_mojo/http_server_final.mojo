@@ -16,7 +16,11 @@ from params_query_extra import apply_query_extras, get_param_aliases
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import _parse_cookies, parse_form_multi, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
-from std.ffi import external_call, CStringSlice  # (multipart via Rust bridge FFI)
+from file_params import (validate_file_collect,
+                         text_multi_map_filtered, apply_file_extras,
+                         file_declared_names, get_file_types, get_file_aliases,
+                         MpParts)
+from file_ops_ffi import snapshot_mp_parts, apply_file_ops
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE
@@ -25,7 +29,8 @@ from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
 from security import AuthResult, check_auth, _get_header
-from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii)
+from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii, missing_err_json)
+from file_form_check import validate_file_vs_form, file_part_fields
 from security_jwt import handle_oauth2_token, check_oauth2  # 决策-44: /token + _auth=oauth2
 from lifespan import run_lifespan_startup, run_lifespan_shutdown
 
@@ -77,57 +82,10 @@ def _ct_is_form(ct: String) -> Bool:
     忽略尾部 "; charset=..." — 仅 urlencoded 为真."""
     return lower_ascii(ct).startswith("application/x-www-form-urlencoded")
 
-def _mp_read_field(part_i: Int, field: Int) -> String:
-    """从 Rust bridge multipart 状态逐字节读取 part 字段 (field: 0=name
-    1=filename 2=content_type 3=body 4=body_b64). 纯整数 FFI 返回."""
-    var fld_len = external_call["mp_part_field_len", Int](Int64(part_i), Int64(field))
-    if fld_len <= 0:
-        return ""
-    var bytes = List[Int]()
-    for b in range(fld_len):
-        var bval = external_call["mp_part_field_byte", Int](Int64(part_i), Int64(field), Int64(b))
-        if bval < 0:
-            break
-        bytes.append(bval)
-    # decode_utf8_bytes 正确处理 UTF-8 多字节序列 (append_byte 对非 ASCII
-    # 转 U+FFFD, 会破坏中文文本字段 — 实测 form_desc 乱码).
-    return decode_utf8_bytes(bytes)
-
-
-def inject_multipart_fields(mut params: Dict[String, String]) raises:
-    """Multipart/form-data 注入 (G3-v0.7, Rust bridge 解析).
-
-    从 active conn body + Content-Type 头由 Rust bridge (mp_parse_current)
-    解析为 parts; 每个 part:
-      - 文本字段 (无 filename) -> params["form_<name>"] = <body string>
-      - 文件字段 (有 filename) -> params["file_<name>_filename"/"_size"/"_content_type"/"_body_b64"]
-    Handler 声明 `_multipart` = "true" 即启用 (与 _form_fields 同模式).
-
-    为何 Rust: multipart body 含任意二进制 (PNG/PDF 等), Mojo String 是 UTF-8
-    容器, span_to_str 会把 invalid 字节变 U+FFFD; [byte=...] 切片在非 codepoint
-    边界 assert. Rust bridge `&[u8]` 字节切片天然无此约束, 完全保 binary 完整.
-    对齐 ADR-0010 字节逻辑归 Rust 原则.
-    """
-    var n_parts = external_call["mp_parse_current", Int]()
-    if n_parts <= 0:
-        return
-    for i in range(n_parts):
-        # 逐字节读取 part 字段 (field: 0=name 1=filename 2=ct 3=body 4=b64).
-        # 纯整数 FFI 返回, 规避 Mojo CStringSlice 对 Rust CSlice 的 ABI 解析歧义.
-        var name = _mp_read_field(i, 0)
-        if name == "":
-            continue
-        var filename = _mp_read_field(i, 1)
-        if filename == "":
-            # 文本字段: raw body (UTF-8 安全; 文件字段不经过此分支)
-            params["form_" + name] = _mp_read_field(i, 3)
-        else:
-            params["file_" + name + "_filename"] = filename
-            params["file_" + name + "_content_type"] = _mp_read_field(i, 2)
-            var b64 = _mp_read_field(i, 4)
-            params["file_" + name + "_body_b64"] = b64
-            params["file_" + name + "_size"] = String(b64.byte_length())
-
+def _ct_is_multipart(ct: String) -> Bool:
+    """Multipart Content-Type 判定 (decision-46): 小写化后
+    前缀匹配 'multipart/form-data' (尾部 '; boundary=...' 忽略)."""
+    return lower_ascii(ct).startswith("multipart/form-data")
 
 def _run_background(handler: Handler, req_id: String, method: String,
                        path: String, query: String) raises:
@@ -560,6 +518,30 @@ def register_routes(mut router: Router) raises:
     up_h.set_data("message", "multipart upload demo")
     router.add_route("/upload", "POST", up_h)
 
+    # 决策-46 (ADR-0021): UploadFile 对象 API demo — _file_types 声明文件
+    # 字段 (file/bytes, = 可选, [] list) + 422 校验 (U2/U3/U4/U5);
+    # _file_aliases (wire key = alias); 文本 part 供给 _form_types (U8);
+    # _file_ops 对象操作; size = 实际 raw 字节 (U1).
+    var uf_h = Handler(KIND_ECHO(), "upload_file")
+    uf_h.set_data("_multipart", "true")
+    uf_h.set_data("_file_types", "doc:file;opt:file=;docs:file[]")
+    uf_h.set_data("_file_aliases", "doc=docfile")
+    uf_h.set_data("_form_types", "note:str")
+    uf_h.set_data("_file_ops", "doc:sha256")
+    uf_h.set_data("_param_descs", "doc=The document to upload;note=A note;opt=Optional attachment")
+    uf_h.set_data("message", "uploadfile demo")
+    router.add_route("/upload-file", "POST", uf_h)
+
+    # 决策-46: bytes 字段 demo (文本/文件均接受, U9) + ops
+    # head:4 / range:1:3 / save -> /tmp/fm_upload/raw.bin.
+    # All-optional fields (OpenAPI: no required key; U5: non-multipart CT -> 200).
+    var ub_h = Handler(KIND_ECHO(), "upload_bytes")
+    ub_h.set_data("_multipart", "true")
+    ub_h.set_data("_file_types", "raw:bytes=;small:bytes=")
+    ub_h.set_data("_file_ops", "raw:head:4;raw:range:1:3;raw:save:/tmp/fm_upload/raw.bin")
+    ub_h.set_data("message", "uploadbytes demo")
+    router.add_route("/upload-bytes", "POST", ub_h)
+
 
     # F11 (v0.5.1): BackgroundTasks demo. _background = 响应后同步执行的命令列表 (\n 分隔).
     # demo: GET /bg-write -> 响应后把 req_id 写到 /tmp/bg_<req_id>.txt (shell date 同步)
@@ -956,12 +938,36 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         # 决策-45 (ADR-0020): Form 多值/422 parity —
                         # CT 为 form 时 parse_form_multi 收全部 occurrence;
                         # 非 form CT 传空 multi (上游同款: 缺失->默认/422).
+                        # 决策-46 (ADR-0021): CT 为 multipart -> Rust bridge 解析 parts
+                        # (单一快照点); 文本 part 供给 form 字段 (U8,
+                        # 已声明 file 名不进 map) + file 校验 (U2/U4/U5)
+                        # + file->form 422 (U3 string_type).
+                        var ct_hdr = _get_header("Content-Type")
+                        var is_mp_ct = _ct_is_multipart(ct_hdr)
+                        var mp_parts = MpParts()
                         var fmulti = Dict[String, List[String]]()
-                        if _ct_is_form(_get_header("Content-Type")):
+                        if is_mp_ct:
+                            mp_parts = snapshot_mp_parts()
+                            fmulti = text_multi_map_filtered(mp_parts,
+                                                             file_declared_names(route_result.handler))
+                        elif _ct_is_form(ct_hdr):
                             fmulti = parse_form_multi(body_str)
                         var ftypes = get_form_types(route_result.handler)
                         var fal = get_form_aliases(route_result.handler)
                         var ferr = validate_form_collect(ftypes, fal, fmulti)
+                        var ft_file = get_file_types(route_result.handler)
+                        var fal_file = get_file_aliases(route_result.handler)
+                        var ffe = validate_file_collect(ft_file, fal_file, mp_parts)
+                        var ffve: List[String]
+                        var flagged: List[String]
+                        if is_mp_ct:
+                            flagged = file_part_fields(mp_parts, ftypes, fal,
+                                                       ft_file, fal_file)
+                            ffve = validate_file_vs_form(mp_parts, ftypes, fal,
+                                                         ft_file, fal_file)
+                        else:
+                            flagged = List[String]()
+                            ffve = List[String]()
                         var all_errs = List[String]()
                         if not perr[0]:
                             for pe in perr[1]:
@@ -970,8 +976,21 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                             for se in sres[1]:
                                 all_errs.append(se)
                         if not ferr[0]:
+                            # U3: a file part makes a form field PRESENT - drop
+                            # its duplicate missing error (upstream: presence wins).
                             for fe in ferr[1]:
-                                all_errs.append(fe)
+                                var drop = False
+                                for fk in flagged:
+                                    if fe == missing_err_json(fk):
+                                        drop = True
+                                        break
+                                if not drop:
+                                    all_errs.append(fe)
+                        if not ffe[0]:
+                            for fe2 in ffe[1]:
+                                all_errs.append(fe2)
+                        for fv in ffve:
+                            all_errs.append(fv)
                         if len(all_errs) > 0:
                             status_line = "422 Unprocessable Entity"
                             resp_data = Dict[String, String]()
@@ -1013,8 +1032,17 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                 if "_form_fields" in route_result.handler.data:
                                     ff_csv = route_result.handler.data["_form_fields"]
                                 apply_form_extras(req_params, ftypes, fal, fmulti, ff_csv)
-                                if "_multipart" in route_result.handler.data and route_result.handler.data["_multipart"] == "true":
-                                    inject_multipart_fields(req_params)
+                                # 决策-46: multipart 成功路径注入 —
+                                # file part -> file_ key (size = 实际字节 U1;
+                                # alias 字段按声明名 key); text part -> form_
+                                # (与 apply_form_extras 一致); _file_ops (head/range/sha256/save)
+                                # 走 FFI 快照重读 (conn 仍活跃).
+                                if is_mp_ct:
+                                    apply_file_extras(req_params, route_result.handler, mp_parts.copy())
+                                    if "_file_ops" in route_result.handler.data and route_result.handler.data["_file_ops"] != "":
+                                        apply_file_ops(req_params, mp_parts,
+                                                       route_result.handler.data["_file_ops"],
+                                                       fal_file)
                                 # F-DI (Depends, 决策-33): 解析 handler.data["_depends"] 声明的
                                 # 依赖, 递归派发后注入 req_params (前缀 depname_outputkey).
                                 if "_depends" in route_result.handler.data:

@@ -31,6 +31,9 @@
 //!   mp_part_count() -> i64     // 上次解析的 part 数 (-1 = 未解析)
 //!   mp_part_field_len(i, field) -> i64  // part 字段长度
 //!   mp_part_field_byte(i, field, idx) -> i64  // 逐字节读取 (越界返回 -1)
+//!   mp_part_save(i, path) -> i64  // 决策-46: part body 写盘 (0/-1)
+//! field 索引: 0=name 1=filename 2=content_type 3=body(raw) 4=body_b64
+//!   5=body_sha256_hex (决策-46, 按需计算, 64 chars)
 
 use std::os::raw::c_int;
 use std::sync::{Mutex, MutexGuard};
@@ -67,7 +70,7 @@ pub fn lock_mp() -> MutexGuard<'static, MpState> {
 // ===== helpers =====
 
 /// CT 里提取 boundary value (case-insensitive). 不含 "--" 前缀.
-fn extract_boundary(ct: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn extract_boundary(ct: &[u8]) -> Option<Vec<u8>> {
     // 找 "boundary" (lowercase)
     let needle = b"boundary";
     let n = ct.len();
@@ -124,7 +127,7 @@ fn extract_boundary(ct: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// 在 haystack[start..] 找 needle, 返回绝对偏移 (start..) 或 None.
-fn find_from(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_from(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || start + needle.len() > haystack.len() {
         return None;
     }
@@ -146,7 +149,7 @@ fn find_from(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
 }
 
 /// 提取 attr="value" 或 attr=value (value 到 ; 或结尾). case-insensitive.
-fn extract_attr(headers_val: &[u8], attr: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn extract_attr(headers_val: &[u8], attr: &[u8]) -> Option<Vec<u8>> {
     let n = headers_val.len();
     let al = attr.len();
     let mut i = 0;
@@ -194,7 +197,7 @@ fn extract_attr(headers_val: &[u8], attr: &[u8]) -> Option<Vec<u8>> {
 
 /// 提取 part header 块 (到空行 \r\n\r\n 或 \n\n).
 /// 返回 (headers, body_start_offset). headers 是 trimmed slice (不含尾 CRLF).
-fn split_part_headers(part: &[u8]) -> Option<(&[u8], usize)> {
+pub(crate) fn split_part_headers(part: &[u8]) -> Option<(&[u8], usize)> {
     let n = part.len();
     let mut i = 0;
     while i < n {
@@ -229,7 +232,7 @@ fn split_part_headers(part: &[u8]) -> Option<(&[u8], usize)> {
 
 /// 解析一个 header 行 (e.g. "Content-Disposition: form-data; name=\"x\"").
 /// 返回 (key_lower, value).
-fn parse_header_line(line: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn parse_header_line(line: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let n = line.len();
     let mut colon = 0;
     while colon < n && line[colon] != b':' {
@@ -252,7 +255,7 @@ fn parse_header_line(line: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 }
 
 /// base64 encode (RFC 4648). 不依赖第三方.
-fn b64_encode(input: &[u8]) -> Vec<u8> {
+pub(crate) fn b64_encode(input: &[u8]) -> Vec<u8> {
     const TBL: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(input.len().div_ceil(3) * 4);
@@ -521,6 +524,7 @@ pub fn get_part_field_len(i: usize, field: c_int) -> i64 {
         2 => &p.content_type,
         3 => &p.body,
         4 => &p.body_b64,
+        5 => return sha256_hex_of(&p.body).len() as i64,
         _ => &[],
     };
     v.len() as i64
@@ -538,6 +542,11 @@ pub fn get_part_field_byte(i: usize, field: c_int, idx: i64) -> c_int {
         2 => &p.content_type,
         3 => &p.body,
         4 => &p.body_b64,
+        5 => return sha256_hex_of(&p.body)
+            .get(idx.max(0) as usize)
+            .copied()
+            .map(|b| b as c_int)
+            .unwrap_or(-1),
         _ => &[],
     };
     if idx < 0 || idx as usize >= v.len() {
@@ -546,152 +555,100 @@ pub fn get_part_field_byte(i: usize, field: c_int, idx: i64) -> c_int {
     v[idx as usize] as c_int
 }
 
+
+// ===== 决策-46 (ADR-0021): UploadFile 对象 API 扩展 =====
+// field 5 = body_sha256_hex (64 ASCII chars) — 复用既有 mp_part_field_len/byte
+// 逐字节 FFI (零新导出); 对 raw body 字节做 FIPS 180-4 SHA-256 (上游
+// sha256(file) 语义: decoded 字节, 非 b64 文本).
+
+/// 标准 base64 解码 (b64_encode 的逆; '=' 尾部 padding 感知).
+/// 非法字符返回 None (调用方按失败处理).
+pub(crate) fn b64_decode(s: &[u8]) -> Option<Vec<u8>> {
+    const VAL: [i8; 128] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63,
+        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1,
+        -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
+    ];
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &c in s {
+        if c == b'=' {
+            break;
+        }
+        if c >= 128 {
+            return None;
+        }
+        let v = VAL[c as usize];
+        if v < 0 {
+            return None;
+        }
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// [u8] -> 小写 hex (sha256 结果 64 chars).
+pub(crate) fn to_hex(bytes: &[u8]) -> Vec<u8> {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(H[(b >> 4) as usize]);
+        out.push(H[(b & 0x0F) as usize]);
+    }
+    out
+}
+
+/// part i 的 body sha256 hex 视图 (field 5 用; 按需计算, 不缓存).
+fn sha256_hex_of(body: &[u8]) -> Vec<u8> {
+    to_hex(&super::crypto::sha256(body))
+}
+
+/// part i の body sha256 hex（field 5 用；按需计算，不缓存）。
+/// 独立锁入口（测试用）；getter 内已持锁，走 sha256_hex_of 避免
+/// std Mutex 非重入死锁（决策-46 实测 catch）。
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn part_sha256_hex(i: usize) -> Option<Vec<u8>> {
+    let g = lock_mp();
+    let p = g.parts.get(i)?;
+    Some(sha256_hex_of(&p.body))
+}
 
-    #[test]
-    fn extract_boundary_basic() {
-        let ct = b"multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW";
-        assert_eq!(
-            extract_boundary(ct).unwrap(),
-            b"----WebKitFormBoundary7MA4YWxkTrZu0gW".to_vec()
-        );
-    }
-
-    #[test]
-    fn extract_boundary_quoted() {
-        let ct = b"multipart/form-data; boundary=\"abc def\"";
-        assert_eq!(extract_boundary(ct).unwrap(), b"abc def".to_vec());
-    }
-
-    #[test]
-    fn extract_boundary_case_insensitive() {
-        let ct = b"multipart/form-data; BOUNDARY=xxx";
-        assert_eq!(extract_boundary(ct).unwrap(), b"xxx".to_vec());
-    }
-
-    #[test]
-    fn parse_simple_text_field() {
-        let body = b"--xxx\r\nContent-Disposition: form-data; name=\"hello\"\r\n\r\nworld\r\n--xxx--\r\n";
-        let ct = b"multipart/form-data; boundary=xxx";
-        let n = parse_multipart(body, ct);
-        assert_eq!(n, 1);
-        let p = &lock_mp().parts[0];
-        assert_eq!(p.name, b"hello");
-        assert!(p.filename.is_none());
-        assert_eq!(p.body, b"world");
-        assert_eq!(String::from_utf8_lossy(&p.body_b64), "d29ybGQ=");
-    }
-
-    #[test]
-    fn parse_file_upload() {
-        let body = b"--xxx\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile content here\r\n--xxx--\r\n";
-        let ct = b"multipart/form-data; boundary=xxx";
-        let n = parse_multipart(body, ct);
-        assert_eq!(n, 1);
-        let p = &lock_mp().parts[0];
-        assert_eq!(p.name, b"upload");
-        assert_eq!(p.filename.as_ref().unwrap(), b"a.txt");
-        assert_eq!(p.content_type, b"text/plain");
-        assert_eq!(p.body, b"file content here");
-    }
-
-    #[test]
-    fn parse_file_trailing_newline_preserved() {
-        // Regression: trailing \n (and \r\n) of file content must NOT be trimmed.
-        // 分隔符已排除, raw_body 须为精确 part 内容 (决策-32 multipart roundtrip).
-        let body = b"--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nHello e2e multipart!\n\r\n--x--\r\n";
-        let ct = b"multipart/form-data; boundary=x";
-        let n = parse_multipart(body, ct);
-        assert_eq!(n, 1);
-        let p = &lock_mp().parts[0];
-        assert_eq!(p.body, b"Hello e2e multipart!\n");
-        assert_eq!(String::from_utf8_lossy(&p.body_b64), "SGVsbG8gZTJlIG11bHRpcGFydCEK");
-    }
-
-    #[test]
-    fn parse_file_trailing_crlf_preserved() {
-        // file 内容合法以 \r\n 结尾: 须原样保留 (分隔符已排除).
-        let body = b"--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\ndata\r\n\r\n--x--\r\n";
-        let ct = b"multipart/form-data; boundary=x";
-        let n = parse_multipart(body, ct);
-        assert_eq!(n, 1);
-        let p = &lock_mp().parts[0];
-        assert_eq!(p.body, b"data\r\n");
-    }
-
-    #[test]
-    fn parse_multiple_fields_and_files() {
-        let body = b"--xxx\r\n\
-            Content-Disposition: form-data; name=\"title\"\r\n\r\n\
-            My Document\r\n\
-            --xxx\r\n\
-            Content-Disposition: form-data; name=\"file1\"; filename=\"a.bin\"\r\n\
-            Content-Type: application/octet-stream\r\n\r\n\
-            \x00\x01\x02\x03\xff\r\n\
-            --xxx\r\n\
-            Content-Disposition: form-data; name=\"file2\"; filename=\"b.txt\"\r\n\r\n\
-            text content\r\n\
-            --xxx--\r\n";
-        let ct = b"multipart/form-data; boundary=xxx";
-        let n = parse_multipart(body, ct);
-        assert_eq!(n, 3);
-        let parts = &lock_mp().parts;
-        assert_eq!(parts[0].name, b"title");
-        assert!(parts[0].filename.is_none());
-        assert_eq!(parts[0].body, b"My Document");
-        assert_eq!(parts[1].name, b"file1");
-        assert_eq!(parts[1].filename.as_ref().unwrap(), b"a.bin");
-        assert_eq!(parts[1].content_type, b"application/octet-stream");
-        assert_eq!(parts[1].body, b"\x00\x01\x02\x03\xff");
-        assert_eq!(parts[2].name, b"file2");
-        assert_eq!(parts[2].filename.as_ref().unwrap(), b"b.txt");
-        assert_eq!(parts[2].content_type, b"application/octet-stream"); // default
-        assert_eq!(parts[2].body, b"text content");
-    }
-
-    #[test]
-    fn parse_binary_body_preserved() {
-        // body 含 NUL + 0xFF 等 invalid UTF-8, 必须 bytes-level 正确
-        let body = b"--x\r\nContent-Disposition: form-data; name=\"data\"; filename=\"raw.bin\"\r\n\r\n\x00\xff\xfe\xfd\r\n--x--\r\n";
-        let ct = b"multipart/form-data; boundary=x";
-        let n = parse_multipart(body, ct);
-        assert_eq!(n, 1);
-        let p = &lock_mp().parts[0];
-        assert_eq!(p.body, b"\x00\xff\xfe\xfd");
-        // b64 反解应回到原 bytes
-        // (测试仅断言 body 字段; b64 已预编码并验证)
-        assert!(!p.body_b64.is_empty());
-    }
-
-    #[test]
-    fn parse_missing_boundary_returns_neg1() {
-        let body = b"hello world";
-        let ct = b"application/octet-stream";
-        assert_eq!(parse_multipart(body, ct), -1);
-    }
-
-    #[test]
-    fn parse_empty_body_returns_neg1() {
-        let body = b"";
-        let ct = b"multipart/form-data; boundary=xxx";
-        assert_eq!(parse_multipart(body, ct), -1);
-    }
-
-    #[test]
-    fn extract_attr_quoted_and_unquoted() {
-        assert_eq!(
-            extract_attr(b"form-data; name=\"x\"", b"name").unwrap(),
-            b"x".to_vec()
-        );
-        assert_eq!(
-            extract_attr(b"form-data; name=y", b"name").unwrap(),
-            b"y".to_vec()
-        );
-        assert_eq!(
-            extract_attr(b"form-data; filename=\"a b.txt\"", b"filename").unwrap(),
-            b"a b.txt".to_vec()
-        );
+/// 决策-46: part i 的 body 写盘 (UploadFile save 等价).
+/// path 由调用方 (Mojo 层) 预先做路径穿越检查; bridge 只负责
+/// b64 解码 + 原子写 (先写 .tmp 再 rename). 返回 0 成功 / -1 失败
+/// (b64 空 / 解码失败 / 写失败).
+pub fn part_save(i: usize, path: &str) -> i64 {
+    let body_b64 = {
+        let g = lock_mp();
+        match g.parts.get(i) {
+            Some(p) => p.body_b64.clone(),
+            None => return -1,
+        }
+    };
+    let bytes = match b64_decode(&body_b64) {
+        Some(b) => b,
+        None => return -1,
+    };
+    let tmp = format!("{}.fm_upload.tmp", path);
+    match std::fs::write(&tmp, &bytes) {
+        Ok(()) => match std::fs::rename(&tmp, path) {
+            Ok(()) => 0,
+            Err(_) => {
+                let _ = std::fs::remove_file(&tmp);
+                -1
+            }
+        },
+        Err(_) => -1,
     }
 }

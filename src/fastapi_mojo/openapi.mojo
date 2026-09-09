@@ -28,8 +28,11 @@ from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, 
                          _split_top, _trim, _parse_range)
 from openapi_schemas import (_type_to_openapi, _json_str_array, _json_list_array, _openapi_object_schema)
 from form_params import (form_has_declaration, form_openapi_schema,
-                         form_request_body_required, lower_ascii)
+                         form_request_body_required, lower_ascii,
+                         form_field_names_ordered, get_form_types,
+                         get_form_aliases, _cap_name, _openapi_form_field_schema)
 from string_builder import StringBuilder
+from openapi_multipart import (multipart_openapi_schema, multipart_request_body_required, multipart_route)
 from json import json_escape
 
 def _path_to_openapi(path: String) -> String:
@@ -243,16 +246,21 @@ def _generate_operation(route: Route) raises -> String:
     if "_body_schema" in route.handler.data and route.handler.data["_body_schema"] != "":
         sb.append("\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" + json_escape(route.handler.name) + "\"}}}},")
 
-    # 决策-45: form requestBody (from _form_types/_form_fields) -> $ref
-    # Body_<name>_<method> (与 _body_schema 互斥; _multipart 路由跳过 — ADR-0020)
-    if "_multipart" not in route.handler.data and form_has_declaration(route.handler):
-        var has_json_body = "_body_schema" in route.handler.data and route.handler.data["_body_schema"] != ""
-        if not has_json_body:
-            var rb_req = ""
-            if form_request_body_required(route.handler):
-                rb_req = "\"required\":true,"
-            var rb_name = "Body_" + route.handler.name + "_" + lower_ascii(route.method)
-            sb.append("\"requestBody\":{" + rb_req + "\"content\":{\"application/x-www-form-urlencoded\":{\"schema\":{\"$ref\":\"#/components/schemas/" + json_escape(rb_name) + "\"}}}},")
+    # 决策-45/46: requestBody — multipart 路由 (文件字段, 或
+    # _multipart + form 声明) -> multipart/form-data $ref; 否则 urlencoded
+    # form 声明 (与 _body_schema 互斥; Body_<name>_<method> 命名偏差 ADR-0020 §3.5-4)
+    var has_json_body = "_body_schema" in route.handler.data and route.handler.data["_body_schema"] != ""
+    var rb_name = "Body_" + route.handler.name + "_" + lower_ascii(route.method)
+    if multipart_route(route.handler) and not has_json_body:
+        var rb_req = ""
+        if multipart_request_body_required(route.handler):
+            rb_req = "\"required\":true,"
+        sb.append("\"requestBody\":{" + rb_req + "\"content\":{\"multipart/form-data\":{\"schema\":{\"$ref\":\"#/components/schemas/" + json_escape(rb_name) + "\"}}}}," )
+    elif not multipart_route(route.handler) and form_has_declaration(route.handler) and not has_json_body:
+        var rb_req2 = ""
+        if form_request_body_required(route.handler):
+            rb_req2 = "\"required\":true,"
+        sb.append("\"requestBody\":{" + rb_req2 + "\"content\":{\"application/x-www-form-urlencoded\":{\"schema\":{\"$ref\":\"#/components/schemas/" + json_escape(rb_name) + "\"}}}}," )
 
     # responses: default 200 + _error_map 派生错误码
     var responses = StringBuilder()
@@ -342,24 +350,29 @@ def generate_openapi(router: Router, title: String, version: String) raises -> S
                 s_names.append(nm)
                 var sch = _openapi_object_schema(router.routes[i].handler.data["_body_schema"])
                 schemas.append("\"" + json_escape(nm) + "\":" + sch)
-    # 决策-45: form schemas (Body_<name>_<method>; 与 _body_schema/_multipart 互斥)
+    # 决策-45/46: body schemas — multipart (文件字段 /
+    # _multipart+form) 与 urlencoded form (与 _body_schema 互斥)
     var f_names = List[String]()
     for i in range(router.route_count()):
         var m = router.routes[i].method
-        if ("_multipart" not in router.routes[i].handler.data
-                and form_has_declaration(router.routes[i].handler)):
-            var has_json = ("_body_schema" in router.routes[i].handler.data
-                            and router.routes[i].handler.data["_body_schema"] != "")
-            if has_json:
-                continue
-            var fname = "Body_" + router.routes[i].handler.name + "_" + lower_ascii(m)
-            var dup2 = False
-            for x in f_names:
-                if x == fname:
-                    dup2 = True
-                    break
-            if not dup2:
-                f_names.append(fname)
+        var has_json = ("_body_schema" in router.routes[i].handler.data
+                        and router.routes[i].handler.data["_body_schema"] != "")
+        if has_json:
+            continue
+        var is_mp = multipart_route(router.routes[i].handler)
+        if not is_mp and not form_has_declaration(router.routes[i].handler):
+            continue
+        var fname = "Body_" + router.routes[i].handler.name + "_" + lower_ascii(m)
+        var dup2 = False
+        for x in f_names:
+            if x == fname:
+                dup2 = True
+                break
+        if not dup2:
+            f_names.append(fname)
+            if is_mp:
+                schemas.append("\"" + json_escape(fname) + "\":" + multipart_openapi_schema(router.routes[i].handler, m))
+            else:
                 schemas.append("\"" + json_escape(fname) + "\":" + form_openapi_schema(router.routes[i].handler, m))
     # 决策-44: components = schemas (决策-38) + securitySchemes (oauth2 路由存在时)
     var comps = List[String]()
