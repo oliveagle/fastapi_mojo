@@ -15,6 +15,7 @@
 //   ws5      <port>                  WS 精化 markers W1..W8 (ADR-0026, 需 CLOSE_WAIT=2000 env)
 //   slowloris <port> <tmp>           half-send + probe (background)
 //   wsbench  <port> <path> <n> <c>   WS load, output hey-csv to stdout
+//   testclient http|ws|run   declarative TestClient equivalent (ADR-0031)
 //   bench    [options]               unified benchmark runner
 //   bench    --history [--limit N]   show history
 
@@ -24,6 +25,7 @@ mod e2e;
 mod json;
 mod net;
 mod ws;
+mod testclient;
 
 use std::process::ExitCode;
 
@@ -45,6 +47,12 @@ USAGE:
   fmtool ws5      <port>
   fmtool slowloris <port> <tmp>
   fmtool wsbench  <port> <path> <n> <c>
+  fmtool testclient http <METHOD> <URL> [--json J] [--data D] [--header N:V]* [--param k=v]*
+                          [--cookie k=v]* [--cookie-jar F] [--no-follow] [--max-hops N]
+                          [--timeout-ms N] [--json-out]
+  fmtool testclient ws <URL> [--subprotocol a,b] [--action SPEC]* [--timeout-ms N]
+  fmtool testclient run [--port N] [--timeout-ms N] [--readiness PATH] [--max-wait N]
+                        <server-cmd...> -- <actions.jsonl>
   fmtool bench    [--scenarios F] [--json F] [--report F] [--port N]
                   [--hey BIN] [--server-dir D] [--server-cmd C]
                   [--no-server] [--no-warmup] [--db F]
@@ -75,6 +83,7 @@ fn main() -> ExitCode {
         "ws5" => run_e2e_port("ws5", &rest, e2e::ws5),
         "slowloris" => run_slowloris(&rest),
         "wsbench" => run_wsbench(&rest),
+        "testclient" => testclient::dispatch(&rest),
         "bench" => run_bench_dispatch(&rest),
         "-h" | "--help" | "help" => {
             print!("{}", usage());

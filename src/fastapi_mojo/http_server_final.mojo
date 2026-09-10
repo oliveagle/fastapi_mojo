@@ -694,6 +694,14 @@ def register_routes(mut router: Router) raises:
     cookie_h.set_data("message", "cookie demo")
     router.add_route("/cookies", "GET", cookie_h)
 
+    # 决策-56 (ADR-0031): TestClient cookie-jar 捕获+回放 demo 路由.
+    # _response_headers "Set-Cookie: tc=jar1" -> jar 存储; 二次调用回显 jar1.
+    var tc_jar_h = Handler(KIND_ECHO(), "tc_jar")
+    tc_jar_h.set_data("_reads_cookies", "tc")
+    tc_jar_h.set_data("message", "tc jar demo")
+    tc_jar_h.set_data("_response_headers", "Set-Cookie: tc=jar1")
+    router.add_route("/tc/jar", "GET", tc_jar_h)
+
     # F10b (v0.5.1): Form 参数 demo. _form_fields = 声明读取的字段名;
     # dispatch 检测 Content-Type=application/x-www-form-urlencoded 时
     # 解析 body 并注入 params["form_<name>"]. 注意: 必须 GET 回显才能看见 form_*.

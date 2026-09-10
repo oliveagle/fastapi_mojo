@@ -38,6 +38,7 @@
 #     RFC5987) / etag = md5(f64(mtime)-size) (fmtool f64repr × md5sum 交叉验证) / chunked
 #     streaming (no-CT quirk / 自定义 status / extra 头 / raw-socket 帧级证明)
 #     (决策-48, FR-1..FR-32; ADR-0023)
+#   - TestClient 声明式等价: fmtool testclient http/ws/run (决策-56, TC-1..TC-9; ADR-0031)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -2298,6 +2299,89 @@ if ! curl -s -D - -o /dev/null "$BASE/health" | tr -d '\r' | grep -qi '^X-Mw:'; 
     pass "MW-10 no env: main server zero change (no X-Mw)"
 else
     fail "MW-10 no env: main server zero change (no X-Mw)" "unexpected X-Mw header"
+fi
+
+# --- TC: 声明式 TestClient 等价 (决策-56, ADR-0031) ----------------------------------------
+# fmtool testclient http/ws/run — Starlette TestClient 的声明式替代 (dev 工具, 不进 runtime).
+# http: GET/POST + JSON/form + header/param/cookie/jar + 重定向; ws: RFC6455 握手 + 动作脚本
+#       (JSONL 事件); run: 服务器生命周期 (spawn → readiness → actions → SIGTERM → exit 0).
+TC_WS="ws://127.0.0.1:$PORT"
+
+# TC-1: http GET /health --json-out → 200 + healthy
+TC1_OUT=$("$FMTOOL" testclient http GET "$BASE/health" --json-out 2>&1); TC1_RC=$?
+if [[ $TC1_RC -eq 0 ]] && echo "$TC1_OUT" | grep -q '"status_code":200' && echo "$TC1_OUT" | grep -q 'healthy'; then
+    pass "TC-1 testclient http /health json-out (200 + healthy)"
+else
+    fail "TC-1 testclient http /health json-out" "rc=$TC1_RC out=$TC1_OUT"
+fi
+
+# TC-2: http POST /items --json → body 回显解析后的 JSON 字段 (KIND_ECHO)
+TC2_OUT=$("$FMTOOL" testclient http POST "$BASE/items" --json '{"name":"tc","n":5}' --json-out 2>&1); TC2_RC=$?
+if [[ $TC2_RC -eq 0 ]] && echo "$TC2_OUT" | grep -q '"status_code":200' && echo "$TC2_OUT" | grep -q 'item_name'; then
+    pass "TC-2 testclient http POST /items --json (echo item_name)"
+else
+    fail "TC-2 testclient http POST /items --json" "rc=$TC2_RC out=$TC2_OUT"
+fi
+
+# TC-3: http GET /cookies --cookie session_id=abc → body 回显 abc
+TC3_OUT=$("$FMTOOL" testclient http GET "$BASE/cookies" --cookie session_id=abc --json-out 2>&1); TC3_RC=$?
+if [[ $TC3_RC -eq 0 ]] && echo "$TC3_OUT" | grep -q 'cookie_session_id' && echo "$TC3_OUT" | grep -q 'abc'; then
+    pass "TC-3 testclient http --cookie (session_id echo)"
+else
+    fail "TC-3 testclient http --cookie" "rc=$TC3_RC out=$TC3_OUT"
+fi
+
+# TC-4: --cookie-jar 捕获 + 回放 (Set-Cookie: tc=jar1 → jar 文件 → 二次回显)
+"$FMTOOL" testclient http GET "$BASE/tc/jar" --cookie-jar "$TMP/tc_jar.txt" >/dev/null 2>&1
+TC4A_RC=$?
+TC4_OUT=$("$FMTOOL" testclient http GET "$BASE/tc/jar" --cookie-jar "$TMP/tc_jar.txt" --json-out 2>&1); TC4_RC=$?
+if [[ $TC4A_RC -eq 0 ]] && grep -q 'tc=jar1' "$TMP/tc_jar.txt" 2>/dev/null && [[ $TC4_RC -eq 0 ]] && echo "$TC4_OUT" | grep -q 'jar1'; then
+    pass "TC-4 testclient http --cookie-jar (Set-Cookie 捕获 + 回放)"
+else
+    fail "TC-4 testclient http --cookie-jar" "rc=$TC4A_RC/$TC4_RC jar=$(cat "$TMP/tc_jar.txt" 2>/dev/null) out=$TC4_OUT"
+fi
+
+# TC-5: ws /ws echo 往返 — send-text + receive-text + 自动 close 1000, exit 0
+TC5_OUT=$("$FMTOOL" testclient ws "$TC_WS/ws" --action send-text:hello --action receive-text:hello 2>&1); TC5_RC=$?
+if [[ $TC5_RC -eq 0 ]] && echo "$TC5_OUT" | grep -q '"event":"connect"' && echo "$TC5_OUT" | grep -q '"value":"hello"' && echo "$TC5_OUT" | grep -q '"event":"done"'; then
+    pass "TC-5 testclient ws /ws echo (send/receive/done)"
+else
+    fail "TC-5 testclient ws /ws echo" "rc=$TC5_RC out=$TC5_OUT"
+fi
+
+# TC-6: ws /ws/close/4001 — expect-close:4001:custom reason (主 server WS_CLOSE_WAIT=2000)
+TC6_OUT=$("$FMTOOL" testclient ws "$TC_WS/ws/close/4001" --action send-text:go --action "expect-close:4001:custom reason" 2>&1); TC6_RC=$?
+if [[ $TC6_RC -eq 0 ]] && echo "$TC6_OUT" | grep -q '"code":4001' && echo "$TC6_OUT" | grep -q 'custom reason'; then
+    pass "TC-6 testclient ws expect-close 4001 (reason 匹配)"
+else
+    fail "TC-6 testclient ws expect-close 4001" "rc=$TC6_RC out=$TC6_OUT"
+fi
+
+# TC-7: run — 副 server (PORT+117) spawn → http action → SIGTERM → server_exit=0
+TC_PORT=$((PORT + 117))
+TC_ACTIONS="$TMP/tc_actions.jsonl"
+printf '{"op":"http","method":"GET","url":"http://127.0.0.1:%s/health","expect_status":200,"expect_body":"healthy"}\n' "$TC_PORT" > "$TC_ACTIONS"
+TC7_OUT=$("$FMTOOL" testclient run --port "$TC_PORT" -- "$BIN" -- "$TC_ACTIONS" 2>&1); TC7_RC=$?
+if [[ $TC7_RC -eq 0 ]] && echo "$TC7_OUT" | grep -q 'run: 1 passed, 0 failed' && echo "$TC7_OUT" | grep -q 'server_exit=0'; then
+    pass "TC-7 testclient run (server 生命周期 + action + 干净退出)"
+else
+    fail "TC-7 testclient run" "rc=$TC7_RC out=$TC7_OUT"
+fi
+
+# TC-8: ws 打到非 WS 路由 → denial 事件, exit 4 (WS router 404)
+TC8_OUT=$("$FMTOOL" testclient ws "$TC_WS/health" 2>&1); TC8_RC=$?
+if [[ $TC8_RC -eq 4 ]] && echo "$TC8_OUT" | grep -q '"event":"denial"'; then
+    pass "TC-8 testclient ws denial (非 WS 路由, exit 4)"
+else
+    fail "TC-8 testclient ws denial" "rc=$TC8_RC out=$TC8_OUT"
+fi
+
+# TC-9: http 404 — status 透传, exit 0 (收到任意响应即成功)
+TC9_OUT=$("$FMTOOL" testclient http GET "$BASE/nope" --json-out 2>&1); TC9_RC=$?
+if [[ $TC9_RC -eq 0 ]] && echo "$TC9_OUT" | grep -q '"status_code":404'; then
+    pass "TC-9 testclient http 404 (status 透传, exit 0)"
+else
+    fail "TC-9 testclient http 404" "rc=$TC9_RC out=$TC9_OUT"
 fi
 
 # --- summary ---------------------------------------------------------------------
