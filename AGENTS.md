@@ -953,7 +953,90 @@
   binary **3.5M**（3,631,104 B，≤4.2M；vs 决策-47 +75 KB）/
   `find src -name '*.c'` = 0 保持
 
-*最后更新：2026-09-10（**决策-48 FileResponse/StreamingResponse**（ADR-0023, Goal-0003 P1 矩阵 #10）：
+- **已决策-49**：**任意异常类型 handler — 字符串 tag 约定 + 声明式处理表
+  + 路由级 try/except guard（ADR-0024，Goal-0003 P2 矩阵 #13 — 对标矩阵
+  #13 ✅ 全量）**：
+  1. **Mojo 1.0.0 异常面探测（P13-M1..M8，/tmp/mojo_exc）**：异常类型
+     **仅一个 = `Error`**（ValueError/IndexError/KeyError/RuntimeError/
+     `Exception` 全部 unknown declaration，无子类/类型别名/内省 — 无 MRO
+     可走）；`try/except` 语法；**`String(e)` 返回被捕获 Error 的
+     message**（未捕获顶层 = "Unhandled exception" + exit 1）；
+     `std.os.getenv` 原生可读（全局表无需 FFI）；try 块内声明变量 except
+     不可见；含 String 字段 struct 须显式 `__init__`。
+  2. **字符串 tag 约定**：`raise Error("TAG: message")`（第一个 `:`
+     切分；无 `:` = 未分类）— 异常"类型"的承载（上游类层级的可观测行为
+     等价）。
+  3. **声明式处理表**（同 TAG **后者胜**，上游 P13-2）：
+     - **全局**：env `FASTAPI_MOJO_EXCEPTION_HANDLERS =
+       "TAG:STATUS:BODY[:json];…"`（`;` 分隔条目；STATUS = 3 位数字；
+       第 4 段 `:json` = application/json 发送，否则 text/plain;
+       charset=utf-8）；
+     - **路由级**：`handler.data["_exc_handlers"]` = 同格式（**整体替换**
+       全局表 — 上游无 per-route 面, 超集, ADR-0024 §3.5-7）；
+     - **声明式 raise 钩子**：`handler.data["_exception_raise"] =
+       "TAG: msg"`（评估位置 = Depends 之后、run_handler 之前 = 上游
+       endpoint body 抛异常位置, P13-9 分层定案）。
+  4. **`guarded_run_handler`（新模块 `exception_handlers.mojo` 254 行
+     <500）**：路由级 try/except（= 上游 route
+     `wrap_app_handling_exceptions`）；捕获任意 `Error` →
+     `resolve_exception_response`（`String(e)` 取 message）：查找顺序
+     **精确 tag → `Exception` catch-all（= 上游 ServerErrorMiddleware
+     500/Exception 键, P13-9 双层 map 单表化）→ 默认 500
+     "Internal Server Error"（text/plain; charset=utf-8, P13-10 逐字
+     parity）**；body 模板 `{exc}`/`{tag}` 插值（json 条目先
+     `_json_escape`，复用 middleware.mojo）；**P13-8 日志 quirk 模拟**
+     （具体命中 → 单行 `[exc] <tag> handled`；catch-all/未处理 → 完整
+     message 行）。
+  5. **接线 + FFI**：dispatch 单点接线（`http_server_final`
+     1444 → 1509：异常响应分支 = SSE 同型 cfd 透传 + `continue`，
+     绕过 response_model 原样发送）+ **新 FFI
+     `send_text_response_status`**（send.rs + ffi.rs；复用
+     `send_response` 核心 — 零新依赖/零 libm/NUL 契约不变；
+     `send_text_response`（200 硬编码, F6 metrics）保留）+
+     `standard_status_line` +418（Teapot）+ **7 demo 路由**
+     （`/exc/ve` / `/exc/unicorn`（上游文档 UnicornException 例名）/
+     `/exc/unhandled` / `/exc/raise-plain` / `/exc/ve2` /
+     `/exc/override` / `/exc/dup`）。
+  6. **`exception_handlers_selftest.mojo`**（JIT 可达纯逻辑自检,
+     file_params_selftest 同模式）：28 checks（split/entry 解析/
+     后者胜/插值/resolve 全分支/json 转义/env 表）。
+  7. **文档化偏差（ADR-0024 §3.5 ×8）**：① 无类 → 字符串 tag（**无 MRO
+     走查** — 层级不可表达）；② handler = 声明式条目（status + body
+     模板）非 `(conn, exc) -> Response` callable；③ **无 int status 键
+     面**（本实现 HTTPException 是声明式 struct, F2 路径, 从不以 Mojo
+     异常抛出）；④ **`response_started` RuntimeError 路径结构性不可达**
+     （dispatch 单发模型, 无"响应已发出后" Mojo 代码段 — P13-6/11 状态
+     永不进入）；⑤ 双层 map（ServerErrorMiddleware/ExceptionMiddleware）
+     → 单表（`Exception` tag = 500/Exception 键；可达结果集相同）；
+     ⑥ 日志 quirk 线形模拟（Mojo 无 traceback 机制）；⑦ per-route
+     `_exc_handlers` = **超集**（上游拒绝该 kwarg, P13-3）；⑧ 中间件抛出
+     异常 = gap（当前中间件链无 raise 面；未捕获 → worker 终止, P13-M4）。
+  验收：e2e **366/366**（351 + 15 XH：默认 500 ×4 + CT / 正常路由 +
+  _error_map 回归 ×2 / 精确 tag 418 / 自定义 tag 418 / catch-all 503 /
+  json 422 / 路由级覆盖 429 / 同 tag 后者胜 404 / 无 tag 消息 / 有表正常
+  路由）/ cargo **409/0/4**（407 + 2）/ clippy `-D warnings` 0 警告
+  （双 crate）/ bench 6 场景 0 errors（get_root_10k_100c **37,216
+  req/s**, 历史区间内）/ **ldd 仅 libc** / env -i 干净启动（health 200
+  + /exc/ve 500）/ binary **3.5M**（3,663,872 B，≤4.2M；vs 决策-48
+  +32 KB）/ `find src -name '*.c'` = 0 保持
+
+*最后更新：2026-09-10（**决策-49 任意异常类型 handler**（ADR-0024, Goal-0003 P2 矩阵 #13 ✅）：
+Mojo 1.0.0 异常面探测（仅 Error 类型/String(e)=message/std.os.getenv 原生/try-scope 规则）→
+**字符串 tag 约定** `raise Error("TAG: msg")` + **声明式处理表**（env FASTAPI_MOJO_EXCEPTION_HANDLERS
+"TAG:STATUS:BODY[:json];…" 全局, 同 tag 后者胜 / `_exc_handlers` 路由级整体替换超集）+
+**声明式 raise 钩子** `_exception_raise` + **路由级 try/except guard**（= 上游 wrap_app_handling_exceptions；
+精确 tag → Exception catch-all → 默认 500 "Internal Server Error" text/plain, P13-10 逐字 parity；
+body {exc}/{tag} 插值, json 条目 _json_escape；P13-8 日志 quirk 模拟）+
+新模块 exception_handlers.mojo(254<500) + guarded_run_handler dispatch 单点(1444→1509) +
+**新 FFI send_text_response_status**（复用 send_response, 零新依赖/零 libm）+ 7 demo 路由 +
+standard_status_line +418 + exception_handlers_selftest.mojo(JIT 28 checks);
+文档化偏差 ×8（ADR-0024 §3.5: ① 无类→tag（无 MRO）② handler=声明式条目 ③ 无 int status 键
+④ response_started 结构性不可达（单发）⑤ 双层 map→单表 ⑥ 日志 quirk 线形 ⑦ per-route=超集
+⑧ 中间件抛出 gap）;
+验收: e2e **366/366**（351+15 XH）/ cargo **409/0/4**（407+2）/ clippy 0 警告(双 crate) /
+bench 0 errors(37.2k req/s, 区间内) / ldd 仅 libc / env -i 干净启动(health+/exc/ve 500) /
+**3.5M**(3,663,872 B, ≤4.2M, +32 KB vs 决策-48) / C 清零保持;
+2026-09-10（**决策-48 FileResponse/StreamingResponse**（ADR-0023, Goal-0003 P1 矩阵 #10）：
 Rust bridge 文件/流式协议层（file_protocol 230 纯函数: Range 7 步顺序解析（>100 段 → 200 quirk）/RFC1123/RFC5987/CD/charset/etag/multipart CL 闭式/26-hex boundary + file_serve 416: 144B glibc stat/64KB 块直发/单点 FFI×2: send_file_response + send_streaming_response）+
 Mojo 声明式 KIND_FILE=300（handler 495 ≤500）+ dispatch FILE 分支（1332→1444）+ 8 demo 路由 + filedemo.bin(30B) build 自动嵌入 +
 **MD5 K 表 const 嵌入 = libm 零化**（运行时 f64::sin 链入 libm.so.6 破 CI ldd 门禁 → const 256B .rodata, glibc 正确舍入 sin 逐位导出, md5_k_table_matches_sin 守护 ≡ 派生 → ldd 回归仅 libc）;

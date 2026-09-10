@@ -14,7 +14,7 @@
 ## 0. 现状定位（2026-09-05 盘点）
 
 **已达成（v0.5.1 + 决策-31~48）**：
-- 单 binary 3.5M，ldd 仅 libc，env -i 干净启动，e2e **351 项**，cargo 407 单测
+- 单 binary 3.5M（3,663,872 B），ldd 仅 libc，env -i 干净启动，e2e **366 项**，cargo 409 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -50,7 +50,7 @@
 | 10 | 响应类型 | JSON/HTML/PlainText/File/Streaming/ORJSON/UJSON/Response | ✅ 全量（JSON/HTML/SSE 既有 + **File/Streaming 决策-48, ADR-0023**：FileResponse = Range 7 步顺序解析（>100 段 → 200 quirk）/ 206 单段·suffix·open·clamp / multipart（26-hex boundary + CL 闭式 + 重叠合并）/ 400×4 精确消息 / 416（`bytes */size` 空体）/ 500（无文件头）/ If-Range = ETag\|LM / HEAD 仅头 / CD（attachment\|inline RFC5987）/ etag = md5(f64(mtime)-size) / 64KB 块直发；StreamingResponse = TE chunked（no-CT quirk / 自定义 status / extra 头 / 空体键存在语义）；ORJSON/UJSON ≡ json.mojo（既有 F3 决策）；Rust bridge file_protocol 230 + file_serve 416 + FFI ×2，零新 crate，MD5 K 表 const = libm 零化） | 文档化偏差 ×7（ADR-0023 §3.5：① ORJSON≡json.mojo（既有）② HEAD 仅头 vs 上游 405 quirk（APIRoute methods={GET}，更优）③ GZip 不介入 file/streaming（上游压缩，P2）④ 整秒 mtime etag `"N"` vs 上游 `"N.0"`（opaque；非整秒逐字节相同）⑤ i64 溢出段 → 400 vs 上游 416（>9.2EB 不可达）⑥ `_file_path` 静态目录相对 + extra 不得覆写 CT/ETag（收窄）⑦ INM·IMS 忽略 = parity（列此完备）） | — |
 | 11 | response_model | 只返回声明字段 + exclude/include/none | ✅ include+exclude+exclude_none（决策-35/41, ADR-0016：FastAPI 语义对齐，无模型 no-op） | — | — |
 | 12 | 状态码 | status_code 声明 | ✅ | — | — |
-| 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | 🟡 error_map | 任意异常类型 handler | §P2 |
+| 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | ✅ 全量（HTTPException F2 / 422 F1 既有 + **任意异常类型 handler 决策-49, ADR-0024**：字符串 tag 约定 `raise Error("TAG: msg")`（Mojo 1.0.0 仅 Error 类型, P13-M2/M5）+ 声明式表（env `FASTAPI_MOJO_EXCEPTION_HANDLERS` "TAG:STATUS:BODY[:json];…" 全局 / `_exc_handlers` 路由级整体替换超集 / 同 tag 后者胜 P13-2）+ 声明式 raise 钩子 `_exception_raise`（endpoint body 位置）+ 路由级 try/except guard（= 上游 wrap_app_handling_exceptions；查找 精确 tag → `Exception` catch-all（= ServerErrorMiddleware 500/Exception 键, P13-9）→ 默认 500 "Internal Server Error" text/plain（P13-10 逐字 parity）；body 模板 {exc}/{tag} 插值（json 条目 `_json_escape`）；P13-8 日志 quirk 模拟） | 文档化偏差 ×8（ADR-0024 §3.5：① 无类→字符串 tag（无 MRO）② handler=声明式条目非 callable ③ 无 int status 键（HTTPException 非 raised 异常）④ response_started 路径结构性不可达（单发）⑤ 双层 map→单表 ⑥ 日志 quirk 线形模拟 ⑦ per-route=超集 ⑧ 中间件抛出 gap） | — |
 | 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 + GZip ✅（决策-40 env 声明式） | 用户自定义（Mojo 无闭包：声明式 env / 固定链为等价形态，扩充 P2） | §P2 |
 | 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | ✅ 声明式 env 等价（决策-42, ADR-0017：ORIGINS/METHODS/HEADERS/CREDENTIALS/MAX_AGE + 普通响应条件附带 + 预检 204/400 动态） | 预检 400 体为本实现 JSON 简化 + 裸 OPTIONS 204 超集（均文档化, e2e 守护） | — |
 | 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ | tags/prefix/custom | §P2 |
@@ -88,7 +88,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 - 中间件自定义（GZip ✅ 决策-40；自定义逻辑 = 声明式 env 扩充）
 - CORS 完整配置 ✅（决策-42, ADR-0017）
 - OAuth2/JWT（password grant + JWT HS256）✅（决策-44, ADR-0019）
-- 任意异常类型 handler
+- 任意异常类型 handler ✅（决策-49, ADR-0024）
 - UploadFile 对象 API ✅（决策-46, ADR-0021）
 - File/Streaming 通用响应 ✅（决策-48, ADR-0023）
 - WebSocket 精化
@@ -111,10 +111,36 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler、WS 精化、OpenAPI tags | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化、OpenAPI tags | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-48 FileResponse/StreamingResponse**（ADR-0023, P1 矩阵 #10 ✅）：
+*最后更新：2026-09-10（**决策-49 任意异常类型 handler**（ADR-0024, P2 矩阵 #13 ✅）：
+Mojo 1.0.0 异常面探测（P13-M1..M8：**异常类型仅 Error**（无类/无 MRO/无内省）/ `String(e)` = message /
+`std.os.getenv` 原生可读 / try 块内变量 except 不可见 / 含 String 字段 struct 须显式 `__init__`）
+→ **字符串 tag 约定** `raise Error("TAG: msg")` + 声明式表 + 路由级 try/except guard（= 上游 route
+wrap_app_handling_exceptions）：**全局表** env `FASTAPI_MOJO_EXCEPTION_HANDLERS = "TAG:STATUS:BODY[:json];…"`
+（同 tag 后者胜, P13-2；`Exception` 条目 = catch-all = 上游 ServerErrorMiddleware 500/Exception 键,
+P13-9 双层 map 单表化）/ **路由级** `_exc_handlers`（整体替换全局, 超集 §3.5-7）/ **声明式 raise
+钩子** `_exception_raise`（Depends 后、handler 前 = endpoint body 抛异常位置）；查找顺序 = 精确 tag →
+`Exception` → **默认 500 "Internal Server Error"（text/plain; charset=utf-8, P13-10 逐字 parity）**；
+body 模板 `{exc}`/`{tag}` 插值（json 条目先 `_json_escape`）；P13-8 日志 quirk 模拟（具体命中 → 单行 /
+catch-all·未处理 → 完整 message 行）
++ **新模块 `exception_handlers.mojo`（254 行 <500）** + dispatch `guarded_run_handler` 单点接线
+（http_server_final 1444 → 1509，异常响应分支 = SSE 同型 cfd 透传 + continue）+ **新 FFI
+`send_text_response_status`**（send.rs + ffi.rs；复用 `send_response` 核心 — 零新依赖/零 libm/
+NUL 契约不变）+ **7 demo 路由**（/exc/ve · /exc/unicorn（上游文档 UnicornException 例名）·
+/exc/unhandled · /exc/raise-plain · /exc/ve2 · /exc/override · /exc/dup）+
+`standard_status_line` +418（Teapot, 自定义异常 demo 常用码）
++ **`exception_handlers_selftest.mojo`**（JIT 可达纯逻辑自检 28 checks：split/entry 解析/后者胜/
+插值/resolve 全分支/json 转义/env 表 — file_params_selftest 同模式, 不触 run_handler FFI 闭包）
+e2e **366/366**（351 + 15 XH：默认 500 ×4 + CT 精确 / 正常路由 + _error_map 回归 ×2 / 精确 tag 418 /
+自定义 tag 418 / catch-all 503 / json 422（CT application/json）/ 路由级覆盖 429 / 同 tag 后者胜 404 /
+无 tag 消息落 catch-all / 有表正常路由 ×7）/ cargo **409/0/4**（407 + 2：send_text_response_status
+×2）/ clippy 0 警告（双 crate）/ bench 6 场景 0 errors（get_root_10k_100c **37,216 req/s**,
+32.9k–43.9k 区间内, 无回归）/ **ldd 仅 libc** / env -i 干净启动（health 200 + /exc/ve 500）/
+**3.5M**（3,663,872 B，≤4.2M，+32 KB vs 决策-48）/ `find src -name '*.c'` = 0 保持；
+下一轮：P2 剩余（Request.state / WS 精化 / OpenAPI tags / Header alias / 约束扩充 / TestClient）；
+2026-09-10（**决策-48 FileResponse/StreamingResponse**（ADR-0023, P1 矩阵 #10 ✅）：
 Rust bridge 协议层 **file_protocol**（230 行纯函数：Range **7 步顺序解析** — 无 `=` → 400 / 单位≠bytes → 400 /
 **>100 段 → `[]` → 200 quirk**（starlette max_ranges=100）/ 逐段 skip（空/`-`/无 `-`/非数字）+ suffix·open·
 **clamp**（end≥size）/ 0 有效段 → 400 / **start 越界 → 416（先于 start≥end → 400）** / 多段排序 + 重叠合并；
