@@ -14,7 +14,7 @@
 ## 0. 现状定位（2026-09-05 盘点）
 
 **已达成（v0.5.1 + 决策-31~54）**：
-- 单 binary **4.0M（4,077,712 B）**，ldd 仅 libc，env -i 干净启动，e2e **438 项**，cargo **453** 单测
+- 单 binary **4.0M（4,081,808 B）**，ldd 仅 libc，env -i 干净启动，e2e **447 项**，cargo **453**（bridge）+ **30**（fmtool）单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -35,6 +35,7 @@
   **FileResponse/StreamingResponse (Range/206/multipart/etag/CD/500 + chunked streaming, Rust bridge 协议层 file_protocol+file_serve, 决策-48)**/
   **参数约束面 (path/query/header gt/ge/lt/le/mo/len/pat + typed header 校验 + 422 ctx + 自研 regex 引擎, 声明式纯 Mojo + FFI +1, 决策-54, ADR-0029)**
   **用户自定义中间件 (FASTAPI_MOJO_MIDDLEWARE 声明式动词表: 请求面 MAP/REQHDR/BLOCK + 响应面 HDR/STATUS/BODY/LOG + 短路, 纯 Mojo 计划 + Rust bridge FFI +2, 决策-55, ADR-0030)**
+  **TestClient 声明式等价 (fmtool testclient http/ws/run: 真实网络声明式测试客户端 + JSONL 事件流 + run 服务器生命周期断言; dev 工具, FFI diff 0, 决策-56, ADR-0031)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -64,7 +65,7 @@
 | 22 | Request 对象 | state/client/url.full_url/query_params | ✅ 全量（**Request.state 决策-50, ADR-0025**：scope 承载 = dispatch 每请求 `Dict[String,String]`（middleware 先写 → endpoint 后读, 每请求隔离 P22-6）；写面 `_state_set = "key:value;…"`（首个 `:` 切分, 值 `{param}` 插值 — 缺失键保留字面量, 注册期校验 `check_state_specs`）+ 读面 `_reads_state` CSV → `state_<name>`（缺失 → "" = F10 约定）+ 3 demo（`/state` · `/state-dyn/{who}` · `/state-missing` 双空 = 跨请求隔离证明）；client/url = request_id/path+query/ServerInfo 既有面） | 文档化偏差 ×7（ADR-0025 §3.5：① 缺失读 → "" 非 500 ② 写 = 路由声明非代码动态写 ③ 值域 String ④ 无属性反射/集合面（in/len/iter/del）⑤ 惰性 property → 每请求显式构造（parity）⑥ 下划线前缀 parity（1.6.0 允许）⑦ 环境项: 本机 dev 透明代理劫持新 bind 首连接 → 测试探针 warm-up + body 校验（CI 不受影响）） | — |
 | 23 | WebSocket 进阶 | close(code)/exception_handler/send_text/bytes/json | ✅ 全量（**WebSocket 精化 决策-51, ADR-0026**：声明式指令（`run_ws_message` 单点 dispatch 签名不变, 每消息评估）— `_ws_close=CODE:REASON`（回复后 close + close-wait, P23-1）/ `_ws_raise=msg`（**无回复无 close 帧**立即 EOF = 客户端 1006, log `[ws-exc]`, P23-3）/ `_ws_exc_close=SPEC`（WebSocketException 等价: 无回复 close 帧 + close-wait, P23-4） / `_ws_no_reply` / `_ws_binary`（NUL 保留零拷贝回显 / BINARY 回复, P23-5）/ `_ws_json=<模板>`（compact JSON 原样 TEXT 帧, echo 路径优先, P23-6）；优先级 `_ws_raise` > `_ws_exc_close` > `_ws_close`；**close-wait = bridge 新 phase 5**（close 帧已发后: 数据/ping/pong 全丢弃, 任何 close 帧→静默 close, EOF/协议错误→静默 close; 超时 = `check_deadlines` 新 `WsCloseWaitTimeout`, env `FASTAPI_MOJO_WS_CLOSE_WAIT` 默认 10000 = uvicorn 10.0s parity, 0 = 立即关, AtomicI32 只读一次; 无 keepalive ping 无 idle/408）；close 帧 wsproto 发送侧规范化（1004/1006→1000 / 1005 无 payload / reason 123B codepoint 截断）+ Mojo 侧合法码集 {1000-1003,1007-1015}∪[3000,4999]（1004/1005/1006 拒收, 比 wsproto 发送侧静默改写更严）；FFI diff = +5（ws_send_close_reason / ws_write_binary / ws_write_current_binary / ws_set_closing / get_ws_close_wait_ms; 既有 ws_send_close 保留）；新模块 `ws_directives.mojo`（解析/校验纯函数 + selftest）+ 6 demo 路由（/ws/close · /ws/close/4001 · /ws-exc/boom · /ws-exc/close · /ws/bin · /ws/json, P23 六场景全覆盖）） | 文档化偏差 ×7（ADR-0026 §3.5：① _ws_json = 声明模板非运行期 dumps ② close-wait 分辨率 1s tick + 可配置超集 ③ 声明式每消息 vs endpoint 生命周期 ④ 会话持续（endpoint 返回不断连）既有偏差显式记录 ⑤ 回复值域 = UTF-8 文本 （任意非 UTF-8 不可表达, NUL 保留）⑥ close-wait 协议错误静默 close（不发提示帧）⑦ 异常 = 字符串 tag 非类（决策-49 同款）） | — |
 | 24 | 压缩 | GZipMiddleware | ✅ env 声明式（决策-40, ADR-0015：FASTAPI_MOJO_GZIP* + send_response 单点 + flate2 纯 Rust） | — | — |
-| 25 | TestClient | 测试客户端 | ❌(dev 工具) | — | 低优先 |
+| 25 | TestClient | 测试客户端 | ✅ 声明式等价（**决策-56, ADR-0031**：fmtool `testclient http`（真实网络 GET/POST + JSON/form + header/param/cookie/jar + 重定向 303/301-302 POST→GET / 307/308 保持 + 退出码 0-6）/ `ws`（host-aware RFC6455 握手 + Sec-WebSocket-Accept 校验 + action 脚本 → JSONL 事件 connect/denial/receive/close/done/error + 退出码 0/4/5/6）/ `run`（spawn server → readiness → JSONL actions → SIGTERM → server_exit=0 断言 = lifespan CM 等价）；**dev 工具不进 runtime binary，FFI diff = 0**；e2e TC-1..9 + fmtool 30 单测） | 文档化偏差 ×6（ADR-0031 §3.9：① 真实 TCP 对真实 binary 非 in-process ASGI（更贴近部署物）② 无 in-process 异常传播（500 面 = raise=False 路径）③ cookie jar = 文件非 RFC domain/expiry 模型 ④ declarative action script 非闭包/portal（Mojo 无闭包同款）⑤ Host = 真实 host:port 非 `testserver`（UA 仍 = `testclient`）⑥ lifespan = spawn/kill 真实 server 非 in-process CM） | — |
 
 ## 2. 优先级与计划
 
@@ -116,7 +117,33 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52）、Header alias/转换 ✅（决策-53）、参数约束面 ✅（决策-54）、用户自定义中间件 ✅（决策-55） | P2 | 📋 |
 
 ---
-*最后更新：2026-09-11（**决策-55 用户自定义中间件声明式落地**（ADR-0030, P2 矩阵 #14 ✅ / 中间件全量）：
+*最后更新：2026-09-11（**决策-56 TestClient 声明式等价**（ADR-0031, Goal-0003 矩阵 #25 ✅ = **25/25 全量完成**）：
+fastapi 0.141.1 / starlette 1.6.0 活体探测 P-TCL-1..16（handshake/accept/UA/事件形态/close 语义/denial/lifespan）
+→ **fmtool testclient 三子命令**（**dev 工具不进 runtime binary，FFI diff = 0**）：
+`http`（真实网络 GET/POST + `--json`/`--data` + header/param/cookie + `--cookie-jar` 文件 + 重定向循环
+（303→GET / 301-302 POST→GET / 307-308 保持, `redirect_method` 纯函数）+ `--json-out` JSONL 事件 +
+退出码 0-6）/ `ws`（**host-aware** RFC6455 握手（ws.rs 原 helper 不动, e2e 逐字节不变）+
+Sec-WebSocket-Accept 硬校验 + action 脚本（send-text/json/bytes · receive*/close/expect-close）
+→ JSONL 事件（connect/denial/receive/close/done/error）+ 控制帧透明（ping→auto-pong / pong 忽略,
+starlette parity）+ 退出码 0 done / 4 denial / 5 早断连·mismatch / 6 timeout）/
+`run`（spawn server → readiness 轮询（/health 含 healthy）→ JSONL actions 逐行 PASS/FAIL →
+SIGTERM（coreutils `kill`, fmtool 零 crate 依赖无 libc）→ `server_exit=0` 断言 = lifespan CM 等价）
+→ **实施期修复**（ADR-0031 §7.6）：run 按**最后一个** `--` 切 actions（选项后装饰性 `--` 两写法皆收）/
+`--port N` = 两个 argv（单 argv 实测被服务器忽略 → 默认 8000）/ read_response 去 dead timeout 参数
+→ **/tc/jar demo 路由**（KIND_ECHO + `_reads_cookies tc` + `_response_headers Set-Cookie: tc=jar1`
+= cookie jar 捕获+回放面, hub 文件小增量 <KB）
+→ e2e **438→447/447 全绿**（TC-1 json-out 200+healthy / TC-2 POST /items --json 回显解析字段
+item_name / TC-3 --cookie 回显 / TC-4 --cookie-jar 捕获+回放 / TC-5 ws echo 往返+done /
+TC-6 expect-close 4001:custom reason（WS_CLOSE_WAIT=2000）/ TC-7 run 全生命周期 server_exit=0 /
+TC-8 非 WS 路由 denial（WS router 404, exit 4）/ TC-9 404 透传 exit 0）/
+cargo **fastapi_mojo_rs 453/0/4 不变** + **fmtool 30/0**（fmtool 首批单测: parse_url/url_encode/
+parse_action/CookieJar/redirect_method/build_body）/ clippy **-D warnings 双 crate 0 警告** /
+ldd 仅 libc / env -i 干净启动（health 200）/ binary **4,081,808 B**（≤4.2M, +4 KB vs 决策-55）/
+bench 6 场景 0 errors（get_root_10k_100c = 34,867 req/s, 32.9k–43.9k 带内）/ 孤儿 0
+下一轮：**Goal-0003 全量完成审计**（25/25 逐行证据复核: 每行 e2e 覆盖 + 各 ADR §3.5/§7 文档化偏差;
+gap 列 #1 PATCH-via-generic / #4 约束词表扩充 / #20 validator-closures 的 ✅ 需确认为"文档化偏差"
+而非"开放 gap"; 通过后 update_goal complete）
+2026-09-11（**决策-55 用户自定义中间件声明式落地**（ADR-0030, P2 矩阵 #14 ✅ / 中间件全量）：
 fastapi 0.141.1 / uvicorn 0.52.4 活体探测 P-MW-1..7（栈序 mw1=innermost / 响应头同名后写胜 / 短路跳内层+路由 / status 重设 / body 替换但 CL 不重算 → h11 LocalProtocolError（协议级破损）/ WS scope 直通不 wrap / 请求面仅 scope 可改）→ **单一 env 声明式动词表**（ADR-0004 范式, **FFI diff = +2** `set_req_id`/`inject_request_header`）：`FASTAPI_MOJO_MIDDLEWARE="<mw1>;...;<mwN>"`（`;` 分中间件 / `,` 分动词 / 位置字段 `:` / `|` 分路径表; 畸形 → `check_mw_spec` fail-fast, 服务不启动）；**请求面** (MAP/REQHDR/BLOCK) = Mojo `mw_spec.mojo` 纯函数（outermost→innermost, BLOCK 短路）+ dispatch 钩子（路由/OPTIONS 前, FFI 注入合成头, CI 先注入先胜）；**响应面** (HDR/STATUS/BODY/LOG) = bridge `send_response` 单点（innermost→outermost = env 正序, GZip 前, 同名 HDR 原位替换后写胜, BODY 重算 Content-Length = 文档化优于上游 P-MW-5）
 → **实施期修复**：bridge 侧短路重推导 `plan_request_path`（bridge 重跑 Mojo 计划, 响应仅过外层, 零额外 FFI）— `send_text_response_status` 委托 `send_response`
 → e2e **428→438/438**（+MW-1..10: HDR/REQHDR/MAP/LOG/STATUS/BODY/同名 HDR 外层胜/BLOCK 短路 418 仅外层/text/plain/无 env 零回归）/ cargo **453/0/4**（+19 中间件单测）/ clippy **0 警告**（双 crate）/ ldd 仅 libc / binary **4,077,712 B**（+57 KB vs 决策-54, ≤4.2M 预算）/ env -i 干净启动 / bench 6 场景 0 errors（get_root_10k_100c ≈ 31.5k, 32.9k–43.9k 带内）/ 孤儿 0 / `mw_spec.mojo` selftest **10/10** 全绿（FFI-free, CI 普通 mojo run 循环）

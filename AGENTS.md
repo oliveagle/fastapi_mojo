@@ -114,8 +114,9 @@
   单一 binary 构建（含 rust toolchain：`cargo build --release` 出 staticlib，
   `-static-libgcc` 静态链接 libgcc_s 保 ldd 干净，见 §3.2）
   + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试（含 `cargo test --release
-  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 438 项, 79 项
-  起扩展, 含 WebSocket 增强/并发/精化 + 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）) +
+  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 447 项, 79 项
+  起扩展, 含 WebSocket 增强/并发/精化 + 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）
+  + TestClient TC（ADR-0031）) +
   体积预算（中间态 ≤ 6M，终态 ≤ C + 2M）
   + **C 清零步骤**（终态门禁：`find src -name '*.c'` = 0；当前 Phase 4-5 为 INFO）
 
@@ -1373,7 +1374,80 @@
   **4.0M**（4,077,712 B, ≤4.2M; +57 KB vs 决策-54 = 纯 std 字节/整型）/ `find src -name
   '*.c'` = 0 保持 / `pgrep -x fastapi_mojo` = 0
 
-*最后更新：2026-09-11（**决策-55 用户自定义中间件声明式落地**（ADR-0030, Goal-0003 P2 矩阵 #14 ✅ 全量）：
+- **已决策-56**：**TestClient 声明式等价 — fmtool `testclient` 三子命令（ADR-0031,
+  Goal-0003 矩阵 #25 ✅ = **25/25 全量完成**；dev 工具不进 runtime binary, FFI diff = 0）**：
+  1. **设计**（活体 P-TCL-1..16, fastapi 0.141.1 / starlette 1.6.0）：候选
+     A=声明式 fmtool 子命令 ✅ / B=in-binary test mode ❌（污染交付物）/
+     C=Mojo 客户端 ❌（Mojo 1.0.0 无 socket）；Track B 先例（决策-22）—— TestClient
+     是 **dev 工具**（`src/fmtool/` 独立 crate, pure std），runtime binary 仅加
+     `/tc/jar` demo 路由（KIND_ECHO + `_reads_cookies tc` + `_response_headers
+     Set-Cookie: tc=jar1`, <KB）供 cookie 捕获/回放 e2e。
+  2. **`testclient http`**：真实网络 GET/POST + `--json`（parse 后规范化 compact,
+     P-TCL-4）/ `--data`（含 `=`/`&` → form 编码, 否则 raw, P-TCL-5）+
+     `--header/--param/--cookie` + `--cookie-jar FILE`（Set-Cookie 捕获 →
+     `name=value` 文件 → 次轮回放, LRU 序）+ 重定向循环（303→GET / 301-302
+     POST→GET / 307-308 保持, `redirect_method` 纯函数；`--no-follow/--max-hops`
+     防循环）+ `--json-out`（status_code/reason/headers/cookies/url/body|b64）+
+     退出码 0 响应 / 1 connect / 2 timeout / 3 协议 / 4 redirect loop。
+  3. **`testclient ws`**：**host-aware** RFC6455 握手（ws.rs 原 helper 硬编码
+     `127.0.0.1` **不动** → e2e ws1..5 逐字节不变；testclient/ws.rs 自带握手,
+     复用同一 SHA-1/base64/make_frame/recv_frame/expected_accept 原语）+
+     Sec-WebSocket-Accept **硬校验** + `--subprotocol`（协商回显）+ action 脚本
+     （`send-text/send-json/send-bytes` · `receive*/receive-text/receive-bytes/
+     receive-json` · `close:CODE[:REASON]` · `expect-close:CODE[:REASON]`）→
+     **JSONL 事件流**（`connect{subprotocol}` / `denial{status,reason,body}` /
+     `sent{value}` / `receive{value}` / `close{code,reason,initiator}` /
+     `done` / `error{message}`）+ 控制帧透明（ping→auto-pong / pong 忽略,
+     starlette parity, 不产生事件）+ 分片重组 + 脚本结束自动 close 1000 +
+     退出码 0 done / 4 denial / 5 早断连·mismatch / 6 timeout。
+  4. **`testclient run`**（lifespan CM 等价, P-TCL-10）：
+     `[--port N] [--timeout-ms N] [--readiness PATH] [--max-wait N]
+     <server-cmd...> -- <actions.jsonl>`（按**最后一个** `--` 切分, 选项后
+     装饰性 `--` 两写法皆收）→ spawn（`--port N` 注入为**两个 argv**）→
+     readiness 轮询（/health 含 "healthy", 默认 10s, 新 bind 先等 3s 防
+     Caddy 污染）→ actions 逐行执行（`op:http` expect_status/expect_body /
+     `op:ws` actions）PASS/FAIL → **SIGTERM（coreutils `kill`** — fmtool 零
+     crate 依赖无 libc; `Child::kill()` = SIGKILL 不可用）→ wait ≤5s（否则
+     SIGKILL）→ `run: N passed, M failed; server_exit=...`，**exit 0 仅当全
+     通过 + server_exit=0**（服务器 SIGTERM = 优雅退出 0, 已验证）。
+  5. **文档化偏差 ×6**（ADR-0031 §3.9）：① 真实 TCP 对真实 binary 非 in-process
+     ASGI（更贴近部署物, 可视为优于上游）② 无 in-process 异常传播（500 面 =
+     `raise_server_exceptions=False` 路径）③ cookie jar = 文件非 RFC
+     domain/path/expiry 模型 ④ declarative action script 非闭包/portal（Mojo
+     无闭包同款约束）⑤ UA=`testclient` 但 Host = 真实 host:port（非 `testserver`）
+     ⑥ lifespan = spawn/kill 真实 server 非 in-process CM。
+  6. **实施期修复**（ADR-0031 §7.6）：`--port N` 单 argv 被服务器忽略（→
+     两个 argv, 实测 catch）/ SIGTERM 走 coreutils `kill`（`Child::kill()`
+     = SIGKILL）/ `run` 按最后一个 `--` 切分（两写法兼容）/ ws 握手新建
+     testclient/ws.rs（ws.rs 不动）/ `read_response` 去 dead timeout 参数。
+  验收：e2e **438→447/447 全绿**（TC-1..9：json-out 200+healthy / POST /items
+  --json 回显解析字段 item_name / --cookie 回显 / --cookie-jar 捕获+回放 /
+  ws /ws echo 往返+done / expect-close 4001:custom reason（WS_CLOSE_WAIT=2000）/
+  run 全生命周期 server_exit=0 / 非 WS 路由 denial（WS router 404, exit 4）/
+  404 透传 exit 0）/ cargo **fastapi_mojo_rs 453/0/4 不变** + **fmtool 30/0**
+  （fmtool 首批单测：parse_url/url_encode/parse_action/CookieJar/redirect_method/
+  build_body）/ clippy **`-D warnings` 0**（双 crate）/ ldd 仅 libc / env -i
+  干净启动 / binary **4,081,808 B**（≤4.2M, +4 KB vs 决策-55）/ bench 6 场景
+  0 errors（get_root_10k_100c = 34,867 req/s, 32.9k–43.9k 带内）/
+  `find src -name '*.c'` = 0 / `pgrep -x fastapi_mojo` = 0。
+
+*最后更新：2026-09-11（**决策-56 TestClient 声明式等价**（ADR-0031, Goal-0003 矩阵 #25 ✅ = **25/25 全量完成**）：
+fmtool `testclient` 三子命令（**dev 工具不进 runtime, FFI diff = 0**, binary 仅加 /tc/jar demo 路由）：
+`http`（真实网络 GET/POST + JSON/form + header/param/cookie + cookie-jar 文件 + 重定向
+（303/301-302 POST→GET, 307/308 保持）+ --json-out + 退出码 0-6）/
+`ws`（host-aware RFC6455 握手（ws.rs 原 helper 不动, e2e 逐字节不变）+ Sec-WebSocket-Accept 硬校验
++ action 脚本 → JSONL 事件（connect/denial/receive/close/done/error）+ 控制帧透明 + 退出码 0/4/5/6）/
+`run`（spawn（--port 两 argv）→ readiness → JSONL actions PASS/FAIL → SIGTERM（coreutils kill）
+→ server_exit=0 断言 = lifespan CM 等价）
+→ 实施期修复（ADR-0031 §7.6）：--port 单 argv 被忽略（→两 argv, 实测 catch）/ SIGKILL vs SIGTERM /
+run 按最后一个 -- 切分（两写法兼容）/ read_response 去 dead timeout
+→ e2e **438→447/447**（TC-1..9）/ cargo **453/0/4**（rs 不变）+ **30/0**（fmtool 首批单测）/
+clippy **0**（双 crate）/ ldd 仅 libc / env -i 干净启动 / binary **4,081,808 B**（≤4.2M, +4 KB）/
+bench 6 场景 0 errors（get_root_10k_100c = 34,867, 带内）/ 孤儿 0
+下一轮：**Goal-0003 全量完成审计**（25/25 逐行证据复核：每行 e2e 覆盖 + 各 ADR §3.5/§7 文档化偏差;
+gap 列 #1 PATCH-via-generic / #4 约束词表扩充 / #20 validator-closures 的 ✅ 需确认为"文档化偏差"
+而非"开放 gap"; 通过后 update_goal complete）
+2026-09-11（**决策-55 用户自定义中间件声明式落地**（ADR-0030, Goal-0003 P2 矩阵 #14 ✅ 全量）：
 fastapi 0.141.1 / uvicorn 0.52.4 活体 P-MW-1..7（栈序 mw1=innermost / 响应头同名后写胜 /
 短路跳内层+路由 / status 重设 / body 替换但 CL 不重算 → h11 协议破损 / WS scope 直通 /
 请求面仅 scope 可改）→ **单一 env 声明式动词表**（ADR-0004 范式, **FFI diff = +2**
