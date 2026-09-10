@@ -13,8 +13,8 @@
 
 ## 0. 现状定位（2026-09-05 盘点）
 
-**已达成（v0.5.1 + 决策-31~48）**：
-- 单 binary 3.8M（3,815,424 B），ldd 仅 libc，env -i 干净启动，e2e **403 项**，cargo 431 单测
+**已达成（v0.5.1 + 决策-31~54）**：
+- 单 binary **3.9M（4,020,232 B）**，ldd 仅 libc，env -i 干净启动，e2e **428 项**，cargo **434** 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -32,15 +32,16 @@
   OpenAPI, 声明式纯 Mojo + FFI +1, 决策-46)**/
   **Depends use_cache (每请求 memo 表, 默认 cached / _depends_nocache = use_cache=False, 声明式纯 Mojo,
   决策-47)**/
-  **FileResponse/StreamingResponse (Range/206/multipart/etag/CD/500 + chunked streaming, Rust bridge 协议层 file_protocol+file_serve, 决策-48)**
+  **FileResponse/StreamingResponse (Range/206/multipart/etag/CD/500 + chunked streaming, Rust bridge 协议层 file_protocol+file_serve, 决策-48)**/
+  **参数约束面 (path/query/header gt/ge/lt/le/mo/len/pat + typed header 校验 + 422 ctx + 自研 regex 引擎, 声明式纯 Mojo + FFI +1, 决策-54, ADR-0029)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
 | # | 能力 | FastAPI 语义 | 现状 | 差距 | 计划 |
 |---|------|-------------|------|------|------|
 | 1 | 路径方法 | GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD + 405+Allow | ✅ | PATCH 未单独注册(走通用) | 补 PATCH |
-| 2 | 路径参数 | `{param}` + 类型 + 约束 | ✅ 类型化 | 约束(gt/lt/regex) | §P2 |
-| 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 多值 List/alias/desc/collect-all（决策-43/45, ADR-0018/0020：T[] 语法 + alias query-only + desc 双处；元素校验 **collect-all** — ADR-0020 更正 ADR-0018「首败即停 = 上游同款」错误实测） | 标量 bool 短消息 vs list 完整消息 + CSV 逗号歧义（均文档化, ADR-0018 §3.5, e2e 守护） | — |
+| 2 | 路径参数 | `{param}` + 类型 + 约束 | ✅ 全量（**参数约束面统一落地 决策-54, ADR-0029**：`_param_constraints` 声明式（`name=gt=3,le=10` / `len=2-4` / `pat=regex` / `mo`（=0 no-op）；**未声明 query 键 = 隐式 str 声明**（len/pat only）；每字段首违 only（数值 mo→ge→gt→le→lt / 字符串 minl→maxl→pat）；422 对象 house 键序 + `ctx` 末位（上游拼写）；**input 类型化 P26-b-8**（在场=raw / 缺失+默认违约=类型化字面量 unquoted / parse 失败=raw）；**typed header**（`_header_types`, 决策-53 面）缺失→默认值校验→422/注入默认字面量, 在场→parse→约束→注入 raw；collect-all 群序 path→query→header；**自研 regex 引擎 `bridge/regex.rs`**（re.search 语义: literal/escape/类/量词/组/alternation/锚/\b; 无反引/环视/命名组/内联标志; 匹配步数上限防 DoS; **FFI diff = +1** `regex_match`）；OpenAPI 3.0.3 约束键（3.0 布尔 exclusiveMinimum / 隐式 str 恒带 type / 字面量原样）；6 demo 路由 /con/*（含 /con/all 三错群序）） | 文档化偏差 ×8（ADR-0029 §3.8：① house 键序+ctx 末位 ② str+数值约束注册期拒（优于上游 no-op）③ list+约束注册期拒（优于上游 500）④ 3.0.3 布尔 exclusive 形式 ⑤ regex = 自研 backtracking 子集 ⑥ 隐式 str schema 恒带 type ⑦ 数字字面量原样 ⑧ body 词表扩充 = 矩阵 #4 未来; **矩阵 #3 标量 bool 短消息偏差本决策销账**（完整消息三面对齐, CP-14/24 守护）） | — |
+| 3 | 查询参数 | 可选/必填/多值/alias/desc | ✅ 多值 List/alias/desc/collect-all（决策-43/45, ADR-0018/0020：T[] 语法 + alias query-only + desc 双处；元素校验 **collect-all** — ADR-0020 更正 ADR-0018「首败即停 = 上游同款」错误实测） | **CSV 逗号歧义**（文档化, ADR-0018 §3.5, e2e 守护; 标量 bool 短消息偏差已由 **决策-54** 销账 — 完整消息 "Input should be a valid boolean, unable to interpret input" 三面对齐, CP-14/CP-24 守护） | — |
 | 4 | 请求体 | Pydantic 模型 / dict / 嵌套 | ✅ 声明式 spec（决策-38） | validator 自定义回调 = Mojo 无闭包，声明式约束词表为等价形态（扩充 P2） | — |
 | 5 | Form | Form(...) 多值 / alias / desc | ✅ 全量（决策-45, ADR-0020：List 多值 = 全部 occurrence / 标量 last-wins / alias wire key（原始名无效力）/ _param_descs → OpenAPI；422 = "Field required" + input + list collect-all；/login 未标注字段旧语义兼容） | 未标注字段 = 未声明校验（不 422）+ CSV 逗号歧义（均文档化, ADR-0020 §3.5, e2e FM 守护） | — |
 | 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 全量（决策-46, ADR-0021：file/bytes 声明（`[]`/`=可选`）+ 422 parity（U2 value_error 完整措辞 / U3 string_type 稳定子集 / U4 last-wins / U5 非 multipart 全缺失 / U9 bytes 双路）+ 对象操作（head/range/sha256/save 原子）+ multipart OpenAPI（contentMediaType 四形态 / required 仅当必填字段）；size = 实际字节（U1） | 文档化偏差 ×7（ADR-0021 §3.5：U9 上游 500 不复制 / input 稳定子集 / Body 命名 / save `..` 守卫 / 未声明不校验 / 空默认 = required（上游 optional, p8, 不修）/ missing de-dup） | — |
@@ -111,10 +112,36 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52）、Header alias/转换 ✅（决策-53） | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52）、Header alias/转换 ✅（决策-53）、参数约束面 ✅（决策-54） | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-53 Header 参数精化**（ADR-0028, P2 矩阵 #7 ✅）：
+*最后更新：2026-09-10（**决策-54 参数约束面统一落地**（ADR-0029, P2 矩阵 #2 ✅ / #3 bool 偏差销账）：
+fastapi 0.141.1 / pydantic 2.13.5 活体探测 P26-a..h（约束消息/type/ctx 精确串 /
+每字段首违 only + 优先级 mo→ge→gt→le→lt · minl→maxl→pat / multiple_of=0 no-op /
+str+数值约束上游 no-op → 本实现注册期拒 / list+约束上游 500 → 本实现 fail-fast /
+input 类型化: 在场=raw, 缺失+默认违约=类型化字面量 unquoted, parse 失败=raw）
+→ **声明式 + 纯 Mojo 校验 + 自研 regex 引擎**（ADR-0004 范式,
+**FFI diff = +1** `regex_match`）：`_param_constraints`（未声明 query 键 =
+隐式 str 声明, len/pat only）+ `_header_types` typed header 校验
+（缺失→默认值校验→422/注入字面量; 在场→parse→约束→注入 raw; 群序
+path→query→header）+ `bridge/regex.rs`（re.search 语义子集, 零第三方,
+纯整型运算 → -static-libgcc 守则保持）+ OpenAPI 3.0.3 约束键 + 6 demo
+/con/* 路由
+→ **实施期修复 ×3**（selftest/e2e 捕获）：① FFI 三态 `extract_request_header`
+（0=found / -2=not-found / -1=error; 原 0 缺失/空值不可分 —
+CP-12/15/16/20b 根因; F3a 注入语义不变, 缺失仍注入 ""）② OpenAPI alias
+约束查找（cons 按声明名 keyed vs param_name=wire 名 — X-Ver schema
+退化 {"type":"string"}; query alias 同型）③ `apply_query_extras` 标量
+默认注入（200 路径 缺席+默认 → values, 上游形参默认值 parity）
+→ e2e **403→428/428**（+CP-1..19, CP-20a/20b, CP-21..24）/ cargo
+**434/0/4** / clippy **0 警告**（双 crate）/ ldd 仅 libc / binary
+**4,020,232 B**（+205 KB vs 决策-53, ≤4.2M 预算）/ env -i 干净启动 /
+bench 6 场景 0 errors（get_root_10k_100c = 35,124, 32.9k–43.9k 带内）/
+RSS 平台化 / selftest **10/10** 全绿（JIT stub: `mojo run -Xlinker
+jit_regex_stub.so` — LD_PRELOAD 无效, JIT materialization 先于进程
+加载; stub abort-if-called, dev-only 不进 binary/CI）
+下一轮：P2 剩余（middleware / TestClient）
+2026-09-10（**决策-53 Header 参数精化**（ADR-0028, P2 矩阵 #7 ✅）：
 fastapi 0.141.1 / uvicorn 0.52.4 活体探测 P25-1..10（alias 原样**不**转换 P25-3 /
 逐字符 `_`→`-` P25-4 / CI 匹配 + 多值取首 / default·422·min_length·pattern·int
 约束面 P25-6..9 → 下一决策矩阵 #2）→ **声明式映射**（ADR-0004 范式,

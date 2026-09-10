@@ -1255,7 +1255,101 @@
   binary **3.8M**（3,815,424 B，≤4.2M；vs 决策-52 +12 KB — 纯 Mojo）/
   `find src -name '*.c'` = 0 保持 / `pgrep -x fastapi_mojo` = 0
 
-*最后更新：2026-09-10（**决策-53 Header 参数精化**（ADR-0028, Goal-0003 P2 矩阵 #7 ✅）：
+- **已决策-54**：**参数约束面统一落地 — `_param_constraints` 声明
+  （gt/ge/lt/le/mo/len/pat）+ typed header 校验（`_header_types`）+
+  自研 regex 引擎（ADR-0029, Goal-0003 P2 矩阵 #2 — 对标矩阵 #2 ✅
+  全量, #3 bool 偏差销账）**：
+  1. **上游探测（fastapi 0.141.1 / pydantic 2.13.5 活体, P26-a..h）**：
+     约束 422 = house 键序 + `ctx` 末位（ctx 键上游拼写, 值 = 声明
+     字面量原样 ⑦）；每字段仅首违（数值 mo→ge→gt→le→lt / 字符串
+     minl→maxl→pat, P26-c/d/e）；`multiple_of=0` = no-op；str+数值
+     约束 = 上游静默 no-op（本实现注册期拒, 优于上游）；list+数值
+     约束 = 上游运行时 500（本实现 fail-fast, 优于上游）；**input
+     类型化**：在场值 = raw 串, 缺失+默认违约束 = 类型化字面量
+     unquoted（int → JSON 数字, P26-b-8）, parse 失败 = raw；
+     collect-all 群序 path→query→header（P26-b-10）。
+  2. **声明式映射（ADR-0004 范式, FFI diff = +1）**：
+     `_param_constraints` = `name=gt=3,le=10` CSV（条目 `;` 分, 键
+     首个 `=` 分）；**未声明 query 键 = 隐式 str 声明**（len/pat only;
+     数值键拼写错误仍经 type-mismatch 拒; 纯 len/pat 拼写错误 =
+     每请求 422 missing 自证 — 优于上游静默忽略）；
+     `check_param_constraints` 注册期 fail-fast（未知键 / 非数字字面量
+     / len 形态 / type-mismatch / list+约束 / `_header_types` 未声明 /
+     pattern 编译校验, check_* 同策略 — 坏配置启动即暴露）；
+     `_header_types` 校验（`validate_headers_collect`）：缺失 → 有
+     默认 = 校验默认值（违 → 422 input = 类型化字面量; 过 → 注入
+     默认）/ 无默认 = 422 `Field required`（input null, loc = wire）
+     / 在场 → parse（完整消息, bool 三面对齐 = 矩阵 #3 销账）→
+     约束 → 注入 raw（handler 无感, F1 String dict）。
+  3. **自研 regex 引擎（`bridge/regex.rs`, FFI +1 `regex_match`）**：
+     `re.search` 语义（literal/escape/字符类/量词/组/alternation/锚/
+     `\b`）；**不支持** 反向引用/环视/命名组/内联标志（声明式词表,
+     矩阵 #4 同款定性）；匹配步数上限防 pathological DoS；零第三方,
+     纯整型运算 → ldd 仅 libc 保持（-static-libgcc 守则, 无 libm）；
+     已知向量对拍（Python re 活体生成, RFC 6455 SHA1 级联教训同款
+     回归守护）。JIT 自测解耦：`check_str_constraints` =
+     `check_str_len_constraints`（pure）+ `check_str_pattern`（FFI）
+     组合 — Mojo 1.0.0 JIT 按 call-graph closure materialize
+     external_call, JIT env 无 bridge lib（LD_PRELOAD 无效,
+     `mojo run -Xlinker jit_regex_stub.so` 唯一有效; stub
+     abort-if-called = dev-only, 不进 binary/CI; `dev/jit_regex_stub.rs`
+     + `scripts/jit_stub.sh`）。
+  4. **实施期修复 ×3（selftest/e2e 捕获）**：① FFI 三态
+     `extract_request_header`（0 = found / -2 = 未找到 / -1 = 出错;
+     原 0 = found/missing 不可分 → 缺失被当"在场空值" —
+     CP-12/15/16/20b 根因; F3a 注入语义不变: 缺失仍注入 ""）②
+     OpenAPI alias 约束查找（cons 表按**声明名** keyed vs
+     `_generate_parameter` 按 param_name = **wire 名**查 → alias
+     header/query 约束全丢, schema 退化 `{"type":"string"}`; 修复 =
+     openapi 本地 dict 注入 `cons[wire] = cons[declared]` 别名条目）
+     ③ `apply_query_extras` 标量默认注入（200 路径 缺席+默认 →
+     `query.values`, 上游形参默认值 parity — 200 回显/请求读取可见
+     默认, 422 路径先于此不受影响）。
+  5. **OpenAPI 3.0.3 约束键（ADR-0029 §3.5, 偏差 ④⑥⑦）**：gt →
+     `"minimum":N,"exclusiveMinimum":true`（3.0 布尔形式, 3.1 数字
+     形式不适用 3.0.3）/ le → `maximum` / mo → `multipleOf`（字面量
+     原样）/ len → `minLength`/`maxLength` / pat → `pattern`;
+     键序 type→minLength→maxLength→pattern→multipleOf→minimum→
+     exclusiveMinimum→maximum→exclusiveMaximum→default→description;
+     隐式 str schema 恒带 `type` 键（上游无, 信息超集 ⑥）。
+  6. **模块形态**：`param_constraints.mojo` 464 ln（spec/注册/OpenAPI
+     fragment）+ `param_constraints_run.mojo` 152 ln（运行期 collect,
+     500 行规则拆分边界）+ `numlit.mojo` 279 ln（F1 type-spec 原语
+     抽出）+ `param_constraints_selftest.mojo`（10/10 节）+
+     6 demo 路由 /con/*（§3.7 计划五路由 + /con/all 群序断言）；
+     http_server_final 1762→~1790 ln, openapi.mojo <500。
+  验收：e2e **428/428**（403 + 25 CP: CP-1..19 约束面 / CP-20a 群序
+  path→query→header / CP-20b 默认违约 input = unquoted 2 / CP-21..23
+  OpenAPI schema / CP-24 消息回归）/ cargo **434/0/4** / clippy
+  `-D warnings` 0 警告（双 crate）/ `param_constraints_selftest.mojo`
+  **10/10** 全绿 / bench 6 场景 0 errors（get_root_10k_100c
+  **35,124 req/s**, 32.9k–43.9k 区间, vs 决策-53 35,765 无回归）/
+  **ldd 仅 libc** / env -i 干净启动 / binary **3.9M**（4,020,232 B,
+  ≤4.2M；vs 决策-53 +205 KB = regex + 纯 Mojo）/ `find src -name
+  '*.c'` = 0 保持 / `find . -name '*.py'`（excl .git/docs）= 0 /
+  `pgrep -x fastapi_mojo` = 0
+
+*最后更新：2026-09-10（**决策-54 参数约束面统一落地**（ADR-0029, Goal-0003 P2 矩阵 #2 ✅, #3 bool 销账）：
+fastapi 0.141.1 / pydantic 2.13.5 活体 P26-a..h（ctx 键序 / 首违 only
++ 优先级 / mo=0 no-op / str+数值上游 no-op → 注册期拒 / list+约束上游
+500 → fail-fast / input 类型化: 在场=raw · 缺失+默认=字面量 unquoted ·
+parse=raw / 群序 path→query→header）→ **声明式映射**（ADR-0004 范式,
+**FFI diff = +1** `regex_match`）：`_param_constraints`（未声明 query
+键 = 隐式 str 声明, len/pat only）+ `_header_types` typed header 校验
+（默认值校验 / missing 422 / parse→约束→raw 注入）+ `bridge/regex.rs`
+自研 backtracking（re.search 子集, 步数上限, 零第三方）+ OpenAPI
+3.0.3 约束键（3.0 bool exclusive / type 恒带 / 字面量原样）+ 6 /con/*
+demo → 实施修复 ×3：FFI 三态 `extract_request_header`（缺失 vs 空值,
+CP-12/15/16/20b 根因; F3a 注入不变）/ OpenAPI alias 约束查找（cons
+声明名 keyed vs wire 名）/ `apply_query_extras` 标量默认注入（200 路径
+缺席+默认 → values）→ e2e **403→428/428**（+CP-1..19, 20a/20b,
+21..24）/ cargo **434/0/4** / clippy **0**（双 crate）/ ldd 仅 libc /
+binary **4,020,232 B**（+205 KB, ≤4.2M）/ env -i / bench 0 errors
+（35,124 req/s, 带内）/ 孤儿 0 / selftest **10/10**（JIT stub:
+`mojo run -Xlinker jit_regex_stub.so` — LD_PRELOAD 无效, stub
+abort-if-called dev-only）
+下一轮：P2 剩余（middleware / TestClient）
+2026-09-10（**决策-53 Header 参数精化**（ADR-0028, Goal-0003 P2 矩阵 #7 ✅）：
 fastapi 0.141.1 / uvicorn 0.52.4 活体 P25-1..10（alias 原样**不**转换 P25-3 /
 逐 `_`→`-` P25-4 / CI + 多值取首 / 约束面 P25-6..9 → 下一决策）→ **声明式映射**
 （ADR-0004 范式, **FFI diff = 0** 纯 Mojo）：`_reads_headers` 条目 `name`
