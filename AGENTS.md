@@ -1080,7 +1080,94 @@
   binary **3.7M**（3,700,736 B，≤4.2M；vs 决策-49 +36 KB）/
   `find src -name '*.c'` = 0 保持
 
-*最后更新：2026-09-10（**决策-50 Request.state**（ADR-0025, Goal-0003 P2 矩阵 #22 ✅）：
+- **已决策-51**：**WebSocket 精化 — close(code,reason) / exception_handler /
+  send_bytes / send_json 声明式指令 + close-wait phase 5（ADR-0026, Goal-0003
+  P2 矩阵 #23 — 对标矩阵 #23 ✅ 全量）**：
+  1. **上游探测（uvicorn 0.52.4 + wsproto 1.3.2 + starlette 1.6.0 活体,
+     P23-1..7 + p23i A..E）**：`close(code, reason)` 帧 = 2B code + reason
+     （1004/1006 → 改写 1000 / 1005 → 无 payload / reason 123B codepoint
+     安全截断 — wsproto frame_protocol.py:589）; close-wait = uvicorn
+     硬编码 `close_timeout=10.0`（close 帧已发后: 数据/ping 全丢弃, 任何
+     close → 静默 close, 10s 超时 → transport.close; p23i A..E 实测）;
+     `WebSocketException` → close(code, reason)（无回复）; 未处理异常 →
+     **无 close 帧** TCP EOF（客户端 1006）; `send_json` = compact
+     `separators=(",",":"), ensure_ascii=False`; `send_bytes` = BINARY。
+  2. **声明式映射（ADR-0004 范式, `run_ws_message` 单点 dispatch 签名不变,
+     每消息评估, JIT 可达）**：`_ws_close=CODE:REASON`（回复后 close +
+     close-wait; 首个 `:` 切分, 值可再含 `:`; 注册期 `check_ws_specs` 校验
+     合法码集 {1000-1003,1007-1015}∪[3000,4999] + spec 形态 — 1004/1005/1006
+     拒收（比 wsproto 发送侧静默改写更严）, 畸形启动即 fail）/ `_ws_raise=msg`
+     （无回复, **无 close 帧**立即 EOF = 客户端 1006, log
+     `[ws-exc] <route>: <msg>`）/ `_ws_exc_close=SPEC`（WebSocketException
+     等价: 无回复 close 帧 + close-wait）/ `_ws_no_reply=1` / `_ws_binary=1`
+     （echo = NUL 保留零拷贝 BINARY; 非 echo = 回复文本 BINARY）/
+     `_ws_json=<模板>`（compact JSON 原样 TEXT 帧, **echo 路径优先** =
+     替代回显）; 优先级 `_ws_raise` > `_ws_exc_close` > `_ws_close`
+     （前两 pre-reply, 后一 post-reply）。
+  3. **close-wait = bridge 新 phase 5**（`ws_set_closing` 入 phase +
+     `ws_close_at=now`; `pump_ws_closing`: 数据/ping/pong 丢弃, 任何
+     close 帧 → 静默 close（`ws_pump_close_quiet` = 入队 END +
+     reset_for_close, **无二次 close 帧**）, EOF/协议错误 → 静默 close;
+     `check_deadlines` 新 `WsCloseWaitTimeout`（超时 = 入队 END +
+     `table.close` 无 close 帧; phase 5 无 keepalive ping / 无 idle /
+     无 408）; env `FASTAPI_MOJO_WS_CLOSE_WAIT` 默认 **10000** =
+     uvicorn 10.0s parity, 0 = 立即关, AtomicI32 sentinel 只读一次
+     （`get_ws_ping_max` 同款）; 1s poll tick → 实际关闭 ∈ [wait,
+     wait+1s)（文档化偏差 ②）。
+  4. **新 FFI（+5 导出, 既有 `ws_send_close` 保留 — 1002/1003/1007/
+     1008/1009 协议路径继续用）**：`ws_send_close_reason`（256B 栈缓冲 +
+     NUL 契约 决策-20; 帧内容 = 纯函数 `ws_close_reason_payload`）/
+     `ws_write_binary` / `ws_write_current_binary`（NUL 安全零拷贝）/
+     `ws_set_closing` / `get_ws_close_wait_ms`（测试/诊断）。
+  5. **接线（http_server_final 1551 → 1583, +32 行）**：import +
+     `check_ws_specs(router)` + **6 demo 路由**（`/ws/close` echo +
+     1000:"bye" / `/ws/close/4001` 无回复 + 4001 / `/ws-exc/boom`
+     `_ws_raise="kaboom"` / `/ws-exc/close` 4002:"ws-exc" / `/ws/bin`
+     binary NUL 保留 / `/ws/json` compact JSON UTF-8）— P23 六场景
+     全覆盖; **新模块 `ws_directives.mojo`（122 行 <500）+
+     `ws_directives_selftest.mojo`**（纯函数解析/校验自检, 0 警告）。
+  6. **文档化偏差（ADR-0026 §3.5 ×7）**：① `_ws_json` = 声明模板（非
+     运行期 dumps; JSON 合法性 = 声明者责任）② close-wait 分辨率 = 1s
+     tick + 可配置超集（0 = 立即）③ 声明式每消息 vs 上游每连接 endpoint
+     生命周期 ④ 回复后会话继续（既有偏差显式记录）⑤ 回复值域 = UTF-8
+     文本（任意非 UTF-8 不可表达, NUL 保留）⑥ close-wait 协议错误 →
+     静默 close（不发提示帧）⑦ 异常 = 字符串 tag 非类（决策-49 同款）。
+  验收：e2e **383/383**（373 + 10 W：回复后 close 提前结束 <1s /
+  无回复 close + close-wait 保持 ∈[1s,4s) / 异常无 close 帧立即 EOF <1s /
+  4002 ws-exc / binary NUL 往返 / compact JSON UTF-8 逐字节 /
+  close-wait 期 ping 丢弃（无 pong）/ 数据丢弃 / server log [ws-exc] ×2）/
+  cargo **431/0/4**（+22: ws.rs close_reason_payload ×8 + deadlines
+  phase-5 ×4 + ws_session_ffi ×10）/ clippy `-D warnings` 0 警告（双
+  crate）/ bench 6 场景 0 errors（get_root_10k_100c **34,880 req/s**,
+  32.9k–43.9k 区间内, vs 决策-50 32,938 无回归）/ **ldd 仅 libc** /
+  env -i 干净启动 / binary **3.7M**（3,733,504 B，≤4.2M；vs 决策-50
+  +33 KB）/ `find src -name '*.c'` = 0 保持 / `mojo run
+  ws_directives_selftest.mojo` all passed
+
+*最后更新：2026-09-10（**决策-51 WebSocket 精化**（ADR-0026, Goal-0003 P2 矩阵 #23 ✅）：
+uvicorn 0.52.4 / wsproto 1.3.2 / starlette 1.6.0 活体 P23-1..7 + p23i A..E（close reason
+规范化 1004/1006→1000 / 1005 无 payload / 123B codepoint 截断; close-wait: 数据·ping 丢弃 /
+任何 close → 静默 close / 10s 定时器）→ **声明式映射**（ADR-0004 范式, `run_ws_message`
+签名**不变**, 每消息评估）: `_ws_close=CODE:REASON`（回复后 close + close-wait, 注册期
+check_ws_specs 校验合法码集, 1004/1005/1006 拒收）/ `_ws_raise`（无回复无 close 帧, 立即
+EOF = 1006, log [ws-exc]）/ `_ws_exc_close`（WebSocketException 等价）/ `_ws_no_reply` /
+`_ws_binary`（NUL 保留零拷贝）/ `_ws_json`（compact JSON, echo 路径优先）; 优先级
+`_ws_raise` > `_ws_exc_close` > `_ws_close`
++ **close-wait = bridge 新 phase 5**（数据/ping/pong 丢弃, 任何 close → 静默 close（无二次
+帧）, EOF/协议错误 → 静默 close; 超时 = check_deadlines WsCloseWaitTimeout, env
+FASTAPI_MOJO_WS_CLOSE_WAIT 默认 10000 = uvicorn parity, 0 = 立即, 1s tick 分辨率）
++ **新 FFI ×5**（ws_send_close_reason / ws_write_binary / ws_write_current_binary /
+ws_set_closing / get_ws_close_wait_ms; 既有 ws_send_close 保留）+ 新模块
+ws_directives.mojo(122<500) + selftest + 6 demo 路由（P23 全覆盖）+ FMTOOL ws5 新子命令
+（10 检查, 复用 ws.rs 帧 handshake/解析）;
+文档化偏差 ×7（ADR-0026 §3.5: ① _ws_json = 声明模板 ② close-wait 1s tick + 可配置超集
+③ 声明式每消息 vs endpoint 生命周期 ④ 回复后会话继续（既有, 显式）⑤ 回复值域 = UTF-8
+文本（NUL 保留）⑥ close-wait 协议错误静默 close ⑦ 异常 = 字符串 tag（决策-49 同款））;
+验收: e2e **383/383**（373+10 W, 含提前结束 <1s / close-wait 保持 ∈[1s,4s) / 无 close 帧
+EOF / NUL 往返 / compact JSON UTF-8 / ping·数据丢弃）/ cargo **431/0/4**（+22）/ clippy
+0 警告(双 crate) / bench 6 场景 0 errors（get_root_10k_100c 34,880 req/s, 区间内）/ ldd 仅
+libc / env -i 干净启动 / **3.7M**（3,733,504 B, ≤4.2M, +33 KB vs 决策-50）/ C 清零保持;
+2026-09-10（**决策-50 Request.state**（ADR-0025, Goal-0003 P2 矩阵 #22 ✅）：
 starlette 1.6.0 P22-1..6 探测（scope 承载 property / 属性·dict 双面 / 缺失读 500 / del quirk /
 无 __contains__ / 每请求隔离 ×2 活体）→ **声明式映射**（零 FFI, 纯 Mojo）：写面 `_state_set =
 "key:value;…"`（首个 `:` 切分; 值 `{param}` 插值 — 缺失键保留字面量; 评估 = 全部注入之后 =
