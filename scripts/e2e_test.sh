@@ -17,6 +17,7 @@
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
 #   - 停滞客户端不阻塞服务器 (探针 in <1s)
 #   - WebSocket: M1..M21 全 21 项 (ADR-0006~0009 握手/帧/子协议/鉴权/并发/合并帧)
+#   - WebSocket 精化: W1..W8 + 2 log 检查 (ADR-0026 决策-51 close/exception/binary/json + close-wait)
 #   - 服务器攻击后仍存活
 #   - Lifespan: 声明式 startup/shutdown 命令 (决策-36, LS-1..LS-4)
 #   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
@@ -180,6 +181,7 @@ trap cleanup EXIT
 echo "[setup] starting server on port $PORT (recv timeout 2s, idle timeout 2s)..."
 ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
     FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_WS_CLOSE_WAIT=2000 \
     "$BIN" --port "$PORT" \
     > "$TMP/server.log" 2>&1 ) &
 SERVER_PID=$!
@@ -1810,7 +1812,27 @@ if [[ "$(http_code "$BASE/exc/ve")" == "500" ]]; then
     pass "XS-7 /exc/ve 500 (决策-49 回归)"
 else fail "XS-7 /exc/ve 500" "code=$(http_code "$BASE/exc/ve")"; fi
 
+# --- WebSocket 精化 (ADR-0026, 决策-51) -------------------------------------------
+
+echo "== websocket refinement (ADR-0026, close/exception/binary/json + close-wait) =="
+# 主 server env: FASTAPI_MOJO_WS_CLOSE_WAIT=2000 (close-wait 2s; 1s poll
+# tick 粒度 → 超时 close ∈ [2s, 3s); W1..W8 时序断言基于该值).
+WS5_OUT=$("$FMTOOL" ws5 "$PORT" 2>&1)
+WS5_FAIL=$(echo "$WS5_OUT" | tail -1)
+for m in W1 W2 W3 W4 W5 W6 W7 W8; do
+    if echo "$WS5_OUT" | grep -q "$m"; then pass "WS $m"
+    else fail "WS $m" "$WS5_FAIL"; fi
+done
+# server log: [ws-exc] 行 (W3 _ws_raise / W4 _ws_exc_close — 决策-49 同款日志面)
+if [[ "$(cat "$TMP/server.log")" == *"[ws-exc] ws_exc_boom: kaboom"* ]]; then
+    pass "WS W9 _ws_raise logged [ws-exc] in server log"
+else fail "WS W9 [ws-exc] log" "no [ws-exc] ws_exc_boom line"; fi
+if [[ "$(cat "$TMP/server.log")" == *"[ws-exc] ws_exc_close: 4002:ws-exc"* ]]; then
+    pass "WS W10 _ws_exc_close logged [ws-exc] in server log"
+else fail "WS W10 [ws-exc] log" "no [ws-exc] ws_exc_close line"; fi
+
 # --- summary ---------------------------------------------------------------------
+
 
 echo
 echo "=================================================="

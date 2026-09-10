@@ -12,6 +12,7 @@
 //   ws2      <port>                  WS markers M7..M13
 //   ws3      <port>                  WS markers M14..M16 (concurrent)
 //   ws4      <port>                  WS markers M17..M21
+//   ws5      <port>                  WS 精化 markers W1..W8 (ADR-0026, 需 CLOSE_WAIT=2000 env)
 //   slowloris <port> <tmp>           half-send + probe (background)
 //   wsbench  <port> <path> <n> <c>   WS load, output hey-csv to stdout
 //   bench    [options]               unified benchmark runner
@@ -41,6 +42,7 @@ USAGE:
   fmtool ws2      <port>
   fmtool ws3      <port>
   fmtool ws4      <port>
+  fmtool ws5      <port>
   fmtool slowloris <port> <tmp>
   fmtool wsbench  <port> <path> <n> <c>
   fmtool bench    [--scenarios F] [--json F] [--report F] [--port N]
@@ -70,6 +72,7 @@ fn main() -> ExitCode {
         "ws2" => run_e2e_port("ws2", &rest, e2e::ws2),
         "ws3" => run_e2e_port("ws3", &rest, e2e::ws3),
         "ws4" => run_e2e_port("ws4", &rest, e2e::ws4),
+        "ws5" => run_e2e_port("ws5", &rest, e2e::ws5),
         "slowloris" => run_slowloris(&rest),
         "wsbench" => run_wsbench(&rest),
         "bench" => run_bench_dispatch(&rest),

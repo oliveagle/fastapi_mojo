@@ -281,3 +281,139 @@ fn ws_ping_max_env_read_once() {
     std::env::remove_var("FASTAPI_MOJO_WS_PING_MAX");
     reset_ws_ping_max_cache_for_test();
 }
+
+// ---------- ADR-0026 决策-51: close(code,reason) / binary / close-wait ----------
+
+#[test]
+fn ws_send_close_reason_sends_frame() {
+    let cp = ConnPair::new();
+    let rc = ws_send_close_reason(cp.b, 4001, b"custom reason");
+    assert_eq!(rc, 0);
+    let raw = cp.recv_all();
+    assert_eq!(raw[0], 0x88); // FIN=1 opcode=8 close
+    assert_eq!(raw[1], 15); // 2 (code) + 13 (reason)
+    assert_eq!(&raw[2..4], &[0x0F, 0xA1]); // 4001 BE
+    assert_eq!(&raw[4..], b"custom reason");
+}
+
+#[test]
+fn ws_send_close_reason_1004_rewritten_to_1000() {
+    let cp = ConnPair::new();
+    let rc = ws_send_close_reason(cp.b, 1004, b"r");
+    assert_eq!(rc, 0);
+    let raw = cp.recv_all();
+    assert_eq!(&raw[2..4], &[0x03, 0xE8]); // 1000 BE (local-only 改写, wsproto parity)
+}
+
+#[test]
+fn ws_send_close_reason_1005_no_payload() {
+    let cp = ConnPair::new();
+    let rc = ws_send_close_reason(cp.b, 1005, b"ignored");
+    assert_eq!(rc, 0);
+    let raw = cp.recv_all();
+    assert_eq!(raw[0], 0x88);
+    assert_eq!(raw[1], 0); // 无 payload (NO_STATUS_RCVD, wsproto parity)
+}
+
+#[test]
+fn ws_send_close_reason_truncates_to_123() {
+    let cp = ConnPair::new();
+    let reason = vec![b'x'; 200];
+    let rc = ws_send_close_reason(cp.b, 1000, &reason);
+    assert_eq!(rc, 0);
+    let raw = cp.recv_all();
+    assert_eq!(raw[1], 125); // 2 (code) + 123 (reason 截断)
+    assert_eq!(&raw[2..4], &[0x03, 0xE8]);
+    assert_eq!(&raw[4..127], &[b'x'; 123]); // 帧长 127 = 2 头 + 2 code + 123 reason
+}
+
+#[test]
+fn ws_write_binary_sends_binary_frame() {
+    let cp = ConnPair::new();
+    let rc = ws_write_binary(cp.b, b"bin data");
+    assert_eq!(rc, 0);
+    let raw = cp.recv_all();
+    assert_eq!(raw[0], 0x82); // FIN=1 opcode=2 binary
+    assert_eq!(raw[1], 8);
+    assert_eq!(&raw[2..], b"bin data");
+}
+
+#[test]
+fn ws_write_current_binary_zero_copy_nul_safe() {
+    reset_global_conn_table();
+    let cp = ConnPair::new();
+    {
+        // 持锁只填 conn; ws_write_current_binary 内部自锁 (Mutex 不可重入)
+        let mut table = lock_table();
+        let idx = table.alloc(cp.b).expect("alloc conn");
+        let c = table.get_mut(idx).unwrap();
+        c.phase = 4;
+        c.ws_opcode = 1;
+        c.ws_reasm = vec![0u8; 16];
+        c.ws_reasm[..3].copy_from_slice(b"a\x00b");
+        c.ws_mlen = 3;
+    }
+    let rc = ws_write_current_binary(cp.b);
+    assert_eq!(rc, 0);
+    let raw = cp.recv_all();
+    assert_eq!(raw[0], 0x82);
+    assert_eq!(raw[1], 3);
+    assert_eq!(&raw[2..], b"a\x00b"); // NUL 保留 (零拷贝, 非 C 串)
+    reset_global_conn_table();
+}
+
+#[test]
+fn ws_set_closing_enters_phase_5() {
+    setup_active_conn(3001, b"GET", b"/ws", UPGRADE_REQ);
+    {
+        // 持锁只改 phase; ws_set_closing 内部自锁 (Mutex 不可重入 —
+        // 教训: 持 guard 调用自锁函数 = 死锁)
+        let mut table = lock_table();
+        let idx = table.find(3001).expect("find conn");
+        table.get_mut(idx).unwrap().phase = 3;
+    }
+    let rc = ws_set_closing(3001);
+    assert_eq!(rc, 0);
+    let mut table = lock_table();
+    let idx = table.find(3001).expect("conn 仍在 (close-wait)");
+    let c = table.get(idx).unwrap();
+    assert_eq!(c.phase, 5);
+    assert!(c.ws_close_at > 0);
+    table.close(idx);
+}
+
+#[test]
+fn ws_set_closing_zero_wait_immediate_close() {
+    reset_ws_close_wait_cache_for_test();
+    std::env::set_var("FASTAPI_MOJO_WS_CLOSE_WAIT", "0");
+    setup_active_conn(3002, b"GET", b"/ws", UPGRADE_REQ);
+    let rc = ws_set_closing(3002);
+    assert_eq!(rc, 0);
+    // 立即关: END 事件入队 + conn 释放
+    let e = lock_events().pop();
+    assert_eq!(e, Some((3002, 2)));
+    let table = lock_table();
+    assert!(table.find(3002).is_none(), "conn 必须已释放");
+    std::env::remove_var("FASTAPI_MOJO_WS_CLOSE_WAIT");
+    reset_ws_close_wait_cache_for_test();
+}
+
+#[test]
+fn ws_set_closing_unknown_fd_fails() {
+    reset_global_conn_table();
+    assert_eq!(ws_set_closing(9999), 1);
+}
+
+#[test]
+fn ws_close_wait_env_read_once() {
+    // 一次性解析 + 缓存 (get_ws_ping_max 同款 sentinel 语义, 教训-12)
+    reset_ws_close_wait_cache_for_test();
+    std::env::set_var("FASTAPI_MOJO_WS_CLOSE_WAIT", "1234");
+    assert_eq!(get_ws_close_wait_ms(), 1234);
+    std::env::set_var("FASTAPI_MOJO_WS_CLOSE_WAIT", "5678");
+    assert_eq!(get_ws_close_wait_ms(), 1234); // 缓存: 改 env 不生效
+    std::env::remove_var("FASTAPI_MOJO_WS_CLOSE_WAIT");
+    reset_ws_close_wait_cache_for_test();
+    assert_eq!(get_ws_close_wait_ms(), 10000); // 默认 = uvicorn 10.0s parity
+    reset_ws_close_wait_cache_for_test();
+}

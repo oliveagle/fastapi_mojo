@@ -164,6 +164,63 @@ fn ws_send_all(fd: c_int, buf: &[u8]) -> c_int {
     0
 }
 
+// ========== close 帧 payload 规范化 (wsproto 1.3.2 发送侧 parity, ADR-0026) ==========
+//
+// 行为等价 wsproto frame_protocol.py::close (§1 证据):
+//   - 1005 (NO_STATUS_RCVD) -> 无 payload (无 code 的 close 帧)
+//   - 1004 / 1006 (local-only) -> 改写 1000 (NORMAL_CLOSURE)
+//   - 其他 code -> 原样 (发送侧无 range 检查 — 注册期校验在 Mojo 侧)
+//   - reason: 截断 123 字节 (125-2), **codepoint 安全** (多字节 UTF-8
+//     序列不切断, wsproto _truncate_utf8 parity)
+// 返回写入 out 的 payload 长度 (out 须 >= 125 字节).
+fn ws_close_reason_payload(code: c_int, reason: &[u8], out: &mut [u8]) -> usize {
+    if code == 1005 {
+        return 0;
+    }
+    let c = if code == 1004 || code == 1006 { 1000 } else { code };
+    out[0] = ((c >> 8) & 0xFF) as u8;
+    out[1] = (c & 0xFF) as u8;
+    let n = 123usize.min(reason.len());
+    let mut end = n;
+    if n < reason.len() {
+        // 截断点落在 continuation byte (10xxxxxx) 时回退到序列首字节
+        while end > 0 && (reason[end] & 0xC0) == 0x80 {
+            end -= 1;
+        }
+    }
+    out[2..2 + end].copy_from_slice(&reason[..end]);
+    2 + end
+}
+
+/// close 帧 (code + reason); ADR-0026 决策-51. reason = NUL 结尾 C 串
+/// (FFI 约定, 同 ws_write_text; 读到首个 NUL, 上限 255B — 最终
+/// 截断在 123B). 返回 0 = ok, -1 = send 失败.
+#[no_mangle]
+pub extern "C" fn ws_write_close_reason(
+    fd: c_int,
+    code: c_int,
+    reason: *const c_uchar,
+) -> c_int {
+    let mut rbuf = [0u8; 256];
+    let mut n = 0;
+    if !reason.is_null() {
+        // SAFETY: 调用方 (Mojo CStringSlice) 保证 reason 是 NUL 结尾的
+        // 有效 C 串; 读到首个 NUL 为止, 上限 256B 防越界.
+        let r = unsafe {
+            let mut n = 0;
+            while n < 256 && *reason.add(n) != 0 {
+                rbuf[n] = *reason.add(n);
+                n += 1;
+            }
+            n
+        };
+        n = r;
+    }
+    let mut payload = [0u8; 125];
+    let plen = ws_close_reason_payload(code, &rbuf[..n], &mut payload);
+    ws_write_message(fd, 8, payload.as_ptr(), plen)
+}
+
 // ========== handshake (101 + Sec-WebSocket-Accept) ==========
 #[no_mangle]
 pub extern "C" fn ws_handshake(

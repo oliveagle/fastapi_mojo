@@ -84,13 +84,18 @@ use super::multipart::{
 };
 use super::io::ws_pump_now as io_ws_pump_now;
 use super::ws_session_ffi::{
+    get_ws_close_wait_ms as wsf_get_ws_close_wait_ms,
     get_ws_path_slice as wsf_get_ws_path_slice, get_ws_ping_max as wsf_get_ws_ping_max,
     get_ws_protocol_offer_slice as wsf_get_ws_protocol_offer_slice,
     is_ws_upgrade as wsf_is_ws_upgrade, ws_conn_close as wsf_ws_conn_close,
     ws_conn_upgrade as wsf_ws_conn_upgrade, ws_last_opcode as wsf_ws_last_opcode,
     ws_message_done as wsf_ws_message_done, ws_payload_slice as wsf_ws_payload_slice,
     ws_send_close as wsf_ws_send_close,
+    ws_send_close_reason as wsf_ws_send_close_reason,
+    ws_set_closing as wsf_ws_set_closing,
     ws_session_begin as wsf_ws_session_begin, ws_write_current as wsf_ws_write_current,
+    ws_write_current_binary as wsf_ws_write_current_binary,
+    ws_write_binary as wsf_ws_write_binary,
     ws_write_text as wsf_ws_write_text,
 };
 
@@ -531,6 +536,41 @@ pub extern "C" fn ws_write_text(fd: c_int, data: *const c_char) -> c_int {
 #[no_mangle]
 pub extern "C" fn ws_send_close(fd: c_int, code: c_int) -> c_int {
     wsf_ws_send_close(fd, code) as c_int
+}
+
+/// close 帧 (code + reason); ADR-0026 决策-51. reason = NUL 结尾 C 串
+/// (FFI 约定同 ws_write_text). wsproto 规范化 (1004/1006→1000, 1005→
+/// 无 payload, UTF-8 截断 123B) 在 ws.rs.
+#[no_mangle]
+pub extern "C" fn ws_send_close_reason(fd: c_int, code: c_int, reason: *const c_char) -> c_int {
+    let d = unsafe { c_str_bytes(reason) };
+    wsf_ws_send_close_reason(fd, code, &d) as c_int
+}
+
+/// BINARY 回复帧 (NUL-free 文本, 非 echo handler); ADR-0026 决策-51.
+#[no_mangle]
+pub extern "C" fn ws_write_binary(fd: c_int, data: *const c_char) -> c_int {
+    let d = unsafe { c_str_bytes(data) };
+    wsf_ws_write_binary(fd, &d) as c_int
+}
+
+/// 零拷贝: 待处理消息载荷 → BINARY 帧 (NUL 安全); ADR-0026 决策-51.
+#[no_mangle]
+pub extern "C" fn ws_write_current_binary(fd: c_int) -> c_int {
+    wsf_ws_write_current_binary(fd) as c_int
+}
+
+/// 进入 WS close-wait (phase 5); 调用前 close 帧须已发; ADR-0026 决策-51.
+/// close-wait 时长 = env FASTAPI_MOJO_WS_CLOSE_WAIT (内部自读, 0 = 立即关).
+#[no_mangle]
+pub extern "C" fn ws_set_closing(fd: c_int) -> c_int {
+    wsf_ws_set_closing(fd) as c_int
+}
+
+/// FASTAPI_MOJO_WS_CLOSE_WAIT (默认 10000ms; 0 = 立即关); ADR-0026.
+#[no_mangle]
+pub extern "C" fn get_ws_close_wait_ms() -> c_int {
+    wsf_get_ws_close_wait_ms() as c_int
 }
 
 #[no_mangle]

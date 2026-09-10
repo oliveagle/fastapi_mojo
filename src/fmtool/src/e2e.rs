@@ -616,6 +616,211 @@ pub fn ws4(port: u16) -> i32 {
     }
 }
 
+// ws5: W1..W8 (ADR-0026 决策-51 — WS 精化: close/exception/binary/json +
+// close-wait). 要求 server 以 FASTAPI_MOJO_WS_CLOSE_WAIT=2000 启动
+// (e2e_test.sh 主 server env): W1/W2/W4/W7/W8 的 close-wait 时序断言
+// 依赖该值 (1s poll tick 粒度 → 超时 close ∈ [2s, 3s)).
+pub fn ws5(port: u16) -> i32 {
+    let mk = || -> io::Result<()> {
+        let expect_eof = |s: &mut TcpStream, tag: &str, to: Duration| -> io::Result<()> {
+            match recv_frame_timeout(s, to) {
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
+                Ok(f) => Err(io::Error::other(format!(
+                    "{tag}: expected clean EOF, got frame op 0x{op:02x} len {len}",
+                    op = f.op,
+                    len = f.payload.len()
+                ))),
+                Err(e) => Err(io::Error::other(format!("{tag}: expected clean EOF, got {e}"))),
+            }
+        };
+        let close_code_reason = |f: &Frame| -> io::Result<(u16, Vec<u8>)> {
+            if f.payload.len() < 2 {
+                return Err(io::Error::other("close payload < 2 bytes"));
+            }
+            Ok((
+                u16::from_be_bytes([f.payload[0], f.payload[1]]),
+                f.payload[2..].to_vec(),
+            ))
+        };
+
+        // W1: /ws/close — 回复后 close 1000 "bye"; close 回显 → **提前结束**
+        // (close-wait 2s 配置下 <1s — P23-1 + P23-7 提前结束)
+        let (mut s, status, _, _) = ws_connect(port, "/ws/close", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W1 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"go", true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x1 && f.payload == b"go") {
+            return Err(io::Error::other("W1 echo mismatch"));
+        }
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if f.op != 0x8 {
+            return Err(io::Error::other(format!("W1 close op 0x{op:02x}", op = f.op)));
+        }
+        let (code, reason) = close_code_reason(&f)?;
+        if code != 1000 || reason != b"bye" {
+            return Err(io::Error::other(format!("W1 close {code} {reason:?}")));
+        }
+        let t0 = Instant::now();
+        send_frame(&mut s, 0x8, &[0x03, 0xE8, b'b', b'y', b'e'], true)?;
+        expect_eof(&mut s, "W1", Duration::from_secs(3))?;
+        if t0.elapsed() >= Duration::from_secs(1) {
+            return Err(io::Error::other("W1: close echo must end close-wait <1s"));
+        }
+        println!("W1");
+
+        // W2: /ws/close/4001 — **无回复**, close 4001 "custom reason";
+        // close-wait 保持 TCP 打开 → EOF ∈ [1s, 4s) (证明 hold, 非立即关)
+        let (mut s, status, _, _) = ws_connect(port, "/ws/close/4001", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W2 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"go", true)?;
+        let t0 = Instant::now();
+        let f = recv_frame_timeout(&mut s, Duration::from_secs(5))?;
+        if f.op != 0x8 {
+            return Err(io::Error::other("W2 first frame must be close (no reply)"));
+        }
+        let (code, reason) = close_code_reason(&f)?;
+        if code != 4001 || reason != b"custom reason" {
+            return Err(io::Error::other(format!("W2 close {code} {reason:?}")));
+        }
+        expect_eof(&mut s, "W2", Duration::from_secs(5))?;
+        let el = t0.elapsed();
+        if el < Duration::from_millis(1000) || el > Duration::from_secs(4) {
+            return Err(io::Error::other(format!("W2: close-wait hold out of band {el:?}")));
+        }
+        println!("W2");
+
+        // W3: /ws-exc/boom — 未处理异常: **无 close 帧**, 立即 TCP EOF (1006)
+        let (mut s, status, _, _) = ws_connect(port, "/ws-exc/boom", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W3 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"go", true)?;
+        let t0 = Instant::now();
+        match recv_frame_timeout(&mut s, Duration::from_secs(3)) {
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            Ok(f) => {
+                return Err(io::Error::other(
+                    format!("W3: no close frame allowed, got op 0x{op:02x}", op = f.op),
+                ))
+            }
+            _ => return Err(io::Error::other("W3: timeout waiting for EOF")),
+        }
+        if t0.elapsed() >= Duration::from_secs(1) {
+            return Err(io::Error::other("W3: raise must close immediately (<1s)"));
+        }
+        println!("W3");
+
+        // W4: /ws-exc/close — WebSocketException 等价: close 4002 "ws-exc"
+        // (无回复) + close-wait EOF
+        let (mut s, status, _, _) = ws_connect(port, "/ws-exc/close", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W4 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"go", true)?;
+        let f = recv_frame_timeout(&mut s, Duration::from_secs(5))?;
+        if f.op != 0x8 {
+            return Err(io::Error::other("W4 first frame must be close"));
+        }
+        let (code, reason) = close_code_reason(&f)?;
+        if code != 4002 || reason != b"ws-exc" {
+            return Err(io::Error::other(format!("W4 close {code} {reason:?}")));
+        }
+        expect_eof(&mut s, "W4", Duration::from_secs(5))?;
+        println!("W4");
+
+        // W5: /ws/bin — BINARY 回复, **NUL 保留** (零拷贝, 非 C 串)
+        let (mut s, status, _, _) = ws_connect(port, "/ws/bin", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W5 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"a\x00b", true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x2 && f.payload == b"a\x00b") {
+            return Err(io::Error::other(format!("W5 binary: op 0x{op:02x} {p:?}", op = f.op, p = f.payload)));
+        }
+        close_ws(&mut s);
+        println!("W5");
+
+        // W6: /ws/json — compact JSON TEXT 帧 (原始 UTF-8, 逐字节)
+        let (mut s, status, _, _) = ws_connect(port, "/ws/json", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W6 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"go", true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        let want = b"{\"a\":1,\"b\":\"\xe4\xb8\xad\xe6\x96\x87\",\"c\":[1,2]}";
+        if !(f.op == 0x1 && f.payload == want) {
+            return Err(io::Error::other(format!("W6 json: {p:?}", p = f.payload)));
+        }
+        close_ws(&mut s);
+        println!("W6");
+
+        // W7: close-wait 期间 ping → **丢弃 (不回 pong)**, 超时 close
+        let (mut s, status, _, _) = ws_connect(port, "/ws/close", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W7 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"go", true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x1 && f.payload == b"go") {
+            return Err(io::Error::other("W7 echo mismatch"));
+        }
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if f.op != 0x8 {
+            return Err(io::Error::other("W7 expected server close"));
+        }
+        send_frame(&mut s, 0x9, b"pp", true)?;
+        match recv_frame_timeout(&mut s, Duration::from_secs(1)) {
+            Ok(f) if f.op == 0xA => {
+                return Err(io::Error::other("W7: pong during close-wait must be dropped"))
+            }
+            Ok(f) => {
+                return Err(io::Error::other(format!("W7: unexpected frame op 0x{op:02x}", op = f.op)))
+            }
+            _ => {} // 1s 无 pong = 丢弃 ✓
+        }
+        expect_eof(&mut s, "W7", Duration::from_secs(5))?;
+        println!("W7");
+
+        // W8: close-wait 期间数据帧 → **丢弃 (无回复)**, 保持开到超时
+        let (mut s, status, _, _) = ws_connect(port, "/ws/close", "")?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("W8 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"go", true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x1 && f.payload == b"go") {
+            return Err(io::Error::other("W8 echo mismatch"));
+        }
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if f.op != 0x8 {
+            return Err(io::Error::other("W8 expected server close"));
+        }
+        send_frame(&mut s, 0x1, b"late", true)?;
+        match recv_frame_timeout(&mut s, Duration::from_secs(1)) {
+            Ok(f) if f.op == 0x1 => {
+                return Err(io::Error::other("W8: data during close-wait must be dropped"))
+            }
+            Ok(f) => {
+                return Err(io::Error::other(format!("W8: unexpected frame op 0x{op:02x}", op = f.op)))
+            }
+            _ => {} // 1s 无回复 = 丢弃 ✓
+        }
+        expect_eof(&mut s, "W8", Duration::from_secs(5))?;
+        println!("W8");
+
+        Ok(())
+    };
+    match mk() {
+        Ok(()) => 0,
+        Err(e) => { println!("FAIL: {e}"); 1 }
+    }
+}
+
 // slowloris: 半发送请求行 + stall, 写 holding, 读响应或 TIMEOUT
 pub fn slowloris(port: u16, tmp: &str) -> i32 {
     let holding = format!("{tmp}/holding");

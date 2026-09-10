@@ -55,6 +55,7 @@ pub struct Conn {
     pub fd: i32,
     /// 0=header 1=body 2=HTTP dispatch(Mojo busy)
     /// 3=WS session(poll 可驱动) 4=WS dispatch(Mojo 处理一条消息)
+    /// 5=WS close-wait(A1: close 帧已发, 等回显/超时/EOF; ADR-0026)
     pub phase: i32,
     pub hdr: Vec<u8>,       // HDR_BUF_SIZE 上限
     pub hdr_total: usize,
@@ -73,6 +74,7 @@ pub struct Conn {
     pub ws_opcode: i32,     // 待处理数据帧 opcode
     pub ws_mlen: usize,     // 待处理数据帧长度
     pub ws_strikes: i32,    // 保活 strike 计数
+    pub ws_close_at: i64,   // close-wait 起点 ms (0 = 非 close-wait; ADR-0026)
 }
 
 impl Conn {
@@ -99,6 +101,7 @@ impl Conn {
             ws_opcode: 0,
             ws_mlen: 0,
             ws_strikes: 0,
+            ws_close_at: 0,
         }
     }
 
@@ -123,6 +126,7 @@ impl Conn {
         self.ws_opcode = 0;
         self.ws_mlen = 0;
         self.ws_strikes = 0;
+        self.ws_close_at = 0;
         self.par_reset();
     }
 

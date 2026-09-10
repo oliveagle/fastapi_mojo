@@ -275,15 +275,107 @@ fn ws_pump_close(c: &mut Conn, code: i32) -> i32 {
     -1
 }
 
-/// 单一连接 pump (phase 0/1/3/4). 端口 C `pump_conn` (§962-1020).
+/// 静默 close (phase 5 / close-wait 用): 入队结束事件 + reset,
+/// **不发 close 帧** (close 已发过; ADR-0026 p23i B/C/D parity).
+fn ws_pump_close_quiet(c: &mut Conn) -> i32 {
+    let fd = c.fd;
+    let _ = ws_events().lock().expect("WS_EVENTS poisoned").push(fd, WS_EV_END);
+    c.reset_for_close();
+    -1
+}
+
+/// WS close-wait pump (phase 5, ADR-0026 决策-51).
+/// uvicorn 0.52.4 (wsproto) parity, 实测 p23i:
+///   - 数据帧 → 丢弃 (不入队, 不 UTF-8 校验, 不回复 — handle_events
+///     close_sent 分支对非 Close 事件全部 continue);
+///   - ping → 丢弃 (不回 pong — send_keepalive_ping/handle_pong 对
+///     close_sent 短路); pong → no-op;
+///   - **任何 close 帧 (合法或非法码) → 静默 close** (不回显 — close
+///     已发; uvicorn handle_close close_sent 分支只 cancel timer +
+///     close; 非法码经 wsproto ParseFailed 也走同一路径);
+///   - EOF / 协议错误 → 静默 close.
+///
+/// 超时由 check_deadlines (WsCloseWaitTimeout) 处理.
+/// 返回 0 = 仍等 (EAGAIN), -1 = 连接已关闭.
+fn pump_ws_closing(c: &mut Conn) -> i32 {
+    loop {
+        let (chunk_ptr, chunk_len) = if c.ws_tail_len > 0 {
+            let p = c.ws_tail.as_ptr();
+            let n = c.ws_tail_len;
+            c.ws_tail_len = 0;
+            (p, n)
+        } else {
+            let n = sys_recv(c.fd, &mut c.ws_tail);
+            if n <= 0 {
+                if n == 0 {
+                    return ws_pump_close_quiet(c); // EOF: 静默 close
+                }
+                break; // EAGAIN
+            }
+            (c.ws_tail.as_ptr(), n as usize)
+        };
+
+        let chunk: &[u8] = unsafe { std::slice::from_raw_parts(chunk_ptr, chunk_len) };
+
+        let mut opcode: c_int = 0;
+        let mut mlen: usize = 0;
+        let mut consumed: usize = 0;
+        let rc = ws_parser_feed(
+            &mut c.ws_par as *mut _,
+            chunk.as_ptr(),
+            chunk_len,
+            &mut opcode,
+            &mut mlen,
+            c.ws_reasm.as_mut_ptr(),
+            c.ws_reasm.capacity(),
+            &mut consumed,
+        );
+
+        if consumed < chunk_len {
+            c.ws_tail[..chunk_len - consumed].copy_from_slice(&chunk[consumed..]);
+            c.ws_tail_len = chunk_len - consumed;
+        }
+
+        if rc == -2 {
+            // 重组缓冲不足: 按需翻倍 (close 前的数据帧会先重组;
+            // 上限 MAX_BODY+1, 超限 → 静默 close)
+            let old_cap = c.ws_reasm.capacity();
+            let new_cap = (old_cap * 2).min(MAX_BODY + 1);
+            if new_cap <= old_cap {
+                return ws_pump_close_quiet(c);
+            }
+            let mut new_reasm = vec![0u8; new_cap];
+            new_reasm[..old_cap].copy_from_slice(&c.ws_reasm[..old_cap]);
+            c.ws_reasm = new_reasm;
+            continue;
+        }
+        if rc == -1 {
+            return ws_pump_close_quiet(c); // 协议错误: 静默 close (§3.5-6d)
+        }
+        if rc == 2 {
+            if opcode == 8 {
+                return ws_pump_close_quiet(c); // close 回显/任意 close: 握手完成
+            }
+            // ping (9) / pong (10): 丢弃, 不回 pong
+            continue;
+        }
+        if rc == 1 {
+            // 数据帧: 丢弃 (parser 已重置 reasm_len/in_msg)
+            continue;
+        }
+    }
+    0
+}
+
+/// 单一连接 pump (phase 0/1/3/4/5). 端口 C `pump_conn` (§962-1020).
 /// 返回 1 = request 已就绪, 0 = 仍在等, -1 = 连接已关闭.
 pub fn pump_conn(c: &mut Conn, max_body_size: i32) -> i32 {
     // phase 2 / 4: Mojo 分派中, 不做 I/O (与 C 一致)
     if c.phase == 2 || c.phase == 4 {
         return 0;
     }
-    // phase 3: WS 会话
-    if c.phase == 3 {
+    // phase 3: WS 会话; phase 5: WS close-wait (ADR-0026, 内部转 pump_ws_closing)
+    if c.phase == 3 || c.phase == 5 {
         return pump_ws_conn(c);
     }
     // phase 0: 累积 header
@@ -386,6 +478,11 @@ fn finish_header_into(c: &mut Conn, max_body_size: i32) -> i32 {
 /// WS 会话 pump (phase 3). 端口 C `pump_ws_conn` (§867-940).
 /// 公开为 `pub(crate)` 仅供 io_tests 调用 (生产路径通过 pump_conn 委托).
 pub(crate) fn pump_ws_conn(c: &mut Conn) -> i32 {
+    // phase 5: close-wait (ADR-0026 决策-51) — 独立分支 (丢数据/ping,
+    // close 回显 → 静默 close; 与 phase 3 的 echo/入队语义完全不同)
+    if c.phase == 5 {
+        return pump_ws_closing(c);
+    }
     // 惰性分配 ws_tail / ws_reasm (等价 C 首次进入 phase 3 时 malloc)
     if c.ws_tail.is_empty() {
         c.ws_tail = vec![0u8; WS_TAIL_MAX];
@@ -537,6 +634,7 @@ pub fn check_deadlines() {
     let idle_max = get_idle_max_ms();
     let max_req = get_max_request_ms();
     let ping_max = get_ws_ping_max();
+    let close_wait = super::ws_session_ffi::get_ws_close_wait_ms() as i64;
 
     #[derive(Clone, Copy)]
     struct Decision {
@@ -563,6 +661,8 @@ pub fn check_deadlines() {
                 c.last_active_ms,
                 &mut strikes,
                 ping_max,
+                c.ws_close_at,
+                close_wait,
                 now,
                 recv_timeout,
                 idle_max,
@@ -605,6 +705,13 @@ pub fn check_deadlines() {
                     table.close(d.idx);
                 }
             }
+            DeadlineAction::WsCloseWaitTimeout => {
+                // close-wait 超时 (ADR-0026): 静默 close — 不发 close 帧
+                // (已发过; uvicorn close_timer 到期同款: 仅 transport.close)
+                let _ = ws_events().lock().expect("WS_EVENTS poisoned").push(d.fd, WS_EV_END);
+                let mut table = conn_table().lock().expect("CONN_TABLE poisoned");
+                table.close(d.idx);
+            }
             DeadlineAction::Timeout408 => {
                 send_error_json(d.fd, "408 Request Timeout", "Request timeout");
                 let mut table = conn_table().lock().expect("CONN_TABLE poisoned");
@@ -633,8 +740,8 @@ pub fn conn_done(fd: i32, reuse: c_int) {
         Some(c) => c,
         None => return,
     };
-    // WS 会话: 跳过 (与 C 一致)
-    if c.phase == 3 || c.phase == 4 {
+    // WS 会话/close-wait: 跳过 (与 C 一致; phase 5 = ADR-0026)
+    if c.phase == 3 || c.phase == 4 || c.phase == 5 {
         return;
     }
     c.body.clear();

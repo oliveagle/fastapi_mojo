@@ -10,6 +10,7 @@
 //!   2 = HTTP 分派中 (Mojo 持有, 跳过)
 //!   3 = WS 会话 (poll 可驱动; ADR-0008 保活)
 //!   4 = WS 单消息分派中 (Mojo 持有, 跳过)
+//!   5 = WS close-wait (close 帧已发; ADR-0026: 无保活, 仅 close-wait 超时)
 
 /// 每个 conn 在一次 deadline tick 上的决策.
 ///
@@ -17,6 +18,7 @@
 ///   None        → 不动作
 ///   WsPing      → `ws_write_message(fd, 9, b"", 0)` 发空 ping
 ///   WsClose1000 → `ws_send_close(fd, 1000)` + `ws_event_push(fd, 2)` + close_conn
+///   WsCloseWaitTimeout → `ws_event_push(fd, 2)` + close_conn (静默, ADR-0026)
 ///   Timeout408  → `send_error_json(fd, "408 Request Timeout", "Request timeout")` + close_conn
 ///   CloseIdle   → close_conn (静默; 不发响应 — keep-alive 连接池噪音最小化)
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -24,6 +26,8 @@ pub enum DeadlineAction {
     None,
     WsPing,
     WsClose1000,
+    /// ADR-0026: close-wait 超时 — 静默 close (不发 close 帧, 已发过)
+    WsCloseWaitTimeout,
     Timeout408,
     CloseIdle,
 }
@@ -41,6 +45,8 @@ pub fn decide(
     last_active_ms: i64,
     ws_strikes: &mut i32,
     ping_max: i32,
+    ws_close_at: i64,
+    close_wait_ms: i64,
     now_ms: i64,
     recv_timeout_ms: i64,
     idle_max_ms: i64,
@@ -48,6 +54,19 @@ pub fn decide(
 ) -> DeadlineAction {
     // Mojo 分派中: 跳过 (与 C `phase == 2 || phase == 4` 一致)
     if phase == 2 || phase == 4 {
+        return DeadlineAction::None;
+    }
+
+    // WS close-wait (ADR-0026): close 帧已发 — 无保活 ping (uvicorn:
+    // send_keepalive_ping 对 close_sent 短路), 无 idle/408 逻辑; 仅
+    // close-wait 超时 -> 静默 close.
+    if phase == 5 {
+        if ws_close_at != 0
+            && close_wait_ms >= 0
+            && now_ms.saturating_sub(ws_close_at) >= close_wait_ms
+        {
+            return DeadlineAction::WsCloseWaitTimeout;
+        }
         return DeadlineAction::None;
     }
 

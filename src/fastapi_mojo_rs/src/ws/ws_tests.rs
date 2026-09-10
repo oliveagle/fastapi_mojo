@@ -432,3 +432,100 @@ fn new_parser() -> WsParser {
         reasm_len: 0,
     }
 }
+
+// --- close 帧 payload 规范化 (wsproto 1.3.2 发送侧 parity, ADR-0026 决策-51) ---
+#[test]
+fn close_reason_payload_normal() {
+    let mut out = [0u8; 125];
+    let n = ws_close_reason_payload(1000, b"bye", &mut out);
+    assert_eq!(n, 5);
+    assert_eq!(&out[..n], &[0x03, 0xE8, b'b', b'y', b'e']);
+}
+
+#[test]
+fn close_reason_payload_empty_reason() {
+    let mut out = [0u8; 125];
+    let n = ws_close_reason_payload(4001, b"", &mut out);
+    assert_eq!(n, 2);
+    assert_eq!(&out[..n], &[0x0F, 0xA1]); // 4001
+}
+
+#[test]
+fn close_reason_payload_1005_no_payload() {
+    let mut out = [0u8; 125];
+    let n = ws_close_reason_payload(1005, b"ignored", &mut out);
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn close_reason_payload_local_only_rewritten() {
+    let mut out = [0u8; 125];
+    for bad in [1004, 1006] {
+        let n = ws_close_reason_payload(bad, b"r", &mut out);
+        assert_eq!(n, 3);
+        assert_eq!(&out[..2], &[0x03, 0xE8]); // 改写 1000
+    }
+}
+
+#[test]
+fn close_reason_payload_registered_codes() {
+    let mut out = [0u8; 125];
+    for (code, hi, lo) in [(1002u32, 0x03u32, 0xEA), (1003, 0x03, 0xEB),
+                           (1007, 0x03, 0xEF), (1015, 0x03, 0xF7),
+                           (3000, 0x0B, 0xB8), (4999, 0x13, 0x87)] {
+        let n = ws_close_reason_payload(code as i32, b"", &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(&out[..2], &[(hi as u8), (lo as u8)]);
+    }
+}
+
+#[test]
+fn close_reason_payload_truncate_ascii() {
+    let reason = [b'x'; 200];
+    let mut out = [0u8; 125];
+    let n = ws_close_reason_payload(1000, &reason, &mut out);
+    assert_eq!(n, 125);
+    assert_eq!(&out[2..125], &[b'x'; 123]);
+}
+
+#[test]
+fn close_reason_payload_truncate_multibyte_boundary() {
+    // é = 2 bytes (0xC3 0xA9). 62 × é = 124 bytes -> 截断 123 落在
+    // continuation byte -> 回退 122 (61 完整 é, codepoint 安全).
+    let mut reason = Vec::new();
+    for _ in 0..62 {
+        reason.extend_from_slice(&[0xC3, 0xA9]);
+    }
+    let mut out = [0u8; 125];
+    let n = ws_close_reason_payload(1000, &reason, &mut out);
+    assert_eq!(n, 124); // 2 + 122
+    assert_eq!(&out[2..n], &reason[..122]);
+    // 无截断 (123 恰好 = 61.5? 不: 61 × 2 = 122 < 123) — 整段保留
+    let mut short = Vec::new();
+    for _ in 0..61 {
+        short.extend_from_slice(&[0xC3, 0xA9]);
+    }
+    let n2 = ws_close_reason_payload(1000, &short, &mut out);
+    assert_eq!(n2, 124);
+    assert_eq!(&out[2..n2], &short);
+}
+
+#[test]
+fn close_reason_payload_truncate_3byte() {
+    // 中 = 3 bytes (0xE4 0xB8 0xAD). 41 × 中 = 123 恰好整除 -> 无回退.
+    let mut r41 = Vec::new();
+    for _ in 0..41 {
+        r41.extend_from_slice(&[0xE4, 0xB8, 0xAD]);
+    }
+    let mut out = [0u8; 125];
+    let n = ws_close_reason_payload(1000, &r41, &mut out);
+    assert_eq!(n, 125);
+    // 42 × 中 = 126 -> 截断 123 = 41 × 中 (123 % 3 == 0, 无回退)
+    let mut r42 = Vec::new();
+    for _ in 0..42 {
+        r42.extend_from_slice(&[0xE4, 0xB8, 0xAD]);
+    }
+    let n2 = ws_close_reason_payload(1000, &r42, &mut out);
+    assert_eq!(n2, 125);
+    assert_eq!(&out[2..125], &r41);
+}

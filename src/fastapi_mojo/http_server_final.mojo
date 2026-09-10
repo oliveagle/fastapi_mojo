@@ -29,6 +29,7 @@ from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
+from ws_directives import check_ws_specs  # 决策-51 (ADR-0026)
 from security import AuthResult, check_auth, _get_header
 from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii, missing_err_json)
 from file_form_check import validate_file_vs_form, file_part_fields
@@ -788,6 +789,35 @@ def register_routes(mut router: Router) raises:
     ws_private_h.set_data("ws_token", "secret")  # 升级 query 必须带 token=secret
     router.add_ws_route("/ws/private", ws_private_h)
 
+    # 决策-51 (ADR-0026): WS 精化 demo (Goal-0003 矩阵 #23, P23 六场景) —
+    # 声明式 _ws_* 指令 (解析/校验 = ws_directives, close-wait = bridge
+    # phase 5, FASTAPI_MOJO_WS_CLOSE_WAIT env, 默认 10s).
+    # P23-1: 回复后 close 1000 "bye" (+ close-wait)
+    var wsc1_h = Handler(KIND_WS_ECHO(), "ws_close_1000")
+    wsc1_h.set_data("_ws_close", "1000:bye")
+    router.add_ws_route("/ws/close", wsc1_h)
+    # P23-2: 无回复, close 4001 "custom reason" (+ close-wait)
+    var wsc2_h = Handler(KIND_WS_ECHO(), "ws_close_4001")
+    wsc2_h.set_data("_ws_no_reply", "1")
+    wsc2_h.set_data("_ws_close", "4001:custom reason")
+    router.add_ws_route("/ws/close/4001", wsc2_h)
+    # P23-3: 未处理异常 — 无 close 帧, TCP close (客户端 1006); log [ws-exc]
+    var wse1_h = Handler(KIND_WS_ECHO(), "ws_exc_boom")
+    wse1_h.set_data("_ws_raise", "kaboom")
+    router.add_ws_route("/ws-exc/boom", wse1_h)
+    # P23-4: WebSocketException 等价 — 无回复, close 4002 "ws-exc"
+    var wse2_h = Handler(KIND_WS_ECHO(), "ws_exc_close")
+    wse2_h.set_data("_ws_exc_close", "4002:ws-exc")
+    router.add_ws_route("/ws-exc/close", wse2_h)
+    # P23-5: BINARY 回复 (零拷贝, NUL 安全)
+    var wsb_h = Handler(KIND_WS_ECHO(), "ws_bin")
+    wsb_h.set_data("_ws_binary", "1")
+    router.add_ws_route("/ws/bin", wsb_h)
+    # P23-6: compact JSON TEXT 回复 (原始 UTF-8, 模板原样发送)
+    var wsj_h = Handler(KIND_WS_ECHO(), "ws_json")
+    wsj_h.set_data("_ws_json", "{\"a\":1,\"b\":\"中文\",\"c\":[1,2]}")
+    router.add_ws_route("/ws/json", wsj_h)
+
     # 决策-49 (ADR-0024): 任意异常类型 handler demo (Goal-0003 矩阵 #13).
     # _exception_raise = 声明式 raise 钩子 (endpoint body 抛异常的位置);
     # 无 env 表/路由表 -> 默认 500 "Internal Server Error" (P13-10);
@@ -855,6 +885,8 @@ def register_routes(mut router: Router) raises:
     check_body_schemas(router)
     # 决策-50: _state_set 注册期语法检查 (同策略)
     check_state_specs(router)
+    # 决策-51: _ws_* 指令注册期语法检查 (同策略)
+    check_ws_specs(router)
 
 
 def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:

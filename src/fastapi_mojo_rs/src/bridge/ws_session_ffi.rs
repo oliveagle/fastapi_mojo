@@ -4,7 +4,9 @@
 //!   - is_ws_upgrade / get_ws_key_slice / get_ws_protocol_slice (offer)
 //!   - ws_session_begin (101 握手) / ws_conn_upgrade (phase 0→3)
 //!   - ws_event_type / get_ws_path_slice / ws_last_opcode / ws_payload_slice
-//!   - ws_write_current / ws_write_text / ws_send_close
+//!   - ws_write_current / ws_write_text / ws_send_close / ws_write_binary /
+//!     ws_write_current_binary / ws_send_close_reason (ADR-0026)
+//!   - ws_set_closing (phase 5 close-wait) / get_ws_close_wait_ms (ADR-0026)
 //!   - ws_message_done (phase 4→3) / ws_conn_close (入队结束事件 + 关闭)
 //!   - get_ws_ping_max (env 一次性解析)
 //!
@@ -340,6 +342,89 @@ pub fn ws_conn_close(fd: c_int) {
         idx
     };
     let _ = idx;
+}
+
+/// BINARY 回复 (NUL-free 文本数据, 非 echo handler); ADR-0026 决策-51.
+/// data 不可含 NUL (FFI 约定同 ws_write_text).
+pub fn ws_write_binary(fd: c_int, data: &[u8]) -> c_int {
+    crate::ws::ws_write_message(fd, 2, data.as_ptr(), data.len())
+}
+
+/// 零拷贝: 待处理消息载荷原样以 BINARY 帧发回 (NUL 安全,
+/// `ws_write_current` 的 opcode-2 版); ADR-0026 决策-51.
+pub fn ws_write_current_binary(fd: c_int) -> c_int {
+    let table = match conn_table().lock() {
+        Ok(g) => g,
+        Err(_) => return 1,
+    };
+    let idx = match table.find(fd) {
+        Some(i) => i,
+        None => return 1,
+    };
+    let (payload, plen) = match table.get(idx) {
+        Some(c) if c.ws_mlen > 0 => (c.ws_reasm.as_ptr(), c.ws_mlen),
+        _ => return 1,
+    };
+    crate::ws::ws_write_message(fd, 2, payload, plen)
+}
+
+/// close 帧 (code + reason); wsproto 1.3.2 发送侧规范化 (1004/1006→1000,
+/// 1005→无 payload, reason UTF-8 截断 123B codepoint 安全); ADR-0026 决策-51.
+pub fn ws_send_close_reason(fd: c_int, code: c_int, reason: &[u8]) -> c_int {
+    let mut rbuf = [0u8; 256];
+    let n = reason.len().min(256);
+    rbuf[..n].copy_from_slice(&reason[..n]);
+    crate::ws::ws_write_close_reason(fd, code, rbuf.as_ptr())
+}
+
+/// 进入 WS close-wait (phase 5): 调用方已发 close 帧; ADR-0026 决策-51.
+/// 设 `phase=5` + `ws_close_at=now_ms()`; `FASTAPI_MOJO_WS_CLOSE_WAIT=0`
+/// 时直接入队 END 事件 + 关连接 (立即关, 无二次 close 帧).
+/// 返回 0 = ok, 1 = fd 未找到.
+pub fn ws_set_closing(fd: c_int) -> c_int {
+    let wait_ms = get_ws_close_wait_ms();
+    let mut table = match conn_table().lock() {
+        Ok(g) => g,
+        Err(_) => return 1,
+    };
+    let idx = match table.find(fd) {
+        Some(i) => i,
+        None => return 1,
+    };
+    if wait_ms == 0 {
+        ws_events().lock().expect("WS_EVENTS poisoned").push(fd, 2);
+        table.close(idx);
+        return 0;
+    }
+    if let Some(c) = table.get_mut(idx) {
+        c.phase = 5;
+        c.ws_close_at = now_ms() as i64;
+    }
+    0
+}
+
+/// FASTAPI_MOJO_WS_CLOSE_WAIT (默认 10000ms = uvicorn close_timeout 10.0s
+/// parity; 0 = 立即关); ADR-0026 决策-51. 一次性解析 + 缓存 — 与
+/// `get_ws_ping_max` 同款 AtomicI32 sentinel (允许测试重置).
+pub fn get_ws_close_wait_ms() -> c_int {
+    let v = WS_CLOSE_WAIT.load(Ordering::Acquire);
+    if v >= 0 {
+        return v;
+    }
+    let raw = std::env::var("FASTAPI_MOJO_WS_CLOSE_WAIT").ok();
+    let n = match raw {
+        Some(s) if !s.is_empty() => s.parse::<c_int>().unwrap_or(10000).max(0),
+        _ => 10000,
+    };
+    let _ = WS_CLOSE_WAIT.compare_exchange(-1, n, Ordering::AcqRel, Ordering::Acquire);
+    n
+}
+static WS_CLOSE_WAIT: AtomicI32 = AtomicI32::new(-1);
+
+/// 仅测试: 重置 close-wait 缓存 (sentinel 同 get_ws_ping_max).
+#[cfg(test)]
+pub fn reset_ws_close_wait_cache_for_test() {
+    WS_CLOSE_WAIT.store(-1, Ordering::Release);
 }
 
 /// FASTAPI_MOJO_WS_PING_MAX (默认 3); 0 = 禁用保活. 端口 C `get_ws_ping_max` (§1369-1382).
