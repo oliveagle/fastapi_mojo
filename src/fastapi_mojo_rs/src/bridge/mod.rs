@@ -56,6 +56,7 @@ pub mod multipart;
 pub mod time_util;
 
 pub mod regex;
+pub mod middleware;
 
 #[cfg(test)]
 mod cmd_tests;
@@ -113,3 +114,6 @@ mod multipart_tests;
 
 #[cfg(test)]
 mod regex_tests;
+
+#[cfg(test)]
+mod middleware_tests;

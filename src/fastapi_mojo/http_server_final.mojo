@@ -30,6 +30,7 @@ from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE, KIND_FILE
 from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
+from mw_spec import MWSpec, parse_mw_spec, check_mw_spec, mw_plan_request
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
 from ws_directives import check_ws_specs  # 决策-51 (ADR-0026)
@@ -454,6 +455,23 @@ def register_routes(mut router: Router) raises:
     ctx_h.set_data("_reads_headers", "X-Custom,User-Agent")
     ctx_h.set_data("_response_headers", "X-Handler: ctx;X-Server: fastapi_mojo")
     router.add_route("/ctx", "GET", ctx_h)
+
+    # 决策-55 (ADR-0030): 用户中间件 demo 目标.
+    #   /mw/hdr: HDR 动词目标 (响应体稳定, 外层 mw 加头).
+    #   /mw/reqhdr: _reads_headers 回显合成请求头 (REQHDR 注入).
+    #   /mw/map-new: 仅经 MAP:/mw/map-old:/mw/map-new 可达 (直连路径未注册).
+    var mw_hdr_h = Handler(KIND_ECHO(), "mw_hdr")
+    mw_hdr_h.set_data("message", "mw response target")
+    router.add_route("/mw/hdr", "GET", mw_hdr_h)
+
+    var mw_reqhdr_h = Handler(KIND_ECHO(), "mw_reqhdr")
+    mw_reqhdr_h.set_data("message", "mw req header target")
+    mw_reqhdr_h.set_data("_reads_headers", "X-Mw-Inj")
+    router.add_route("/mw/reqhdr", "GET", mw_reqhdr_h)
+
+    var mw_mapnew_h = Handler(KIND_ECHO(), "mw_map_new")
+    mw_mapnew_h.set_data("message", "mapped here")
+    router.add_route("/mw/map-new", "GET", mw_mapnew_h)
 
     # 嵌套 JSON demo: KIND_ECHO 自动把 resp_data 序列化, 我们构造 resp_data 注入嵌套.
     # 但 KIND_ECHO 当前直接 dict copy 不支持嵌套. 改用 KIND_STATIC + 预构造的 body
@@ -1013,7 +1031,7 @@ def register_routes(mut router: Router) raises:
     check_param_constraints(router)
 
 
-def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
+def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) raises:
     """HTTP event loop (poll + dispatch + WS), reusable across applications.
     Routes come from the caller-supplied router (cp_app.mojo plugs in app routes).
     Returns when a shutdown signal is received.
@@ -1074,6 +1092,28 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
         var path = span_to_str(external_call["get_path_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
         var query = span_to_str(external_call["get_query_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
         var body_str = span_to_str(external_call["get_body_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+
+        # 决策-55 (ADR-0030): 用户中间件请求面 (outermost→innermost, env 逆序).
+        # set_req_id 在任何响应前 (bridge BODY {req_id} / LOG 行用);
+        # REQHDR 注入合成头 (CI 先注入先胜); MAP 重写 path; BLOCK 短路早响应.
+        _ = external_call["set_req_id", Int](req_id.as_c_string_slice())
+        var mw_r = mw_plan_request(mw_spec, method, path, query, req_id)
+        var hdr_n = len(mw_r.req_hdr_names)
+        var hk = 0
+        while hk < hdr_n:
+            var hn = mw_r.req_hdr_names[hk]
+            var hv = mw_r.req_hdr_vals[hk]
+            _ = external_call["inject_request_header", Int](hn.as_c_string_slice(), hv.as_c_string_slice())
+            hk += 1
+        path = mw_r.path
+        if mw_r.block_status.byte_length() > 0:
+            var mw_sl = standard_status_line(Int(mw_r.block_status))
+            var mw_body = mw_r.block_body
+            var mw_dur = mw_timing(mw_chain, start_ms)
+            _ = external_call["send_text_response_status", Int](cfd, mw_sl.as_c_string_slice(), mw_body.as_c_string_slice())
+            mw_logging(mw_chain, req_id, method, mw_r.path, query, mw_sl, mw_dur)
+            external_call["conn_done", NoneType](cfd, False)
+            continue
 
         # Handle OPTIONS preflight (CORS)
         if method == "OPTIONS":
@@ -1734,6 +1774,18 @@ def main() raises:
     mw_chain.add(Middleware("timing"))
     print("Middleware: request_id, logging, timing")
 
+    # 决策-55 (ADR-0030): 用户自定义中间件 env (声明式; 畸形 fail-fast, 服务不启动).
+    var mw_env = getenv("FASTAPI_MOJO_MIDDLEWARE")
+    var mw_spec = MWSpec()
+    if mw_env != "":
+        if not check_mw_spec(mw_env):
+            external_call["bridge_fail", NoneType]()
+            return
+        mw_spec = parse_mw_spec(mw_env)
+        print("User middleware: " + String(len(mw_spec.mws)) + " (FASTAPI_MOJO_MIDDLEWARE)")
+    else:
+        print("User middleware: (none)")
+
     # F6: metrics 初始化 (记录进程启动时间, 供 uptime gauge 派生).
     external_call["metrics_init", NoneType]()
 
@@ -1758,7 +1810,7 @@ def main() raises:
     # 在服务开始接请求之前; 任一命令失败 -> bridge_fail (服务不启动).
     run_lifespan_startup(worker_id)
 
-    serve_forever(router, mw_chain)
+    serve_forever(router, mw_chain, mw_spec)
 
     # Lifespan (决策-36): shutdown 命令 — serve_forever 返回 (收到停止信号) 后,
     # 仅主进程执行; 失败只记日志, 不阻塞进程退出.

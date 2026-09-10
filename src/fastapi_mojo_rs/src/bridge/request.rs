@@ -66,7 +66,11 @@ pub struct CurrentRequest {
     pub range_len: usize,
     /// 决策-48: 当前请求 If-Range (空 = 未带).
     pub if_range: [u8; 256],
-    pub if_range_len: usize
+    pub if_range_len: usize,
+    /// 决策-55: 当前请求 ID (Mojo 侧 request-id 中间件输出; NUL 结尾; 0 = 未设).
+    /// 供 BODY `{req_id}` 插值 + `[mw]` 日志行 (send_response 前由 set_req_id 写入).
+    pub req_id: [u8; 64],
+    pub req_id_len: usize,
 }
 
 impl CurrentRequest {
@@ -102,6 +106,8 @@ impl CurrentRequest {
             range_len: 0,
             if_range: [0u8; 256],
             if_range_len: 0,
+            req_id: [0u8; 64],
+            req_id_len: 0,
         }
     }
 }
@@ -146,6 +152,10 @@ pub fn set_http_fields(method: &[u8], path: &[u8], query: &[u8], protocol_11: bo
     g.query_len = qlen;
     g.protocol_11 = protocol_11;
     g.close_after_response = close_after;
+    // 决策-55: 每请求复位 (req_id 由 Mojo 侧随后 set_req_id; 合成头表清空)
+    g.req_id = [0u8; 64];
+    g.req_id_len = 0;
+    synth_clear();
     g.active_fd = fd;
     g.active_phase = 2;  // HTTP dispatch
     g.ws_event_type = 0;
@@ -428,6 +438,72 @@ pub fn get_body_slice_inner() -> CSlice {
     }
 }
 
+// ========== 决策-55 (ADR-0030): middleware 请求上下文 / 合成头 ==========
+
+/// 当前请求上下文 (决策-55 响应面动词用: BODY 插值 / `[mw]` 日志).
+#[derive(Clone, Debug, Default)]
+pub struct ReqCtx {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub req_id: String,
+}
+
+/// 当前请求 (method, path, query, req_id) — NUL 结尾缓冲 → String.
+pub fn get_req_ctx() -> ReqCtx {
+    let g = lock_current();
+    let to_s = |b: &[u8], l: usize| String::from_utf8_lossy(&b[..l]).into_owned();
+    ReqCtx {
+        method: to_s(&g.method, g.method_len),
+        path: to_s(&g.path, g.path_len),
+        query: to_s(&g.query, g.query_len),
+        req_id: to_s(&g.req_id, g.req_id_len),
+    }
+}
+
+/// 写入当前请求 ID (Mojo 侧每请求一次; ≤63B, NUL 结尾).
+pub fn set_req_id(id: &str) -> i32 {
+    let mut g = lock_current();
+    let b = id.as_bytes();
+    let n = b.len().min(63);
+    g.req_id[..n].copy_from_slice(&b[..n]);
+    g.req_id[n] = 0;
+    g.req_id_len = n;
+    0
+}
+
+/// 合成请求头表 (REQHDR 动词注入; 独立全局 — CurrentRequest
+/// 保持 const 可构造, static 初始化约束). 注入序 = 请求面执行序
+/// (outermost 先注入; 查找先注入先胜, CI).
+static SYNTH_HDRS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// 每请求清空 (set_http_fields 调用).
+pub fn synth_clear() {
+    SYNTH_HDRS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// 追加合成头 (cap 16). 0 = 成功, 1 = 满.
+pub fn synth_push(name: &str, value: &str) -> i32 {
+    let mut v = SYNTH_HDRS.lock().unwrap_or_else(|e| e.into_inner());
+    if v.len() >= 16 {
+        return 1;
+    }
+    v.push((name.trim().to_string(), value.trim().to_string()));
+    0
+}
+
+/// 首个匹配 (CI, trim); 返回拥有副本.
+pub fn synth_lookup(name: &str) -> Option<String> {
+    let v = SYNTH_HDRS.lock().unwrap_or_else(|e| e.into_inner());
+    let want = name.trim().to_ascii_lowercase();
+    for (n, val) in v.iter() {
+        if n.to_ascii_lowercase() == want {
+            return Some(val.clone());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,4 +606,5 @@ mod tests {
         assert!(!current_accepts_gzip());
     }
 }
+
 

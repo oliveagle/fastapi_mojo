@@ -31,6 +31,7 @@ use std::os::raw::{c_char, c_int, c_long, c_void};
 use super::request::{current_accepts_gzip, current_origin, get_close_after_response, set_last_status};
 use super::cors;
 use super::gzip;
+use super::middleware;
 use super::response::{build_preflight_response, build_response_headers, get_content_type, json_escape};
 use super::state::get_static_dir;
 
@@ -93,6 +94,23 @@ pub fn send_response(
     include_body: bool,
     extra: Option<&str>,
 ) -> c_int {
+    // 决策-55 (ADR-0030): 用户自定义中间件响应面 — GZip 判定前:
+    // 用户 mw 位于固定 GZip/CORS env 层之内; BODY 替换重算 Content-Length
+    // (修上游 stale-CL h11 悬机, P-MW-5); 未设 env = 零开销直通.
+    let (mw_status, mw_body, mw_extra, mw_ct, mw_log) =
+        middleware::apply_response(status, body, extra);
+    let status = mw_status.as_str();
+    let body = mw_body.as_slice();
+    let extra: Option<&str> = if mw_extra.is_empty() {
+        None
+    } else {
+        Some(mw_extra.as_str())
+    };
+    let content_type = if mw_ct.is_empty() {
+        content_type
+    } else {
+        mw_ct.as_str()
+    };
     // 决策-40: GZip 判定 + 压缩 (gzip_result 持有压缩 body 生命期)
     let gzip_result: Option<Vec<u8>> =
         if gzip::should_gzip(
@@ -134,6 +152,9 @@ pub fn send_response(
     }
     if include_body && !body_out.is_empty() && send_all(fd, body_out) != 0 {
         return -1;
+    }
+    if mw_log {
+        middleware::log_line(status);
     }
     0
 }

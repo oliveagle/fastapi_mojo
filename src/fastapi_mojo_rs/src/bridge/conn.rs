@@ -268,6 +268,12 @@ pub fn extract_request_header(name: &[u8]) -> i32 {
         set_header_value(name, b"");
         return -2;
     }
+    // 决策-55 (ADR-0030): 合成请求头 (REQHDR 动词) — 先查
+    // (注入序, 先注入先胜, CI); 未命 → 原 hdr 块.
+    if let Some(v) = super::request::synth_lookup(std::str::from_utf8(name).unwrap_or("")) {
+        set_header_value(name, v.as_bytes());
+        return 0;
+    }
     let t = conn_table().lock().unwrap_or_else(|e| e.into_inner());
     let active_idx = match t.active() {
         Some(i) => i,

@@ -749,3 +749,34 @@ pub extern "C" fn mp_part_save(i: c_int, path: *const c_char) -> c_int {
     let p = unsafe { c_str_lossy(path) };
     mp_part_save_inner(i as usize, &p) as c_int
 }
+
+// =====================================================================
+// 55. Middleware (decision-55, ADR-0030): user custom middleware FFI.
+//     set_req_id: Mojo-side request-id output (per request) -> CurrentRequest.
+//     inject_request_header: REQHDR verb synthetic header (per verb).
+// =====================================================================
+
+/// Decision-55 (ADR-0030): current request ID (NUL-terminated; the Mojo side
+/// passes the request-id middleware's output) — stored for BODY `{req_id}`
+/// interpolation and the `[mw]` log line. 0 = ok, -1 = null.
+#[no_mangle]
+pub extern "C" fn set_req_id(id: *const c_char) -> c_int {
+    if id.is_null() {
+        return -1;
+    }
+    let s = unsafe { c_str_lossy(id) };
+    super::request::set_req_id(&s)
+}
+
+/// Decision-55 (ADR-0030): inject a synthetic request header (REQHDR verb)
+/// — visible to extract_request_header/get_header_value_ci (first injected
+/// wins, CI). 0 = ok, 1 = cap reached, -1 = null.
+#[no_mangle]
+pub extern "C" fn inject_request_header(name: *const c_char, value: *const c_char) -> c_int {
+    if name.is_null() || value.is_null() {
+        return -1;
+    }
+    let n = unsafe { c_str_lossy(name) };
+    let v = unsafe { c_str_lossy(value) };
+    super::request::synth_push(&n, &v)
+}

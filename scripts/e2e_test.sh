@@ -2118,6 +2118,188 @@ B=$(curl -s --max-time 10 "$BASE/typed?count=abc&verbose=true")
 if [[ "$B" == *'"loc":["query","count"],"msg":"Input should be a valid integer, unable to parse string as an integer","type":"int_parsing","input":"abc"'* ]]; then pass "CP-24 /typed int_parsing full msg regression"
 else fail "CP-24 /typed regression" "got: ${B:0:200}"; fi
 
+
+# --- User middleware (决策-55, ADR-0030, Goal-0003 矩阵 #14) ---------------------
+# 声明式 env FASTAPI_MOJO_MIDDLEWARE (Mojo 1.0.0 无闭包, @app.middleware("http") 等价;
+# GZip 决策-40 / CORS 决策-42 / 异常 handler 决策-49 先例). 栈序 mw1=innermost...mwN=outermost:
+#   请求面 (MAP/REQHDR/BLOCK) Mojo dispatch outermost→innermost, 路由前;
+#   响应面 (HDR/STATUS/BODY/LOG) bridge send_response innermost→outermost (env 正序), GZip 前;
+#   短路 (BLOCK 于 mwK): 响应仅过 index>k 外层响应动词 (bridge plan_request_path 重推导).
+# 零 python3 (Track B 决策-22): curl -D/-o + grep/tr. 4 副 server (各自 env) + 主 server 零回归.
+echo "== User middleware (决策-55, ADR-0030) =="
+
+# --- Server A: 请求面 (MAP/REQHDR) + 响应面 (HDR/LOG) --------------------------
+#   mw1 (innermost) = HDR:X-Mw:1,LOG (响应); mw2 (outermost) = MAP:/mw/map-old:/mw/map-new,REQHDR:X-Mw-Inj:injected (请求).
+MW_PORT=$((PORT + 113))
+MW_LOG="$TMP/mw_a.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_MIDDLEWARE="HDR:X-Mw:1,LOG;MAP:/mw/map-old:/mw/map-new,REQHDR:X-Mw-Inj:injected" \
+    "$BIN" --port "$MW_PORT" > "$MW_LOG" 2>&1 ) &
+MW_PID=$!
+sleep 5
+MW_READY=0
+for _ in $(seq 1 30); do
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$MW_PORT/health" 2>/dev/null)" == *healthy* ]]; then MW_READY=1; break; fi
+    sleep 0.3
+done
+if [[ "$MW_READY" == 1 ]]; then
+    MW_BASE="http://127.0.0.1:$MW_PORT"
+    # MW-1: HDR 动词 — /health 响应头带 X-Mw: 1
+    if curl -s -D - -o /dev/null "$MW_BASE/health" | tr -d '\r' | grep -qi '^X-Mw: *1'; then
+        pass "MW-1 HDR: /health has X-Mw: 1"
+    else
+        fail "MW-1 HDR: /health has X-Mw: 1"
+    fi
+    # MW-2: REQHDR 合成请求头 — /mw/reqhdr _reads_headers 回显 header_X-Mw-Inj: injected
+    B=$(curl -s --max-time 10 "$MW_BASE/mw/reqhdr")
+    if printf '%s' "$B" | grep -qE '"header_X-Mw-Inj":? *"injected"'; then
+        pass "MW-2 REQHDR: /mw/reqhdr echoes header_X-Mw-Inj: injected"
+    else
+        fail "MW-2 REQHDR: /mw/reqhdr echoes header_X-Mw-Inj: injected" "got: ${B:0:200}"
+    fi
+    # MW-3: MAP 路径重写 — /mw/map-old → /mw/map-new (message + path 均 post-MAP)
+    B=$(curl -s --max-time 10 "$MW_BASE/mw/map-old")
+    if printf '%s' "$B" | grep -q '"message": "mapped here"' && printf '%s' "$B" | grep -qE '"path": *"/mw/map-new"'; then
+        pass "MW-3 MAP: /mw/map-old → mapped here + path=/mw/map-new"
+    else
+        fail "MW-3 MAP: /mw/map-old → mapped here + path=/mw/map-new" "got: ${B:0:200}"
+    fi
+    # MW-4: LOG 动词 — [mw] 行 (原始 path, 无 query → 无 ?) 落 server stdout
+    if grep -aqE '^\[mw\] req-[0-9]+ GET /health -> 200 OK' "$MW_LOG"; then
+        pass "MW-4 LOG: [mw] line for GET /health"
+    else
+        fail "MW-4 LOG: [mw] line for GET /health" "see $MW_LOG"
+    fi
+else
+    fail "MW-A side server did not start" "see $MW_LOG"
+fi
+kill -TERM "$MW_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$MW_PID" 2>/dev/null
+
+# --- Server B: 响应面 (STATUS + BODY, 含重算 Content-Length) ------------------
+#   mw1 = STATUS:200:201,BODY:GOT {method} {path} {status} {req_id}
+#   响应体被替换 → /health 不再是 healthy JSON (readiness 须查 GOT).
+MW2_PORT=$((PORT + 114))
+MW2_LOG="$TMP/mw_b.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_MIDDLEWARE="STATUS:200:201,BODY:GOT {method} {path} {status} {req_id}" \
+    "$BIN" --port "$MW2_PORT" > "$MW2_LOG" 2>&1 ) &
+MW2_PID=$!
+sleep 5
+MW2_READY=0
+for _ in $(seq 1 30); do
+    if curl -s --max-time 1 "http://127.0.0.1:$MW2_PORT/health" 2>/dev/null | grep -q GOT; then MW2_READY=1; break; fi
+    sleep 0.3
+done
+if [[ "$MW2_READY" == 1 ]]; then
+    MW2_BASE="http://127.0.0.1:$MW2_PORT"
+    # MW-5: STATUS 动词 — 200 → 201
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$MW2_BASE/health")
+    if [[ "$code" == "201" ]]; then
+        pass "MW-5 STATUS: /health 200 → 201"
+    else
+        fail "MW-5 STATUS: /health 200 → 201" "code=$code"
+    fi
+    # MW-6: BODY 动词 — 替换 body (插值 {method}{path}{status}{req_id}) + CT → text/plain
+    B=$(curl -s --max-time 10 "$MW2_BASE/health")
+    if [[ "$B" == "GOT GET /health 201 req-"* ]] && curl -s -D - -o /dev/null "$MW2_BASE/health" | tr -d '\r' | grep -qi '^content-type: *text/plain'; then
+        pass "MW-6 BODY: /health → 'GOT GET /health 201 req-*' + text/plain"
+    else
+        fail "MW-6 BODY: /health → 'GOT GET /health 201 req-*' + text/plain" "got: ${B:0:200}"
+    fi
+else
+    fail "MW-B side server did not start" "see $MW2_LOG"
+fi
+kill -TERM "$MW2_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$MW2_PID" 2>/dev/null
+
+# --- Server C: HDR 同名原位替换 (后写胜, 外层赢) -------------------------------
+#   mw1 = HDR:X-Same:inner (innermost); mw2 = HDR:X-Same:outer (outermost) → 单行 X-Same: outer
+MW3_PORT=$((PORT + 115))
+MW3_LOG="$TMP/mw_c.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_MIDDLEWARE="HDR:X-Same:inner;HDR:X-Same:outer" \
+    "$BIN" --port "$MW3_PORT" > "$MW3_LOG" 2>&1 ) &
+MW3_PID=$!
+sleep 5
+MW3_READY=0
+for _ in $(seq 1 30); do
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$MW3_PORT/health" 2>/dev/null)" == *healthy* ]]; then MW3_READY=1; break; fi
+    sleep 0.3
+done
+if [[ "$MW3_READY" == 1 ]]; then
+    MW3_BASE="http://127.0.0.1:$MW3_PORT"
+    # MW-7: 两个同名 HDR (inner/outer) → 仅 1 行, 值 = outer (后写胜)
+    curl -s -D "$TMP/mw3_hdr" -o /dev/null "$MW3_BASE/health"
+    tr -d '\r' < "$TMP/mw3_hdr" > "$TMP/mw3_hdr_c"
+    n_same=$(grep -ci '^X-Same:' "$TMP/mw3_hdr_c")
+    val=$(grep -i '^X-Same:' "$TMP/mw3_hdr_c" | head -1)
+    if [[ "$n_same" == "1" ]] && [[ "$val" == "X-Same: outer" ]]; then
+        pass "MW-7 same-name HDR: single line, outer wins"
+    else
+        fail "MW-7 same-name HDR: single line, outer wins" "n=$n_same val=$val"
+    fi
+else
+    fail "MW-C side server did not start" "see $MW3_LOG"
+fi
+kill -TERM "$MW3_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$MW3_PID" 2>/dev/null
+
+# --- Server D: BLOCK 短路 (早期响应, 响应仅过外层) ----------------------------
+#   mw1 (innermost) = HDR:X-Inner:1 (响应);
+#   mw2 = BLOCK:418:early-blocked:* (请求) + HDR:X-Mid:1 (响应);
+#   mw3 (outermost) = HDR:X-Outer:1 (响应).
+#   blocker = mw2 (index 1) → 仅 index>1 (mw3) 响应动词应用 → X-Outer 仅此.
+MW4_PORT=$((PORT + 116))
+MW4_LOG="$TMP/mw_d.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_MIDDLEWARE="HDR:X-Inner:1;BLOCK:418:early-blocked:*,HDR:X-Mid:1;HDR:X-Outer:1" \
+    "$BIN" --port "$MW4_PORT" > "$MW4_LOG" 2>&1 ) &
+MW4_PID=$!
+sleep 5
+MW4_READY=0
+for _ in $(seq 1 30); do
+    if curl -s --max-time 1 "http://127.0.0.1:$MW4_PORT/health" 2>/dev/null | grep -q early-blocked; then MW4_READY=1; break; fi
+    sleep 0.3
+done
+if [[ "$MW4_READY" == 1 ]]; then
+    MW4_BASE="http://127.0.0.1:$MW4_PORT"
+    # MW-8: BLOCK 短路 — 418 + body 'early-blocked' + X-Outer 在 / X-Mid,X-Inner 无
+    curl -s -D "$TMP/mw4_hdr" -o "$TMP/mw4_body" "$MW4_BASE/health"
+    tr -d '\r' < "$TMP/mw4_hdr" > "$TMP/mw4_hdr_c"
+    code=$(head -1 "$TMP/mw4_hdr_c" | awk '{print $2}')
+    bdy=$(cat "$TMP/mw4_body")
+    if [[ "$code" == "418" ]] && [[ "$bdy" == "early-blocked" ]] \
+        && grep -qi '^X-Outer: *1' "$TMP/mw4_hdr_c" \
+        && ! grep -qi '^X-Mid:' "$TMP/mw4_hdr_c" \
+        && ! grep -qi '^X-Inner:' "$TMP/mw4_hdr_c"; then
+        pass "MW-8 BLOCK short-circuit: 418 + body + only X-Outer"
+    else
+        fail "MW-8 BLOCK short-circuit: 418 + body + only X-Outer" "code=$code bdy=$bdy"
+    fi
+    # MW-9: BLOCK 早期响应 CT = text/plain (路由被跳过, 非 JSON)
+    if grep -qi '^content-type: *text/plain' "$TMP/mw4_hdr_c"; then
+        pass "MW-9 BLOCK: content-type text/plain"
+    else
+        fail "MW-9 BLOCK: content-type text/plain"
+    fi
+else
+    fail "MW-D side server did not start" "see $MW4_LOG"
+fi
+kill -TERM "$MW4_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$MW4_PID" 2>/dev/null
+
+# --- MW-10: 主 server 无 FASTAPI_MOJO_MIDDLEWARE → 零行为变更 (零回归) ---------
+if ! curl -s -D - -o /dev/null "$BASE/health" | tr -d '\r' | grep -qi '^X-Mw:'; then
+    pass "MW-10 no env: main server zero change (no X-Mw)"
+else
+    fail "MW-10 no env: main server zero change (no X-Mw)" "unexpected X-Mw header"
+fi
+
 # --- summary ---------------------------------------------------------------------
 
 
