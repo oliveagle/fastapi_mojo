@@ -867,7 +867,99 @@
   ldd 仅 libc / env -i 干净启动（health + /di-cache 200）/ binary **3.4M**
   （3,556,048 B，≤4.2M；vs 决策-46 +25 KB）/ `find src -name '*.c'` = 0
   保持。
-*最后更新：2026-09-10（**决策-47 Depends use_cache**（ADR-0022, Goal-0003 P2 矩阵 #9）：
+- **已决策-48**：**FileResponse / StreamingResponse — Rust bridge 协议层
+  （ADR-0023，Goal-0003 P1 矩阵 #10 — 对标矩阵 #10 ✅ 全量）**：
+  1. **`file_protocol.rs`（230 行，纯函数，零 I/O）**：`parse_range_header`
+     （**顺序敏感**：无 `=` → 400；单位≠bytes → 400；**>100 段 → `[]`
+     → 200 quirk**（starlette `max_ranges=100`）；逐段解析（空/`-`/无
+     `-`/非数字跳过；suffix `-N` / open `S-` / **end≥size clamp**）；
+     0 有效段 → 400；**start 越界 → 416（先于 start≥end → 400）**；
+     单段直返；多段排序 + 重叠合并）+ `fmt_rfc1123`（civil_from_days）
+     + `rfc5987_quote` / `build_content_disposition`（quote 变化 →
+     `filename*=utf-8''{q}`）+ `apply_charset_rule`（`text/*` + 无
+     `charset=` → 追加）+ `etag_from_mtime_size`（`"md5(f64Display(
+     mtime) + "-" + size)"`）+ `multipart_content_length`（闭式公式，
+     p10c MP2 锚定 242）+ `generate_boundary`（xorshift32 ×6 取前 26
+     小写 hex，`secrets.token_hex(13)` parity）。
+  2. **`file_serve.rs`（416 行，I/O 层，FFI ×2）**：`LinuxStat`
+     **144B glibc `struct stat` 布局**（`stat(2)` 整写 — 128B 缓冲 =
+     栈 OOB 写；偏移守护测试）+ **`S_IFMT = 0o170000`**（初版
+     `0o070000` 少一位八进制 → REG 恒 false 全 500，🔴 实测 catch）
+     + 64KB 块 lseek/read/send 直发（上游 `chunk_size`）+
+     **`send_file_response`（单点 FFI）**：200 全量 / 206 单段
+     （`Content-Range bytes s-e/size`）/ 206 multipart（头无 CR）/
+     If-Range = ETag 或 Last-Modified（字符串相等）才用 Range / HEAD
+     仅头 / 400×4 精确消息 / 416（`bytes */size` + CL 0 + 空体）/ 500
+     （缺失/非普通文件，**无文件头**）+ **`send_streaming_response`**
+     （TE chunked `{len:x}\r\n{data}\r\n…0\r\n\r\n`；media 空 =
+     **无 CT quirk**；status/extra 透传，F9 同机制）。
+  3. **Mojo 接线（声明式，SSE 分支同型）**：`KIND_FILE = 300`
+     （`handler.mojo` 495 ≤500；声明面 `_file_path`（静态目录相对/
+     绝对）/ `_file_media`（空 = guess + charset 规则）/ `_file_name` /
+     `_file_cdt`（空 = attachment）/ `_file_status`（默认 `200 OK`）/
+     `_response_headers`（不得覆写 CT/ETag））+ dispatch FILE 分支
+     （`http_server_final` 1332 → 1444：cfd 透传 + `continue`）+
+     **8 个 demo 路由**（`/file` / `/file-name` / `/file-inline` /
+     `/file-missing` / `/file-201` / `/stream` / `/stream-json` /
+     `/stream-empty`）+ `static/filedemo.bin`（30B，build 自动嵌入）。
+  4. **MD5（`crypto.rs`，RFC 1321）+ libm 零化**：K 表 **const 嵌入**
+     （`K[i] = floor(2^32 × |sin(i+1)|)`；(i+1) **本身是弧度** — 初版
+     `to_radians()` 双转换 = 系统性错表，🔴 实测 catch；两个「RFC
+     向量」凭记忆抄错，一律以 md5sum/hashlib oracle 为准）。运行时
+     `f64::sin` 会链入 `libm.so.6` **破坏 CI ldd 门禁**（ci.yml 禁
+     libm.so）→ const 256B `.rodata`，值由 glibc 正确舍入 sin 逐位
+     导出，`md5_k_table_matches_sin_derivation` 测试守护 const ≡
+     派生 → **ldd 保持仅 libc**（此前决策-48 构建曾回归 libm，本项
+     修闭）。
+  5. **上游语义锚点（starlette 1.6.0 源码 + uvicorn 0.52.4 活体，
+     /tmp/fresp_probe p10*）**：**HEAD → 405 quirk**（`APIRoute`
+     methods = `{GET}` 不含 HEAD — 与 starlette 内置 Route /
+     `/openapi.json`（`{GET, HEAD}`）不同；带 Range 也 405）→ 本
+     实现 HEAD = 仅头（200/206，RFC 9110 语义，更优）；**101+ 段
+     quirk → 200 全量**；**end≥size clamp → 206**（`bytes=0-30` 对
+     30B 非 416）；重叠段合并（`0-1,1-3` → `0-3`）；**If-None-Match /
+     If-Modified-Since 上游 FileResponse 同样不处理**（忽略 = 200
+     全量，parity 非偏差）；multipart boundary = `token_hex(13)`
+     （26 小写 hex，浏览器 95-96 bit 熵对齐）；400/416/500 = 全新
+     PlainTextResponse（无文件头，`Internal Server Error` = 21B）。
+  6. **文档化偏差（ADR-0023 §3.5 ×7）**：① ORJSON/UJSON ≡ 原生
+     json.mojo（既有 F3 决策，列此完备）；② HEAD 仅头 vs 上游 405
+     quirk（**更优**）；③ GZip（决策-40）不介入 file/streaming
+     （上游 starlette 1.6.0 压缩它们 — body iterator 包装，本实现
+     GZip 在 send_response 单点；P2 剩余面）；④ **整秒 mtime 的
+     ETag**：上游 `str(N.0) = "N.0"` vs 本实现最短 Display `"N"`
+     （opaque token，稳定性/条件匹配不受影响；**非整秒 mtime 与
+     上游逐字节相同** — 活体交叉验证）；⑤ i64 溢出 Range 段 →
+     跳过（全跳 → 400）vs 上游无界 int → 416（仅 >9.2 EB 可触发）；
+     ⑥ `_file_path` = 静态目录相对声明面 + extra 头不得覆写
+     已计算 CT/ETag（上游 `headers=` 可覆写 CT — 收窄，防 MIME
+     混淆，P2 剩余面）；⑦ If-None-Match / If-Modified-Since 忽略
+     = parity（非偏差，列此完备）。
+  验收：e2e **351/351**（319 + 32 FR：200 精确体 / 头（LM vs
+  `date -u -R`）/ **ETag = md5(f64repr(mtime)-size) 独立交叉验证**
+  （fmtool f64repr × md5sum oracle）/ 201 / CD attachment + RFC5987
+  inline / 500 无文件头 / 206 单段·suffix·open·**clamp** / 416
+  （`bytes */30` CL 0）/ 400×4 精确消息 / 101 段 quirk → 200 /
+  merge 重叠 / **multi-range 精确体**（boundary 抽取 + printf +
+  cmp，CL = 246 闭式手算，26-hex，头无 CR）/ If-Range ETag·LM·
+  stale / INM·IMS 忽略 / HEAD 200·206 **raw-socket 线级空体** /
+  chunked×3（no-CT quirk / 202+X-Custom / 空体）/ **raw-socket
+  chunked 帧级**（`6\r\nhello ` / `3\r\n中` / `0\r\n\r\n`）/
+  ×10 稳定）/ cargo **407/0/4**（354 + 53：file_protocol 30 +
+  file_serve 15 + MD5 8）/ clippy `-D warnings` 0 警告（双
+  crate）/ bench 6 场景 0 errors（get_root_10k_100c **37,665
+  req/s**，历史区间 32.9k–43.9k 内）/ **ldd 仅 libc**（libm 零化）/
+  env -i 干净启动（health + /file 200 30B + /stream 200 14B）/
+  binary **3.5M**（3,631,104 B，≤4.2M；vs 决策-47 +75 KB）/
+  `find src -name '*.c'` = 0 保持
+
+*最后更新：2026-09-10（**决策-48 FileResponse/StreamingResponse**（ADR-0023, Goal-0003 P1 矩阵 #10）：
+Rust bridge 文件/流式协议层（file_protocol 230 纯函数: Range 7 步顺序解析（>100 段 → 200 quirk）/RFC1123/RFC5987/CD/charset/etag/multipart CL 闭式/26-hex boundary + file_serve 416: 144B glibc stat/64KB 块直发/单点 FFI×2: send_file_response + send_streaming_response）+
+Mojo 声明式 KIND_FILE=300（handler 495 ≤500）+ dispatch FILE 分支（1332→1444）+ 8 demo 路由 + filedemo.bin(30B) build 自动嵌入 +
+**MD5 K 表 const 嵌入 = libm 零化**（运行时 f64::sin 链入 libm.so.6 破 CI ldd 门禁 → const 256B .rodata, glibc 正确舍入 sin 逐位导出, md5_k_table_matches_sin 守护 ≡ 派生 → ldd 回归仅 libc）;
+文档化偏差 ×7（ADR-0023 §3.5: ① ORJSON≡json.mojo（既有）② HEAD 仅头 vs 上游 405 quirk（APIRoute methods={GET}, 更优）③ GZip 不介入 file/streaming（上游压缩, P2 剩余）④ 整秒 mtime etag "N" vs 上游 "N.0"（opaque; 非整秒逐字节相同）⑤ i64 溢出段 → 400 vs 上游 416（>9.2EB 不可达）⑥ _file_path 静态目录相对 + extra 不得覆写 CT/ETag（收窄）⑦ INM·IMS 忽略 = parity（列此完备））;
+验收: e2e **351/351**（319+32 FR, 含 multi-range 精确体 CL 246 / If-Range×3 / HEAD raw-socket 线级空体 / raw-socket chunked 帧级 / etag = md5(f64repr- size) md5sum 交叉验证）/ cargo **407/0/4**（354+53: file_protocol 30 + file_serve 15 + MD5 8）/ clippy 0 警告(双 crate) / bench 0 errors(37.7k req/s, 历史区间内) / ldd 仅 libc(libm 零化) / env -i 干净启动(health+/file 30B+/stream 14B) / **3.5M**(3,631,104 B, ≤4.2M, +75 KB vs 决策-47) / C 清零保持;
+2026-09-10（**决策-47 Depends use_cache**（ADR-0022, Goal-0003 P2 矩阵 #9）：
 每请求 memo 表 dep_cache(106, append-only, find 取最新条 = P9-3 覆写语义, calls_of = 实际派发次数) +
 dispatch_dep/resolve_depends 加 nocache/cache 参数（子依赖递归双表: _depends = 默认 cached
 （upstream use_cache=True, 菱形/三重菱形每请求 1 次 — 决策-33「各路径独立」收紧对齐）/ _depends_nocache
