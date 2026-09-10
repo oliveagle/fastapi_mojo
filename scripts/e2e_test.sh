@@ -1936,6 +1936,54 @@ done
 kill -9 "$OA_PID" 2>/dev/null
 sleep 0.2
 
+# --- 决策-53 (ADR-0028): Header alias + 下划线→连字符转换 (矩阵 #7) -----------------
+# _reads_headers 条目: "name" (wire = _→- 转换) / "name=alias" (wire = alias 原样);
+# 读取走 bridge get_header_value_ci (ASCII CI + 多值取首, FFI diff = 0).
+
+# OP3-1: alias wire 大小写不敏感 (小写 token-literal 命中 → header_x_token)
+B=$(curl -s --max-time 10 -H "token-literal: A" "$BASE/hdr/alias")
+if [[ "$B" == *'"header_x_token": "A"'* ]]; then pass "OP3-1 alias CI match (token-literal → x_token=A)"
+else fail "OP3-1 alias CI match" "got: ${B:0:120}"; fi
+
+# OP3-2: alias 原始拼写 (Token-Literal 原样 → B)
+B=$(curl -s --max-time 10 -H "Token-Literal: B" "$BASE/hdr/alias")
+if [[ "$B" == *'"header_x_token": "B"'* ]]; then pass "OP3-2 alias exact case (Token-Literal → x_token=B)"
+else fail "OP3-2 alias exact case" "got: ${B:0:120}"; fi
+
+# OP3-3: 下划线字面头不绑 alias 参数 (P25-1: x_token: C → 空)
+B=$(curl -s --max-time 10 -H "x_token: C" "$BASE/hdr/alias")
+if [[ "$B" == *'"header_x_token": ""'* && "$B" == *'"header_client_id": ""'* ]]; then
+    pass "OP3-3 underscore literal does not bind aliased param (x_token → empty)"
+else fail "OP3-3 underscore literal" "got: ${B:0:120}"; fi
+
+# OP3-4: 默认 _→- 转换 (client-id → header_client_id, P25-1)
+B=$(curl -s --max-time 10 -H "client-id: D" "$BASE/hdr/alias")
+if [[ "$B" == *'"header_client_id": "D"'* ]]; then pass "OP3-4 default _→- conversion (client-id → client_id=D)"
+else fail "OP3-4 default _→-" "got: ${B:0:120}"; fi
+
+# OP3-5: 下划线字面头不读普通参数 (client_id: E → 空)
+B=$(curl -s --max-time 10 -H "client_id: E" "$BASE/hdr/alias")
+if [[ "$B" == *'"header_client_id": ""'* ]]; then pass "OP3-5 underscore literal does not bind plain param (client_id → empty)"
+else fail "OP3-5 underscore literal plain" "got: ${B:0:120}"; fi
+
+# OP3-6: /ctx 回归 (无下划线名行为零变化: X-Custom/User-Agent)
+B=$(curl -s --max-time 10 -H "X-Custom: x" -H "User-Agent: ua" "$BASE/ctx")
+if [[ "$B" == *'"header_X-Custom": "x"'* && "$B" == *'"header_User-Agent": "ua"'* ]]; then
+    pass "OP3-6 /ctx regression (no-underscore names unchanged)"
+else fail "OP3-6 /ctx regression" "got: ${B:0:120}"; fi
+
+# OP3-7: OpenAPI header 参数名 = wire 名 (alias 原样 Token-Literal + 转换 client-id)
+curl -sS -m 5 "$BASE/openapi.json" > "$TMP/oa53.json"
+if grep -q '"name":"Token-Literal","in":"header"' "$TMP/oa53.json" \
+   && grep -q '"name":"client-id","in":"header"' "$TMP/oa53.json"; then
+    pass "OP3-7 openapi header name = wire name (Token-Literal / client-id)"
+else fail "OP3-7 openapi header names" "$(head -c 200 "$TMP/oa53.json")"; fi
+
+# OP3-8: 多值头取第一个 (M1/M2 → M1, P25-5)
+B=$(curl -s --max-time 10 -H "client-id: M1" -H "client-id: M2" "$BASE/hdr/alias")
+if [[ "$B" == *'"header_client_id": "M1"'* ]]; then pass "OP3-8 multi-value first wins (M1)"
+else fail "OP3-8 multi-value" "got: ${B:0:120}"; fi
+
 # --- summary ---------------------------------------------------------------------
 
 

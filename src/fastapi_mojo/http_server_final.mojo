@@ -24,6 +24,7 @@ from dep_cache import DepCache, inject_dep_calls
 from file_ops_ffi import snapshot_mp_parts, apply_file_ops
 from openapi import generate_openapi, swagger_ui_html
 from openapi_custom import check_openapi_specs  # 决策-52 (ADR-0027)
+from header_params import parse_header_entry, check_header_specs  # 决策-53 (ADR-0028)
 from std.os import getenv  # 决策-52: app 级 OPENAPI env (请求期读, 空 = 默认)
 from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE, KIND_FILE
@@ -152,7 +153,10 @@ def _run_background(handler: Handler, req_id: String, method: String,
 
 def inject_request_headers(mut params: Dict[String, String], header_names_csv: String):
     """F3a: 把 _reads_headers 声明的 header 名按名从 C 桥读出, 注入 params.
-    key 前缀 header_<name>; 缺失 -> 空串. 保持 String-only (与现有 handler 兼容)."""
+    key 前缀 header_<name>; 缺失 -> 空串. 保持 String-only (与现有 handler 兼容).
+    决策-53 (ADR-0028): 条目 = "name" (wire = 下划线→连字符转换, P25-1/4) /
+    "name=alias" (wire = alias 原样, P25-3; "name=name" = 字面). 读取仍走
+    bridge get_header_value_ci (ASCII 大小写不敏感 + 多值取首, FFI diff = 0)."""
     var n = header_names_csv.byte_length()
     var start = 0
     var i = 0
@@ -170,13 +174,14 @@ def inject_request_headers(mut params: Dict[String, String], header_names_csv: S
                     e -= 1
                 if e > b:
                     var clean = String(name[byte=b:e])
+                    var pn = parse_header_entry(clean)
                     var v = String("")
                     var rc = external_call["extract_request_header", Int](
-                        clean.as_c_string_slice())
+                        pn[1].as_c_string_slice())
                     if rc == 0:
                         var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
                         v = span_to_str(sl.as_bytes())
-                    params["header_" + clean] = v
+                    params["header_" + pn[0]] = v
             start = i + 1
         i += 1
 
@@ -841,6 +846,11 @@ def register_routes(mut router: Router) raises:
     var mm_h = Handler(KIND_ECHO(), "meta_made")
     mm_h.set_data("_status_code", "201 Created")
     router.add_route("/meta/made", "GET", mm_h)
+    # 决策-53 (ADR-0028): Header alias/转换 demo — x_token 读字面头
+    # Token-Literal (alias 不转换, P25-3); client_id 读 client-id (默认 _→-)
+    var hdr_h = Handler(KIND_ECHO(), "hdr_alias")
+    hdr_h.set_data("_reads_headers", "x_token=Token-Literal,client_id")
+    router.add_route("/hdr/alias", "GET", hdr_h)
 
     # 决策-49 (ADR-0024): 任意异常类型 handler demo (Goal-0003 矩阵 #13).
     # _exception_raise = 声明式 raise 钩子 (endpoint body 抛异常的位置);
@@ -914,6 +924,8 @@ def register_routes(mut router: Router) raises:
     # 决策-52: OpenAPI 声明注册期语法检查 (_status_code/_responses/_deprecated/
     # _include_in_schema 畸形 → 启动即 fail, 同策略)
     check_openapi_specs(router)
+    # 决策-53: _reads_headers 条目 (name / name=alias) 注册期校验 (同策略)
+    check_header_specs(router)
 
 
 def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:

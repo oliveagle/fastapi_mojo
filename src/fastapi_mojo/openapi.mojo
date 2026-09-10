@@ -14,6 +14,7 @@ from router import Router, Route
 from handler import Handler
 from params_typed import get_param_types
 from params_query_extra import get_param_aliases, get_param_descs
+from header_params import parse_header_entry  # 决策-53 (ADR-0028): header param 名 = wire 名
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
                          _split_top, _trim, _parse_range)
 from openapi_schemas import (_type_to_openapi, _json_str_array, _json_list_array, _openapi_object_schema)
@@ -241,10 +242,12 @@ def _generate_operation(route: Route) raises -> String:
                         e -= 1
                     if e > b:
                         var hn = String(piece[byte=b:e])
+                        # 决策-53 (ADR-0028): OpenAPI name = wire 名 (alias 原样 / 默认 _→- 转换); desc 查找按声明名
+                        var hp = parse_header_entry(hn)
                         var hds = ""
                         if hn in descs:
                             hds = descs[hn]
-                        params.append(_generate_parameter(hn, "header", "string", False, hds))
+                        params.append(_generate_parameter(hp[1], "header", "string", False, hds))
                 start = i + 1
             i += 1
 
