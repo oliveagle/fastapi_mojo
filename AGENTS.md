@@ -1209,7 +1209,65 @@
   env -i 干净启动 / binary **3.7M**（3,803,136 B，≤4.2M；vs 决策-51 +70 KB
   — 纯 Mojo）/ `find src -name '*.c'` = 0 保持 / `pgrep -x fastapi_mojo` = 0
 
-*最后更新：2026-09-10（**决策-52 OpenAPI 精化**（ADR-0027, Goal-0003 P2 矩阵 #16 ✅）：
+- **已决策-53**：**Header 参数精化 — `_reads_headers` 条目 name=alias +
+  默认下划线→连字符转换 + OpenAPI 头名对齐（ADR-0028, Goal-0003 P2 矩阵
+  #7 — 对标矩阵 #7 ✅ 全量）**：
+  1. **上游探测（fastapi 0.141.1 / uvicorn 0.52.4 活体, P25-1..10）**：
+     `Header()` 默认 `convert_underscores=True` — wire 名 = 参数名**逐**
+     `_`→`-`（`x_token`→`x-token` / `x__token`→`x--token` / `a_b_c`→`a-b-c`；
+     字面 `x_token` 头**不**匹配 → 422 loc `["header","x-token"]`,
+     P25-1/4）；`Header(alias=)` → wire = alias **原样不转换**（`my_header`
+     alias 发 `my-header` → 422, P25-3）；匹配 ASCII **大小写不敏感**
+     （小写 `x-custom-thing` 命中 `X-Custom-Thing`, P25-2）；多值头取**第一**
+     （P25-5）；default/422/min_length/max_length/pattern/int 约束面
+     （P25-6..9, 精确 422 消息已探测备查）→ **下一决策**（矩阵 #2 路径
+     参数 + typed header 约束统一落地）。
+  2. **声明式映射（ADR-0004 范式, FFI diff = 0, JIT 可达）**：
+     `_reads_headers` 既有 CSV 条目扩展两形态 — `name`（wire = 逐 `_`→`-`
+     转换）/ `name=alias`（wire = alias 原样；`name=name` = 字面 =
+     `convert_underscores=False` 逃生门 — 单声明双语义, 上游 alias 本就不
+     转换故无损, 全可达状态均可表达）；参数键仍 = `header_<name>`
+     （响应/OpenAPI 键 = 声明名, Query alias 同约定）；读取走既有 bridge
+     `get_header_value_ci`（ASCII CI + 首现 = 上游 parity, **零 Rust/FFI
+     改动**）；OpenAPI header 参数 name = wire 名（原始拼写保留, P25-2/3）
+     + `_param_descs` → description（决策-43 既有, 查找按声明名）。
+  3. **接线（http_server_final +12 行 / openapi.mojo +2 行 = 499 行 <500）**：
+     import（parse_header_entry/check_header_specs）+ `check_header_specs
+     (router)` 注册期校验簇（至多 1 `=` / 两侧非空 / 可打印非空白 ASCII
+     0x21-0x7E, 畸形启动即 fail, check_ws_specs/check_state_specs/
+     check_openapi_specs 同策略）+ `inject_request_headers` 改写（每条目 →
+     parse_header_entry → wire 读取）+ demo `/hdr/alias`
+     （`x_token=Token-Literal,client_id`）；**新模块 `header_params.mojo`
+     （120 行 <500, 纯函数: header_wire_name / parse_header_entry /
+     check_header_specs）+ `header_params_selftest.mojo`（~22 断言,
+     0 警告）**。
+  4. **文档化偏差（ADR-0028 §3.5 ×4）**：① 缺失 → ""（F3a/F10 既有约定）
+     非 required-422（typed header = 下一决策, 矩阵 #2）② alias 与
+     convert_underscores = 单声明双语义（无行为损失）③ schema 无 `title`
+     （F4 基线）④ 422 loc = wire 名随 #1 下一决策对齐。
+  验收：e2e **403/403**（395 + 8 OP3：alias CI / alias 原始拼写 /
+  下划线字面不绑 alias / 默认转换 / 下划线字面不读普通 / `/ctx` 回归 /
+  OpenAPI wire 名（Token-Literal + client-id）/ 多值取首）/ cargo
+  **431/0/4**（Rust 零改动）/ clippy `-D warnings` 0 警告（双 crate）/
+  `mojo run header_params_selftest.mojo` all passed 0 警告 / bench 6 场景
+  0 errors（get_root_10k_100c **35,765 req/s**, 32.9k–43.9k 区间内,
+  vs 决策-52 33,590 无回归）/ **ldd 仅 libc** / env -i 干净启动 /
+  binary **3.8M**（3,815,424 B，≤4.2M；vs 决策-52 +12 KB — 纯 Mojo）/
+  `find src -name '*.c'` = 0 保持 / `pgrep -x fastapi_mojo` = 0
+
+*最后更新：2026-09-10（**决策-53 Header 参数精化**（ADR-0028, Goal-0003 P2 矩阵 #7 ✅）：
+fastapi 0.141.1 / uvicorn 0.52.4 活体 P25-1..10（alias 原样**不**转换 P25-3 /
+逐 `_`→`-` P25-4 / CI + 多值取首 / 约束面 P25-6..9 → 下一决策）→ **声明式映射**
+（ADR-0004 范式, **FFI diff = 0** 纯 Mojo）：`_reads_headers` 条目 `name`
+（wire = 转换）/ `name=alias`（wire = alias 原样; `n=n` = 字面逃生门）+
+注册期 `check_header_specs` fail-fast + OpenAPI header 参数名 = wire 名
+（原始拼写）+ demo `/hdr/alias`（x_token=Token-Literal + client_id）
+→ e2e **395→403/403**（+OP3-1..8）/ cargo **431/0/4**（Rust 零改动）/
+clippy **0**（双 crate）/ ldd 仅 libc / binary **3,815,424 B**（+12 KB,
+≤4.2M）/ env -i / bench 0 errors（35,765 req/s, 带内）/ 孤儿 0 /
+selftest ~22 断言全绿
+下一轮：P2 剩余（路径参数约束 / typed header 校验 (P25-6..9 已探测) / middleware / TestClient）
+2026-09-10（**决策-52 OpenAPI 精化**（ADR-0027, Goal-0003 P2 矩阵 #16 ✅）：
 fastapi 0.141.1 / pydantic 2.13.5 活体 P24-1..15（+ p24e/f/g 勘误：operationId 无 `_+`
 折叠；servers.url = AnyUrl|str str 优先不规范化；AnyUrl 2.13.5 path 空 + `?`/`#` → 前插 `/`）
 → **声明式映射**（ADR-0004 范式, **FFI diff = 0** 纯 Mojo）：app 级 9

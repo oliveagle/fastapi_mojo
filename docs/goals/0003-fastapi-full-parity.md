@@ -14,7 +14,7 @@
 ## 0. 现状定位（2026-09-05 盘点）
 
 **已达成（v0.5.1 + 决策-31~48）**：
-- 单 binary 3.7M（3,803,136 B），ldd 仅 libc，env -i 干净启动，e2e **395 项**，cargo 431 单测
+- 单 binary 3.8M（3,815,424 B），ldd 仅 libc，env -i 干净启动，e2e **403 项**，cargo 431 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -44,7 +44,7 @@
 | 4 | 请求体 | Pydantic 模型 / dict / 嵌套 | ✅ 声明式 spec（决策-38） | validator 自定义回调 = Mojo 无闭包，声明式约束词表为等价形态（扩充 P2） | — |
 | 5 | Form | Form(...) 多值 / alias / desc | ✅ 全量（决策-45, ADR-0020：List 多值 = 全部 occurrence / 标量 last-wins / alias wire key（原始名无效力）/ _param_descs → OpenAPI；422 = "Field required" + input + list collect-all；/login 未标注字段旧语义兼容） | 未标注字段 = 未声明校验（不 422）+ CSV 逗号歧义（均文档化, ADR-0020 §3.5, e2e FM 守护） | — |
 | 6 | 文件上传 | UploadFile (read/seek/size/close) | ✅ 全量（决策-46, ADR-0021：file/bytes 声明（`[]`/`=可选`）+ 422 parity（U2 value_error 完整措辞 / U3 string_type 稳定子集 / U4 last-wins / U5 非 multipart 全缺失 / U9 bytes 双路）+ 对象操作（head/range/sha256/save 原子）+ multipart OpenAPI（contentMediaType 四形态 / required 仅当必填字段）；size = 实际字节（U1） | 文档化偏差 ×7（ADR-0021 §3.5：U9 上游 500 不复制 / input 稳定子集 / Body 命名 / save `..` 守卫 / 未声明不校验 / 空默认 = required（上游 optional, p8, 不修）/ missing de-dup） | — |
-| 7 | Header | Header(...) | ✅ desc（决策-43, _param_descs → OpenAPI） | alias | §P2 |
+| 7 | Header | Header(...) | ✅ 全量（**Header 参数精化 决策-53, ADR-0028**：`_reads_headers` 条目扩展 `name`（wire = 逐 `_`→`-` 转换, x_token→x-token, x__token→x--token, P25-1/4）/ `name=alias`（wire = alias **原样不转换**, P25-3; `name=name` = 字面 = `convert_underscores=False` 逃生门, 单声明双语义）；参数键仍 = `header_<name>`（响应/OpenAPI 键 = 声明名, Query alias 同约定）；`_param_descs` → OpenAPI description（决策-43 既有, 查找按声明名）；OpenAPI header 参数 name = wire 名（原始拼写保留, P25-2/3）；CI 匹配 + 多值取首 = bridge `get_header_value_ci` 既有（**FFI diff = 0**）；注册期 `check_header_specs`（至多 1 `=` / 两侧非空 / 可打印非空白 ASCII, 畸形 → 启动 fail-fast, check_ws_specs/check_state_specs/check_openapi_specs 同策略）；demo `/hdr/alias`（`x_token=Token-Literal,client_id`）） | 文档化偏差 ×4（ADR-0028 §3.5：① 缺失 → "" 非 required-422（typed header/约束面 = 下一决策, 矩阵 #2, P25-6..9 已探测备查）② alias 与 convert_underscores = 单声明双语义（上游 alias 本就不转换, 全可达状态均可表达, 无损失）③ schema 无 `title`（F4 基线）④ 422 loc = wire 名随 #1 下一决策对齐） | — |
 | 8 | Cookie | Cookie(...) | ✅ | — | — |
 | 9 | 依赖注入 | Depends (嵌套/缓存/安全依赖) | ✅ 全量（决策-47, ADR-0022：默认 cached = 每请求 memo 表（菱形/三重菱形 1 次，值同源，P9-1/5）+ `_depends_nocache` = use_cache=False（P9-2/4）+ 嵌套 nocache 结果入库供 cached 引用复用（P9-3）+ 每请求作用域 + `_dep_calls` 观测超集；APIRouter 对称扩展 `base_deps_nocache`/`include_router(deps_nc=)`；FFI diff = 0） | 文档化偏差 ×4（ADR-0022 §3.5：per-name memo vs per-dependant / _dep_calls 超集 / 基础依赖恒 cached / 解析序先 cached 后 nocache） | — |
 | 10 | 响应类型 | JSON/HTML/PlainText/File/Streaming/ORJSON/UJSON/Response | ✅ 全量（JSON/HTML/SSE 既有 + **File/Streaming 决策-48, ADR-0023**：FileResponse = Range 7 步顺序解析（>100 段 → 200 quirk）/ 206 单段·suffix·open·clamp / multipart（26-hex boundary + CL 闭式 + 重叠合并）/ 400×4 精确消息 / 416（`bytes */size` 空体）/ 500（无文件头）/ If-Range = ETag\|LM / HEAD 仅头 / CD（attachment\|inline RFC5987）/ etag = md5(f64(mtime)-size) / 64KB 块直发；StreamingResponse = TE chunked（no-CT quirk / 自定义 status / extra 头 / 空体键存在语义）；ORJSON/UJSON ≡ json.mojo（既有 F3 决策）；Rust bridge file_protocol 230 + file_serve 416 + FFI ×2，零新 crate，MD5 K 表 const = libm 零化） | 文档化偏差 ×7（ADR-0023 §3.5：① ORJSON≡json.mojo（既有）② HEAD 仅头 vs 上游 405 quirk（APIRoute methods={GET}，更优）③ GZip 不介入 file/streaming（上游压缩，P2）④ 整秒 mtime etag `"N"` vs 上游 `"N.0"`（opaque；非整秒逐字节相同）⑤ i64 溢出段 → 400 vs 上游 416（>9.2EB 不可达）⑥ `_file_path` 静态目录相对 + extra 不得覆写 CT/ETag（收窄）⑦ INM·IMS 忽略 = parity（列此完备）） | — |
@@ -111,10 +111,27 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52） | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52）、Header alias/转换 ✅（决策-53） | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-52 OpenAPI 精化**（ADR-0027, P2 矩阵 #16 ✅）：
+*最后更新：2026-09-10（**决策-53 Header 参数精化**（ADR-0028, P2 矩阵 #7 ✅）：
+fastapi 0.141.1 / uvicorn 0.52.4 活体探测 P25-1..10（alias 原样**不**转换 P25-3 /
+逐字符 `_`→`-` P25-4 / CI 匹配 + 多值取首 / default·422·min_length·pattern·int
+约束面 P25-6..9 → 下一决策矩阵 #2）→ **声明式映射**（ADR-0004 范式,
+**FFI diff = 0** 纯 Mojo, JIT 可达）：`_reads_headers` 条目扩展 `name` /
+`name=alias`（至多 1 `=`; 注册期 `check_header_specs` fail-fast, 同策略）+
+默认下划线→连字符转换（`x_token`→`x-token`, P25-1/4）+ OpenAPI header
+参数名 = wire 名（alias 原样 / 转换, 原始拼写保留, P25-2/3）+ demo
+`/hdr/alias`（`x_token=Token-Literal` + `client_id`）
+→ e2e **395→403/403**（+OP3-1..8: alias CI 命中 / alias 原始拼写 / 下划线
+字面不绑 alias / 默认转换 / 下划线字面不读普通 / `/ctx` 回归 / OpenAPI
+wire 名 / 多值取首）/ cargo **431/0/4**（Rust 零改动）/ clippy **0 警告**
+（双 crate）/ ldd 仅 libc / binary **3,815,424 B**（+12 KB vs 决策-52,
+≤4.2M 预算）/ env -i 干净启动 / bench 6 场景 0 errors
+（get_root_10k_100c = 35,765, 32.9k–43.9k 带内）/ 孤儿 0 /
+selftest ~22 断言全绿 0 警告
+下一轮：P2 剩余（路径参数约束 / typed header 校验 (P25-6..9 已探测) / middleware / TestClient）
+2026-09-10（**决策-52 OpenAPI 精化**（ADR-0027, P2 矩阵 #16 ✅）：
 fastapi 0.141.1 / pydantic 2.13.5 活体探测 P24-1..15（+ p24e/f/g 勘误：operationId 默认 =
 `re.sub(\W→_)` 逐字符**无 `_+` 折叠**（`another_one_a__id__b_post`）；servers.url = `AnyUrl |
 str` smart-union str 精确匹配优先 → **不规范化**（`not-a-url` 亦原样）；AnyUrl 2.13.5：
