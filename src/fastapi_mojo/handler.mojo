@@ -112,6 +112,18 @@ def KIND_OAUTH2_TOKEN() -> Int:
     return 201
 
 
+def KIND_FILE() -> Int:
+    """决策-48 (Goal-0003 矩阵 #10): FileResponse / Range 通用响应.
+    完整协议 (stat/Range/206 单段与 multipart/etag/CD/charset/If-Range/HEAD/
+    400/416/500) 在 Rust bridge file_serve (WS 协议原语同层; ADR-0023).
+    声明: _file_path (静态目录相对/绝对) / _file_media (空=guess, octet-stream
+    fallback, text/* +charset) / _file_name (→CD, 非ASCII→filename*) /
+    _file_cdt (默认 attachment) / _file_status (默认 200 OK) /
+    _response_headers (额外头; CT/ETag 不可覆盖 — ADR-0023 §3.5).
+    真实逻辑在 dispatch send_file_response (SSE 同型特例); 此分支只占位."""
+    return 300
+
+
 # ---------- Handler 类型 ----------
 
 struct Handler:
@@ -361,6 +373,14 @@ def run_handler(handler: Handler,
         var resp0 = Dict[String, String]()
         resp0["message"] = "oauth2 token endpoint"
         return ("200 OK", resp0^)
+
+    # FILE (决策-48): 占位返回; dispatch 检测到此 kind 后调 send_file_response
+    # (需静态目录/Range 头 — SSE/OAUTH2 同型特例). 占位保持 run_handler
+    # 单一入口契约 (所有 kind 必须有分支).
+    elif handler.kind == KIND_FILE():
+        var respf = Dict[String, String]()
+        respf["message"] = "file response"
+        return ("200 OK", respf^)
 
     else:
         var resp = Dict[String, String]()

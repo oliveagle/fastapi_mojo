@@ -32,6 +32,8 @@
 
 pub mod cmd;
 pub mod crypto;
+pub mod file_protocol;
+pub mod file_serve;
 pub mod cors;
 pub mod ffi;
 pub mod conn;
@@ -55,6 +57,12 @@ pub mod time_util;
 
 #[cfg(test)]
 mod cmd_tests;
+
+#[cfg(test)]
+mod file_protocol_tests;
+
+#[cfg(test)]
+mod file_serve_tests;
 
 #[cfg(test)]
 mod gzip_tests;

@@ -32,6 +32,8 @@ fn usage() -> &'static str {
 USAGE:
   fmtool raw      <port> <hex>
   fmtool jsoncheck [FILE|-]  validate a JSON document (file or stdin)
+  fmtool f64repr  <sec> <nsec>     bridge-identical mtime f64 Display (etag check)
+  fmtool f64repr  <decimal>        f64 shortest round-trip Display
   fmtool cont100  <port>
   fmtool keepalive <port>
   fmtool headbody  <port>
@@ -60,6 +62,7 @@ fn main() -> ExitCode {
     let rc = match sub.as_str() {
         "raw" => run_raw(&rest),
         "jsoncheck" => run_jsoncheck(&rest),
+        "f64repr" => run_f64repr(&rest),
         "cont100" => run_e2e_port("cont100", &rest, e2e::cont100),
         "keepalive" => run_e2e_port("keepalive", &rest, e2e::keepalive),
         "headbody" => run_e2e_port("headbody", &rest, e2e::headbody),
@@ -214,4 +217,41 @@ fn run_bench_dispatch(args: &[&str]) -> i32 {
         }
     }
     bench::run_bench(&opts)
+}
+
+/// f64repr — 打印 f64 的最短 round-trip Display（etag 交叉验证用）。
+///   f64repr <sec> <nsec>  — 与 bridge stat_file 完全相同的算术
+///                            （sec as f64 + nsec as f64 * 1e-9 → Display），
+///                            e2e 用 `stat -c '%Y %n'` 供参，保证 md5 输入
+///                            与 bridge 逐位一致；
+///   f64repr <decimal>     — 十进制字符串 parse → f64 → Display。
+fn run_f64repr(args: &[&str]) -> i32 {
+    if args.len() == 2 {
+        match (args[0].parse::<f64>(), args[1].parse::<f64>()) {
+            (Ok(sec), Ok(nsec)) => {
+                // 与 bridge stat_file 同一表达式: sec + (nsec * 1e-9)
+                let f = sec + nsec * 1e-9;
+                println!("{f}");
+                0
+            }
+            _ => {
+                eprintln!("usage: fmtool f64repr <sec> <nsec>");
+                2
+            }
+        }
+    } else if args.len() == 1 {
+        match args[0].parse::<f64>() {
+            Ok(f) => {
+                println!("{f}");
+                0
+            }
+            Err(_) => {
+                eprintln!("not a number: {}", args[0]);
+                2
+            }
+        }
+    } else {
+        eprintln!("usage: fmtool f64repr <sec> <nsec> | <decimal>");
+        2
+    }
 }

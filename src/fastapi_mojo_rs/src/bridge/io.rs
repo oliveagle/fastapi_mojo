@@ -42,7 +42,7 @@ use super::conn::{
 use super::conn::deadlines::{decide, DeadlineAction};
 use super::conn::parse::finish_header;
 use super::parse as bridge_parse;
-use super::request::{set_accepts_gzip, set_cors_request, set_http_fields, set_ws_event_type};
+use super::request::{set_accepts_gzip, set_cors_request, set_http_fields, set_range_headers, set_ws_event_type};
 use super::send::{send_all, send_error_json};
 use super::signals::is_running;
 use super::socket::setup_conn_fd;
@@ -199,6 +199,11 @@ fn apply_request_header(c: &mut Conn, hdr: super::conn::parse::RequestHeader) ->
             bridge_parse::get_header_value_ci(&c.hdr[..c.hdr_total], b"Access-Control-Request-Headers")
                 .as_deref(),
         );
+        // 决策-48: 记录 Range / If-Range (FileResponse 协议层 file_serve 读)
+        set_range_headers(
+            bridge_parse::get_header_value_ci(&c.hdr[..c.hdr_total], b"Range").as_deref(),
+            bridge_parse::get_header_value_ci(&c.hdr[..c.hdr_total], b"If-Range").as_deref(),
+        );
         return 1;
     }
 
@@ -235,6 +240,11 @@ fn apply_request_header(c: &mut Conn, hdr: super::conn::parse::RequestHeader) ->
             .as_deref(),
         bridge_parse::get_header_value_ci(&c.hdr[..c.hdr_total], b"Access-Control-Request-Headers")
             .as_deref(),
+    );
+    // 决策-48: 记录 Range / If-Range (FileResponse 协议层 file_serve 读)
+    set_range_headers(
+        bridge_parse::get_header_value_ci(&c.hdr[..c.hdr_total], b"Range").as_deref(),
+        bridge_parse::get_header_value_ci(&c.hdr[..c.hdr_total], b"If-Range").as_deref(),
     );
 
     if c.body_got >= hdr.content_length {

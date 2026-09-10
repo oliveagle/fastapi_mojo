@@ -32,6 +32,11 @@
 #   - Depends use_cache: 每请求 memo 表 (默认 cached 菱形 1 次 / _depends_nocache =
 #     use_cache=False 重派发 / 嵌套 nocache 结果入库供 cached 引用复用, 上游 P9-1/2/3)
 #     (决策-47, DC-1..DC-7; _dep_calls 观测超集)
+#   - FileResponse/StreamingResponse: 200/206 (单段/multipart/merge/suffix/open/clamp) /
+#     400×4 精确消息 / 416 / 500 / If-Range / INM·IMS 忽略 / HEAD 仅头 / CD (attachment·inline
+#     RFC5987) / etag = md5(f64(mtime)-size) (fmtool f64repr × md5sum 交叉验证) / chunked
+#     streaming (no-CT quirk / 自定义 status / extra 头 / raw-socket 帧级证明)
+#     (决策-48, FR-1..FR-32; ADR-0023)
 #
 # 用法:
 #   ./scripts/e2e_test.sh              # 用既有 build (缺则 build)
@@ -1399,6 +1404,221 @@ N19=$(printf '%s' "$FM19Q" | grep -o '"type":"int_parsing"' | wc -l | tr -d ' ')
 if [[ "$N19" == "2" ]]; then pass "FM-20 query collect-all 2 int_parsing (P1 fix)"
 else fail "FM-20 query collect-all 2 int_parsing (P1 fix)" "got $N19: ${FM19Q:0:160}"; fi
 
+
+# --- File/Streaming responses (决策-48, ADR-0023, Goal-0003 P1 矩阵 #10) --------
+# Rust bridge file_serve/file_protocol: FileResponse 200/206(单段/multipart/merge/
+# suffix/open/clamp)/400×4 精确消息/416/500/If-Range/INM·IMS 忽略/HEAD 仅头/
+# CD(attachment/inline RFC5987)/etag = md5(f64(mtime)-size)(fmtool f64repr ×
+# md5sum 独立交叉验证) + StreamingResponse chunked(no-CT quirk/自定义 status/
+# extra 头/raw-socket 帧级证明). filedemo.bin = 30B "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123".
+SRCFILE="$SRC/static/filedemo.bin"
+F_SZ=$(stat -c '%s' "$SRCFILE")
+F_MTIME_FULL=$(stat -c '%.Y' "$SRCFILE")
+F_SEC="${F_MTIME_FULL%%.*}"
+F_NSEC="${F_MTIME_FULL#*.}"
+F_NSEC="${F_NSEC:0:9}"
+while [[ ${#F_NSEC} -lt 9 ]]; do F_NSEC="${F_NSEC}0"; done
+# f64repr <sec> <nsec> = 与 bridge stat_file 逐位相同 (sec + nsec*1e-9 → 最短 Display).
+F_F64=$("$FMTOOL" f64repr "$F_SEC" "$F_NSEC")
+F_ETAG=$(printf '%s-%s' "$F_F64" "$F_SZ" | md5sum | cut -d' ' -f1)
+F_LM=$(date -u -R -d "@$F_SEC" | sed 's/ +0000$/ GMT/')
+
+# fr_get: curl → 头 $TMP/fr_h + body $TMP/fr_b, stdout = 状态码. [额外 curl 参数...]
+fr_get() { # url [curl args...]
+    curl -s -w '%{http_code}' -D "$TMP/fr_h" -o "$TMP/fr_b" "${@:2}" "$1"
+}
+# fr_hv: 从 $TMP/fr_h 取首个匹配头值 (CRLF 剥离, 头名大小写不敏感).
+fr_hv() {
+    tr -d '\r' < "$TMP/fr_h" | grep -i "^$1:" | head -1 | cut -d: -f2- | sed 's/^ *//'
+}
+
+# --- FileResponse 200 全量 ---
+F1B=$(cat "$SRCFILE")
+code=$(fr_get "$BASE/file")
+if [[ "$code" == "200" && "$(cat "$TMP/fr_b")" == "$F1B" ]]; then pass "FR-1 /file 200 exact 30B body"
+else fail "FR-1 /file 200 exact 30B body" "code=$code body=$(head -c 40 "$TMP/fr_b")"; fi
+fr_get "$BASE/file" >/dev/null
+if [[ "$(fr_hv Content-Type)" == "application/octet-stream" && "$(fr_hv Accept-Ranges)" == "bytes" \
+      && "$(fr_hv Content-Length)" == "$F_SZ" && "$(fr_hv Last-Modified)" == "$F_LM" ]]; then
+    pass "FR-2 200 headers (CT/AR/CL/LM)"
+else
+    fail "FR-2 200 headers (CT/AR/CL/LM)" "CT=[$(fr_hv Content-Type)] AR=[$(fr_hv Accept-Ranges)] CL=[$(fr_hv Content-Length)] LM=[$(fr_hv Last-Modified)] exp-LM=[$F_LM]"
+fi
+fr_get "$BASE/file" >/dev/null
+if [[ "$(fr_hv ETag)" == "\"$F_ETAG\"" ]]; then pass "FR-3 etag = md5(f64(mtime)-size) 交叉验证 (f64repr×md5sum)"
+else fail "FR-3 etag 交叉验证" "got=[$(fr_hv ETag)] exp=[\"$F_ETAG\"] f64=$F_F64"; fi
+
+# --- 自定义 status / CD / 500 ---
+code=$(fr_get "$BASE/file-201")
+if [[ "$code" == "201" ]]; then pass "FR-4 /file-201 自定义 201"
+else fail "FR-4 /file-201 自定义 201" "code=$code"; fi
+fr_get "$BASE/file-name" >/dev/null
+if [[ "$(fr_hv Content-Disposition)" == 'attachment; filename="report.txt"' \
+      && "$(fr_hv Content-Type)" == "text/plain; charset=utf-8" ]]; then
+    pass "FR-5 /file-name CD attachment + filename CT charset 规则"
+else
+    fail "FR-5 /file-name CD" "CD=[$(fr_hv Content-Disposition)] CT=[$(fr_hv Content-Type)]"
+fi
+fr_get "$BASE/file-inline" >/dev/null
+if [[ "$(fr_hv Content-Disposition)" == "inline; filename*=utf-8''a%20b.txt" \
+      && "$(fr_hv Content-Type)" == "text/plain; charset=utf-8" ]]; then
+    pass "FR-6 /file-inline CD RFC5987 filename* (空格 → %20)"
+else
+    fail "FR-6 /file-inline CD RFC5987" "CD=[$(fr_hv Content-Disposition)] CT=[$(fr_hv Content-Type)]"
+fi
+code=$(fr_get "$BASE/file-missing")
+FR7FILEHDRS=$(tr -d '\r' < "$TMP/fr_h" | grep -ciE '^(etag|accept-ranges|last-modified|content-range|content-disposition):')
+if [[ "$code" == "500" && "$(cat "$TMP/fr_b")" == "Internal Server Error" && "$FR7FILEHDRS" == "0" ]]; then
+    pass "FR-7 /file-missing 500 (21B, 无文件头)"
+else
+    fail "FR-7 /file-missing 500" "code=$code body=[$(cat "$TMP/fr_b")] file-hdrs=$FR7FILEHDRS hdr=[$(tr -d '\r' < "$TMP/fr_h" | tr '\n' '|')]"
+fi
+
+# --- Range 206: 单段 / suffix / open / clamp ---
+code=$(fr_get "$BASE/file" -H 'Range: bytes=0-3')
+if [[ "$code" == "206" && "$(fr_hv Content-Range)" == "bytes 0-3/30" && "$(fr_hv Content-Length)" == "4" \
+      && "$(cat "$TMP/fr_b")" == "ABCD" ]]; then pass "FR-8 Range 0-3 → 206 (ABCD)"
+else fail "FR-8 Range 0-3" "code=$code CR=[$(fr_hv Content-Range)] body=[$(cat "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: bytes=-4')
+if [[ "$code" == "206" && "$(fr_hv Content-Range)" == "bytes 26-29/30" && "$(cat "$TMP/fr_b")" == "0123" ]]; then pass "FR-9 Range -4 suffix → 206 (0123)"
+else fail "FR-9 Range -4 suffix" "code=$code CR=[$(fr_hv Content-Range)] body=[$(cat "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: bytes=28-')
+if [[ "$code" == "206" && "$(fr_hv Content-Range)" == "bytes 28-29/30" && "$(cat "$TMP/fr_b")" == "23" ]]; then pass "FR-10 Range 28- open → 206 (23)"
+else fail "FR-10 Range 28- open" "code=$code CR=[$(fr_hv Content-Range)] body=[$(cat "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: bytes=0-30')
+if [[ "$code" == "206" && "$(fr_hv Content-Range)" == "bytes 0-29/30" && "$(fr_hv Content-Length)" == "30" \
+      && "$(cat "$TMP/fr_b")" == "$F1B" ]]; then pass "FR-11 Range 0-30 end>size clamp → 206 全量"
+else fail "FR-11 Range clamp" "code=$code CR=[$(fr_hv Content-Range)] body=[$(cat "$TMP/fr_b")]"; fi
+
+# --- 416 / 400×4 ---
+code=$(fr_get "$BASE/file" -H 'Range: bytes=31-')
+if [[ "$code" == "416" && "$(fr_hv Content-Range)" == "bytes */30" && "$(fr_hv Content-Length)" == "0" \
+      && ! -s "$TMP/fr_b" ]]; then pass "FR-12 416 start>size (CR bytes */30, CL 0, 空体)"
+else fail "FR-12 416" "code=$code CR=[$(fr_hv Content-Range)] CL=[$(fr_hv Content-Length)] body=[$(cat "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: bytesfoo')
+if [[ "$code" == "400" && "$(cat "$TMP/fr_b")" == "Malformed range header." ]]; then pass "FR-13 400 无 '=' (Malformed range header.)"
+else fail "FR-13 400 无 '='" "code=$code body=[$(cat "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: items=1-2')
+if [[ "$code" == "400" && "$(cat "$TMP/fr_b")" == "Only support bytes range" ]]; then pass "FR-14 400 单位≠bytes (Only support bytes range)"
+else fail "FR-14 400 单位" "code=$code body=[$(cat "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: bytes=-')
+if [[ "$code" == "400" && "$(cat "$TMP/fr_b")" == "Range header: range must be requested" ]]; then pass "FR-15 400 0 有效段 (range must be requested)"
+else fail "FR-15 400 0 有效段" "code=$code body=[$(cat "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: bytes=5-2')
+if [[ "$code" == "400" && "$(cat "$TMP/fr_b")" == "Range header: start must be less than end" ]]; then pass "FR-16 400 start≥end (start must be less than end)"
+else fail "FR-16 400 start≥end" "code=$code body=[$(cat "$TMP/fr_b")]"; fi
+fr_get "$BASE/file" -H 'Range: bytesfoo' >/dev/null
+if [[ "$(fr_hv Content-Type)" == "text/plain; charset=utf-8" ]]; then pass "FR-17 400 body CT = text/plain; charset=utf-8"
+else fail "FR-17 400 CT" "CT=[$(fr_hv Content-Type)]"; fi
+
+# --- 101+ 段 quirk → 200 / merge 重叠 ---
+R101=""
+for i in $(seq 0 100); do R101="${R101:+$R101,}$i-$i"; done
+code=$(fr_get "$BASE/file" -H "Range: bytes=$R101")
+if [[ "$code" == "200" && "$(fr_hv Content-Length)" == "30" && "$(cat "$TMP/fr_b")" == "$F1B" ]]; then
+    pass "FR-18 101 段 quirk → 200 全量 (starlette _parse_ranges 溢出)"
+else fail "FR-18 101 段 quirk" "code=$code CL=[$(fr_hv Content-Length)] body=[$(head -c 20 "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H 'Range: bytes=0-1,1-3')
+if [[ "$code" == "206" && "$(fr_hv Content-Range)" == "bytes 0-3/30" && "$(fr_hv Content-Length)" == "4" \
+      && "$(cat "$TMP/fr_b")" == "ABCD" ]]; then pass "FR-19 merge 重叠 0-1,1-3 → 206 bytes 0-3/30"
+else fail "FR-19 merge 重叠" "code=$code CR=[$(fr_hv Content-Range)] body=[$(cat "$TMP/fr_b")]"; fi
+
+# --- multi-range 206: 精确 body (boundary 抽取 + printf 期望 + cmp) ---
+code=$(fr_get "$BASE/file" -H 'Range: bytes=0-3,10-13')
+FR20CT=$(fr_hv Content-Type)
+BD="${FR20CT#multipart/byteranges; boundary=}"
+EXP20=$TMP/fr20_exp
+printf -- "--${BD}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 0-3/30\r\n\r\nABCD\r\n--${BD}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 10-13/30\r\n\r\nKLMN\r\n--${BD}--" > "$EXP20"
+# CL 公式: 4+26 + (49+26+24+2+1+1+4) + (49+26+24+2+2+2+4) = 246 (26 = boundary 长度)
+FR20CRHDR=$(tr -d '\r' < "$TMP/fr_h" | grep -ci '^content-range:')
+FR20CMP=1
+cmp -s "$TMP/fr_b" "$EXP20" && FR20CMP=0
+if [[ "$code" == "206" && ${#BD} == 26 && "$BD" =~ ^[0-9a-f]+$ && "$FR20CRHDR" == "0" \
+      && "$(fr_hv Content-Length)" == "246" && "$FR20CMP" == "0" ]]; then
+    pass "FR-20 multi-range 206 精确 body (CL 246, 26-hex boundary, 头无 CR)"
+else
+    fail "FR-20 multi-range 206" "code=$code BD=[$BD] CR-hdr=$FR20CRHDR CL=[$(fr_hv Content-Length)] exp-size=$(stat -c '%s' "$EXP20") got-size=$(stat -c '%s' "$TMP/fr_b")"
+fi
+
+# --- If-Range / If-None-Match / If-Modified-Since ---
+code=$(fr_get "$BASE/file" -H "If-Range: \"$F_ETAG\"" -H 'Range: bytes=0-3')
+if [[ "$code" == "206" && "$(fr_hv Content-Range)" == "bytes 0-3/30" ]]; then pass "FR-21 If-Range = ETag (match) → 206"
+else fail "FR-21 If-Range etag" "code=$code CR=[$(fr_hv Content-Range)]"; fi
+code=$(fr_get "$BASE/file" -H "If-Range: $F_LM" -H 'Range: bytes=0-3')
+if [[ "$code" == "206" && "$(fr_hv Content-Range)" == "bytes 0-3/30" ]]; then pass "FR-22 If-Range = Last-Modified (match) → 206"
+else fail "FR-22 If-Range LM" "code=$code CR=[$(fr_hv Content-Range)]"; fi
+code=$(fr_get "$BASE/file" -H 'If-Range: "stale"' -H 'Range: bytes=0-3')
+if [[ "$code" == "200" && "$(fr_hv Content-Length)" == "30" && "$(cat "$TMP/fr_b")" == "$F1B" ]]; then pass "FR-23 If-Range stale → 200 全量"
+else fail "FR-23 If-Range stale" "code=$code body=[$(head -c 20 "$TMP/fr_b")]"; fi
+code=$(fr_get "$BASE/file" -H "If-None-Match: \"$F_ETAG\"")
+if [[ "$code" == "200" && "$(fr_hv Content-Length)" == "30" ]]; then pass "FR-24 If-None-Match 忽略 (200 全量, parity)"
+else fail "FR-24 If-None-Match" "code=$code CL=[$(fr_hv Content-Length)]"; fi
+code=$(fr_get "$BASE/file" -H 'If-Modified-Since: Fri, 31 Dec 2099 00:00:00 GMT')
+if [[ "$code" == "200" && "$(fr_hv Content-Length)" == "30" ]]; then pass "FR-25 If-Modified-Since 忽略 (200 全量, parity)"
+else fail "FR-25 If-Modified-Since" "code=$code CL=[$(fr_hv Content-Length)]"; fi
+
+# --- HEAD (仅头; 上游 HEAD→405 quirk 的文档化偏差: 我们更优) ---
+# raw-socket HEAD (curl -I -o 会把头 dump 进 -o 文件: curl quirk; 线级证明无 body).
+# head_raw: url [extra-header] → 文件 $TMP/frh_raw (Connection: close 即关).
+head_raw() {
+    local extra=""
+    [[ $# -gt 1 && -n "${2:-}" ]] && extra="$2
+"
+    timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT || exit 1; printf 'HEAD $1 HTTP/1.1\r\nHost: fm\r\n${extra}Connection: close\r\n\r\n' >&3; cat <&3" > "$TMP/frh_raw" 2>/dev/null
+}
+frh_hdr() { tr -d '\r' < "$TMP/frh_raw" | grep -i "^$1:" | head -1 | cut -d: -f2- | sed 's/^ *//'; }
+frh_bodylen() { awk 'BEGIN{RS="\r\n\r\n"} NR==2' "$TMP/frh_raw" | wc -c | tr -d ' '; }
+
+head_raw "/file"
+if [[ "$(head -1 "$TMP/frh_raw" | tr -d '\r')" == "HTTP/1.1 200 OK" && "$(frh_hdr Content-Length)" == "30"       && "$(frh_hdr Accept-Ranges)" == "bytes" && -n "$(frh_hdr ETag)" && "$(frh_bodylen)" == "0" ]]; then
+    pass "FR-26 HEAD /file → 200 仅头 (CL 30, AR, ETag, 线级空体)"
+else
+    fail "FR-26 HEAD 200" "line1=[$(head -1 "$TMP/frh_raw" | tr -d '\r')] CL=[$(frh_hdr Content-Length)] AR=[$(frh_hdr Accept-Ranges)] body-len=$(frh_bodylen)"
+fi
+head_raw "/file" "Range: bytes=2-4"
+if [[ "$(head -1 "$TMP/frh_raw" | tr -d '\r')" == "HTTP/1.1 206 Partial Content" && "$(frh_hdr Content-Range)" == "bytes 2-4/30"       && "$(frh_hdr Content-Length)" == "3" && "$(frh_bodylen)" == "0" ]]; then
+    pass "FR-27 HEAD + Range → 206 仅头 (CR 2-4, CL 3, 线级空体)"
+else
+    fail "FR-27 HEAD+Range" "line1=[$(head -1 "$TMP/frh_raw" | tr -d '\r')] CR=[$(frh_hdr Content-Range)] CL=[$(frh_hdr Content-Length)] body-len=$(frh_bodylen)"
+fi
+
+# --- StreamingResponse (chunked) ---
+code=$(fr_get "$BASE/stream")
+if [[ "$code" == "200" && "$(fr_hv Transfer-Encoding)" == "chunked" && -z "$(fr_hv Content-Type)" \
+      && -z "$(fr_hv Content-Length)" && "$(cat "$TMP/fr_b")" == "hello world中" ]]; then
+    pass "FR-28 /stream chunked (no-CT quirk, 3 段含 UTF-8)"
+else
+    fail "FR-28 /stream chunked" "code=$code TE=[$(fr_hv Transfer-Encoding)] CT=[$(fr_hv Content-Type)] body=[$(head -c 30 "$TMP/fr_b")]"
+fi
+code=$(fr_get "$BASE/stream-json")
+if [[ "$code" == "202" && "$(fr_hv Content-Type)" == "application/json" && "$(fr_hv Transfer-Encoding)" == "chunked" \
+      && "$(fr_hv X-Custom)" == "cv" && "$(cat "$TMP/fr_b")" == '{"a":0}{"a":1}{"a":2}' ]]; then
+    pass "FR-29 /stream-json 202 + CT + X-Custom extra 头透传"
+else
+    fail "FR-29 /stream-json" "code=$code CT=[$(fr_hv Content-Type)] XC=[$(fr_hv X-Custom)] body=[$(head -c 30 "$TMP/fr_b")]"
+fi
+code=$(fr_get "$BASE/stream-empty")
+if [[ "$code" == "200" && "$(fr_hv Transfer-Encoding)" == "chunked" && -z "$(fr_hv Content-Type)" \
+      && -z "$(cat "$TMP/fr_b")" ]]; then pass "FR-30 /stream-empty 200 chunked 空体 (键存在语义)"
+else fail "FR-30 /stream-empty" "code=$code TE=[$(fr_hv Transfer-Encoding)] body-size=$(stat -c '%s' "$TMP/fr_b")"; fi
+
+# --- raw-socket 帧级证明 (chunked 线格式, 不依赖客户端解码; Connection: close 即关) ---
+timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT || exit 1; printf 'GET /stream HTTP/1.1\r\nHost: fm\r\nConnection: close\r\n\r\n' >&3; cat <&3" > "$TMP/fr31" 2>/dev/null
+if grep -aqF $'6\r\nhello \r\n' "$TMP/fr31" && grep -aqF $'5\r\nworld\r\n' "$TMP/fr31" \
+   && grep -aqF $'3\r\n\xe4\xb8\xad\r\n' "$TMP/fr31" && grep -aqF $'0\r\n\r\n' "$TMP/fr31"; then
+    pass "FR-31 raw-socket chunked 帧 (6:hello /5:world/3:中/0 终止)"
+else
+    fail "FR-31 raw-socket chunked 帧" "raw=[$(head -c 200 "$TMP/fr31" | tr -d '\r')]"
+fi
+
+# --- 重复请求稳定性 (无连接泄漏/无状态漂移) ---
+STAB_OK=1
+for i in $(seq 1 10); do
+    code=$(fr_get "$BASE/file")
+    [[ "$code" == "200" && "$(fr_hv Content-Length)" == "30" ]] || STAB_OK=0
+done
+if [[ "$STAB_OK" == 1 ]]; then pass "FR-32 /file ×10 稳定 (200 + CL 30)"
+else fail "FR-32 /file ×10 稳定" "不稳定 (见上面各行)"; fi
 # --- summary ---------------------------------------------------------------------
 
 echo

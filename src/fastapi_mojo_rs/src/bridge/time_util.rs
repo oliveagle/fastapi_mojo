@@ -21,3 +21,11 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+/// Wall-clock 纳秒（决策-48: file boundary seed 用；与 `now_ms` 同源）。
+pub fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+}

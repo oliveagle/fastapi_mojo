@@ -61,6 +61,12 @@ pub struct CurrentRequest {
     /// 在 conn.rs::extract_header_value_to_current 写入; 多次查询会覆盖, 串行调用安全.
     pub hdr_value: [u8; 512],
     pub hdr_value_len: usize,
+    /// 决策-48: 当前请求 Range 头 (空 = 未带; io.rs header 扫描记录).
+    pub range: [u8; 1024],
+    pub range_len: usize,
+    /// 决策-48: 当前请求 If-Range (空 = 未带).
+    pub if_range: [u8; 256],
+    pub if_range_len: usize
 }
 
 impl CurrentRequest {
@@ -92,6 +98,10 @@ impl CurrentRequest {
             achr_len: 0,
             hdr_value: [0u8; 512],
             hdr_value_len: 0,
+            range: [0u8; 1024],
+            range_len: 0,
+            if_range: [0u8; 256],
+            if_range_len: 0,
         }
     }
 }
@@ -190,6 +200,10 @@ pub fn reset_request_fields() {
     g.achr_len = 0;
     g.hdr_value_len = 0;
     g.hdr_value = [0u8; 512];
+    g.range_len = 0;
+    g.range = [0u8; 1024];
+    g.if_range_len = 0;
+    g.if_range = [0u8; 256];
 }
 
 /// NUL 终止拷贝 (决策-36 FFI 契约: 缓冲 [len]=0): 截断到 cap-1, 返回实际长度.
@@ -242,6 +256,31 @@ pub fn set_accepts_gzip(b: bool) {
 /// 决策-40: 当前请求是否接受 gzip 响应.
 pub fn current_accepts_gzip() -> bool {
     lock_current().accepts_gzip
+}
+
+/// 决策-48: 记录当前请求 Range / If-Range (io.rs header 扫描后调用; None = 未带).
+pub fn set_range_headers(range: Option<&[u8]>, if_range: Option<&[u8]>) {
+    let mut g = lock_current();
+    g.range_len = copy_field(&mut g.range, range);
+    g.if_range_len = copy_field(&mut g.if_range, if_range);
+}
+
+/// 决策-48: 当前请求 Range (无 = None).
+pub fn current_range() -> Option<String> {
+    let g = lock_current();
+    field_str(&g.range, g.range_len)
+}
+
+/// 决策-48: 当前请求 If-Range (无 = None).
+pub fn current_if_range() -> Option<String> {
+    let g = lock_current();
+    field_str(&g.if_range, g.if_range_len)
+}
+
+/// 决策-48: 当前请求 method 是否 HEAD (file HEAD = 仅头无体).
+pub fn current_method_is_head() -> bool {
+    let g = lock_current();
+    &g.method[..g.method_len.min(4)] == b"HEAD"
 }
 
 /// 更新 active fd/phase (conn_done / pump 后).

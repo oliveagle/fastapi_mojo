@@ -24,7 +24,7 @@ from dep_cache import DepCache, inject_dep_calls
 from file_ops_ffi import snapshot_mp_parts, apply_file_ops
 from openapi import generate_openapi, swagger_ui_html
 from streaming import build_sse_body, sse_event_count
-from handler import KIND_SSE
+from handler import KIND_SSE, KIND_FILE
 from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
@@ -578,6 +578,47 @@ def register_routes(mut router: Router) raises:
     sse_created_h.set_data("_stream_status", "201 Created")
     sse_created_h.set_data("_response_headers", "Cache-Control: no-cache;X-Accel-Buffering: no")
     router.add_route("/sse/created", "POST", sse_created_h)
+
+    # 决策-48: FileResponse / StreamingResponse demo (Rust bridge file_serve/file_protocol).
+    var file_h = Handler(KIND_FILE(), "file_demo")
+    file_h.set_data("_file_path", "filedemo.bin")
+    router.add_route("/file", "GET", file_h)
+
+    var filename_h = Handler(KIND_FILE(), "file_name_demo")
+    filename_h.set_data("_file_path", "filedemo.bin")
+    filename_h.set_data("_file_name", "report.txt")
+    router.add_route("/file-name", "GET", filename_h)
+
+    var fileinline_h = Handler(KIND_FILE(), "file_inline_demo")
+    fileinline_h.set_data("_file_path", "filedemo.bin")
+    fileinline_h.set_data("_file_name", "a b.txt")
+    fileinline_h.set_data("_file_cdt", "inline")
+    router.add_route("/file-inline", "GET", fileinline_h)
+
+    var filemissing_h = Handler(KIND_FILE(), "file_missing_demo")
+    filemissing_h.set_data("_file_path", "nope.txt")
+    router.add_route("/file-missing", "GET", filemissing_h)
+
+    var file201_h = Handler(KIND_FILE(), "file_201_demo")
+    file201_h.set_data("_file_path", "filedemo.bin")
+    file201_h.set_data("_file_status", "201 Created")
+    router.add_route("/file-201", "GET", file201_h)
+
+    # StreamingResponse: media 未声明 → 无 Content-Type (上游 quirk); body 按 | 分块.
+    var stream_h = Handler(KIND_SSE(), "stream_demo")
+    stream_h.set_data("_stream_body", "hello |world|中")
+    router.add_route("/stream", "GET", stream_h)
+
+    var streamjson_h = Handler(KIND_SSE(), "stream_json_demo")
+    streamjson_h.set_data("_stream_body", "{\"a\":0}|{\"a\":1}|{\"a\":2}")
+    streamjson_h.set_data("_stream_media", "application/json")
+    streamjson_h.set_data("_stream_status", "202 Accepted")
+    streamjson_h.set_data("_response_headers", "X-Custom: cv")
+    router.add_route("/stream-json", "GET", streamjson_h)
+
+    var streamempty_h = Handler(KIND_SSE(), "stream_empty_demo")
+    streamempty_h.set_data("_stream_body", "")
+    router.add_route("/stream-empty", "GET", streamempty_h)
 
     # F10 (v0.5.1): Cookie 参数注入 demo. _reads_cookies = 声明读取的 cookie 名;
     # dispatch 从 Cookie 头解析 (RFC 6265: ';' 分隔 '=' 切) 注入 params["cookie_<name>"].
@@ -1151,7 +1192,37 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                 # F9 (v0.5.1): 支持自定义 status_code (对齐上游 FastAPI
                                 # 0.140.13 PR #15937) + 修复 `_response_headers` 被解析
                                 # 但从未发送的静默丢弃缺陷.
+                                # 决策-48: 声明 `_stream_body` → StreamingResponse 分支
+                                # (chunked; media_type 空 = 无 Content-Type, 上游 quirk).
+                                # 键存在语义: 空串也必须走 streaming 路径 (S3 parity).
                                 if route_result.handler.kind == KIND_SSE():
+                                    if "_stream_body" in route_result.handler.data:
+                                        var st_status = "200 OK"
+                                        if "_stream_status" in route_result.handler.data:
+                                            st_status = route_result.handler.data["_stream_status"]
+                                        var st_media = ""
+                                        if "_stream_media" in route_result.handler.data:
+                                            st_media = route_result.handler.data["_stream_media"]
+                                        var st_extra = ""
+                                        if "_response_headers" in route_result.handler.data:
+                                            var st_hdrs = parse_response_headers(route_result.handler)
+                                            if len(st_hdrs) > 0:
+                                                st_extra = "\r\n".join(st_hdrs)
+                                        # Rust bridge send_streaming_response: TE: chunked,
+                                        # 无 CT quirk, charset 规则, extra 头透传.
+                                        _ = external_call["send_streaming_response", Int](
+                                            cfd, st_status.as_c_string_slice(),
+                                            route_result.handler.data["_stream_body"].as_c_string_slice(),
+                                            st_media.as_c_string_slice(),
+                                            st_extra.as_c_string_slice())
+                                        var st_dur = mw_timing(mw_chain, start_ms)
+                                        mw_logging(mw_chain, req_id, method, path, query,
+                                                   st_status + " (stream)", st_dur)
+                                        if external_call["get_close_after_response", Int]() != 0:
+                                            external_call["conn_done", NoneType](cfd, False)
+                                        else:
+                                            external_call["conn_done", NoneType](cfd, True)
+                                        continue
                                     var events_csv = ""
                                     if "_stream_events" in route_result.handler.data:
                                         events_csv = route_result.handler.data["_stream_events"]
@@ -1172,6 +1243,47 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                         sse_body.as_c_string_slice(), sse_extra.as_c_string_slice())
                                     var sse_dur = mw_timing(mw_chain, start_ms)
                                     mw_logging(mw_chain, req_id, method, path, query, sse_status + " (sse)", sse_dur)
+                                    if external_call["get_close_after_response", Int]() != 0:
+                                        external_call["conn_done", NoneType](cfd, False)
+                                    else:
+                                        external_call["conn_done", NoneType](cfd, True)
+                                    continue
+
+                                # 决策-48: FileResponse — 完整协议在 Rust bridge file_serve
+                                # (stat/Range/206 单段与 multipart/etag/CD/charset/If-Range/
+                                # HEAD/400/416/500); 此处声明式透传 (SSE 同型特例: 需
+                                # cfd + 静态目录, 跳过 run_handler 的 JSON 路径).
+                                if route_result.handler.kind == KIND_FILE():
+                                    var fpath = ""
+                                    if "_file_path" in route_result.handler.data:
+                                        fpath = route_result.handler.data["_file_path"]
+                                    var fmedia = ""
+                                    if "_file_media" in route_result.handler.data:
+                                        fmedia = route_result.handler.data["_file_media"]
+                                    var fname = ""
+                                    if "_file_name" in route_result.handler.data:
+                                        fname = route_result.handler.data["_file_name"]
+                                    var fcdt = "attachment"
+                                    if "_file_cdt" in route_result.handler.data:
+                                        fcdt = route_result.handler.data["_file_cdt"]
+                                    var fstatus = "200 OK"
+                                    if "_file_status" in route_result.handler.data:
+                                        fstatus = route_result.handler.data["_file_status"]
+                                    var fextra = ""
+                                    if "_response_headers" in route_result.handler.data:
+                                        var fhdrs = parse_response_headers(route_result.handler)
+                                        if len(fhdrs) > 0:
+                                            fextra = "\r\n".join(fhdrs)
+                                    _ = external_call["send_file_response", Int](
+                                        cfd, fpath.as_c_string_slice(),
+                                        fmedia.as_c_string_slice(),
+                                        fname.as_c_string_slice(),
+                                        fcdt.as_c_string_slice(),
+                                        fstatus.as_c_string_slice(),
+                                        fextra.as_c_string_slice())
+                                    var fdur = mw_timing(mw_chain, start_ms)
+                                    mw_logging(mw_chain, req_id, method, path, query,
+                                               fstatus + " (file)", fdur)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
                                     else:

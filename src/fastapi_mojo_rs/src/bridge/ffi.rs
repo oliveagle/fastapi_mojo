@@ -66,6 +66,8 @@ use super::send::{
     send_static_file as send_send_static_file,
     send_static_file_head as send_send_static_file_head,
 };
+use super::file_serve::send_file_response as fs_send_file_response;
+use super::send::send_streaming_response as send_send_streaming_response;
 use super::signals::{
     is_running as sig_is_running, server_shutdown as sig_server_shutdown,
     setup_signal_handlers as sig_setup_signal_handlers,
@@ -443,6 +445,43 @@ pub extern "C" fn send_static_file(fd: c_int, path: *const c_char) -> c_long {
 pub extern "C" fn send_static_file_head(fd: c_int, path: *const c_char) -> c_long {
     let p = unsafe { c_str_lossy(path) };
     send_send_static_file_head(fd, &p) as c_long
+}
+
+/// 决策-48: FileResponse 单点发送 (KIND_FILE FFI; file_serve.rs 内部 stat /
+/// Range 分派 / etag / multipart / 500; 相对路径 = 静态目录相对, 绝对路径原样).
+#[no_mangle]
+pub extern "C" fn send_file_response(
+    fd: c_int,
+    path: *const c_char,
+    media_type: *const c_char,
+    filename: *const c_char,
+    cdt: *const c_char,
+    status: *const c_char,
+    extra: *const c_char,
+) -> c_long {
+    let p = unsafe { c_str_lossy(path) };
+    let m = unsafe { c_str_lossy(media_type) };
+    let f = unsafe { c_str_lossy(filename) };
+    let c = unsafe { c_str_lossy(cdt) };
+    let s = unsafe { c_str_lossy(status) };
+    let e = unsafe { c_str_lossy(extra) };
+    fs_send_file_response(fd, &p, &m, &f, &c, &s, &e)
+}
+
+/// 决策-48: StreamingResponse (chunked transfer; media_type 空 = 无 Content-Type).
+#[no_mangle]
+pub extern "C" fn send_streaming_response(
+    fd: c_int,
+    status: *const c_char,
+    body: *const c_char,
+    media_type: *const c_char,
+    extra: *const c_char,
+) -> c_long {
+    let st = unsafe { c_str_lossy(status) };
+    let b = unsafe { c_str_lossy(body) };
+    let m = unsafe { c_str_lossy(media_type) };
+    let e = unsafe { c_str_lossy(extra) };
+    send_send_streaming_response(fd, &st, &b, &m, &e)
 }
 
 #[no_mangle]

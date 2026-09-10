@@ -28,7 +28,8 @@
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
-use super::request::{current_accepts_gzip, get_close_after_response, set_last_status};
+use super::request::{current_accepts_gzip, current_origin, get_close_after_response, set_last_status};
+use super::cors;
 use super::gzip;
 use super::response::{build_preflight_response, build_response_headers, get_content_type, json_escape};
 use super::state::get_static_dir;
@@ -180,6 +181,66 @@ pub fn send_sse_response(fd: c_int, body: &[u8]) -> c_long {
 pub fn send_sse_response_extra(fd: c_int, status: &str, body: &[u8], extra: &str) -> c_long {
     let ex = if extra.is_empty() { None } else { Some(extra) };
     send_response(fd, status, "text/event-stream; charset=utf-8", body, true, ex) as c_long
+}
+
+/// 决策-48: **StreamingResponse**（真 chunked transfer，starlette 1.6.0 parity，
+/// ADR-0023）：
+///   - `media_type` 空 → **不带任何 Content-Type 头**（上游 Response.media_type =
+///     None 的 quirk，probe S1 实测 headers 空）；非空 → charset 规则（text/*
+///     追加 `; charset=utf-8`）
+///   - `body` = "|"-分隔 chunk 串（与 SSE `_stream_events` 同约定；空段跳过，
+///     与 SSE builder 一致；整体空 = 零 chunk）
+///   - 帧形: `hexlen\r\ndata\r\n ... 0\r\n\r\n`（无 content-length；
+///     TestClient/httpx 自动解 chunked，真实 socket 可见帧）
+///   - GZip 不介入（绕过 send_response 单点 gzip — 上游 GZipMiddleware 会压缩
+///     streaming 体，§3.5 文档化偏差）
+pub fn send_streaming_response(
+    fd: c_int,
+    status: &str,
+    body: &str,
+    media_type: &str,
+    extra: &str,
+) -> c_long {
+    let conn = if get_close_after_response() { "close" } else { "keep-alive" };
+    let mut h = String::with_capacity(256 + status.len() + media_type.len() + extra.len());
+    h.push_str(&format!("HTTP/1.1 {status}\r\n"));
+    if !media_type.is_empty() {
+        h.push_str(&format!(
+            "Content-Type: {}\r\n",
+            super::file_protocol::apply_charset_rule(media_type)
+        ));
+    }
+    h.push_str("Transfer-Encoding: chunked\r\n");
+    h.push_str(&format!("Connection: {conn}\r\n"));
+    for line in cors::normal_cors_lines(current_origin().as_deref()) {
+        h.push_str(&line);
+        h.push_str("\r\n");
+    }
+    if !extra.is_empty() {
+        h.push_str(extra);
+        h.push_str("\r\n");
+    }
+    h.push_str("\r\n");
+    set_last_status(status.as_bytes());
+    if send_all(fd, h.as_bytes()) != 0 {
+        return -1;
+    }
+    for part in body.split('|') {
+        if part.is_empty() {
+            continue;
+        }
+        let mut chunk = String::with_capacity(part.len() + 16);
+        chunk.push_str(&format!("{:x}\r\n", part.len()));
+        chunk.push_str(part);
+        chunk.push_str("\r\n");
+        if send_all(fd, chunk.as_bytes()) != 0 {
+            return -1;
+        }
+    }
+    if send_all(fd, b"0\r\n\r\n") != 0 {
+        return -1;
+    }
+    0
 }
 
 /// F3b: JSON 响应携带自定义头 (端口 C `send_simple_response` 变体).

@@ -3,7 +3,7 @@
 //! 向量来源: FIPS 180-4 (SHA-256) / RFC 4231 (HMAC) / RFC 7515 \u00a72.1
 //! (base64url) / pyjwt 2.13 (JWT 签名交叉验证, 独立实现 oracle).
 
-use super::crypto::{b64url_decode, b64url_encode, hmac_sha256, sha256};
+use super::crypto::{b64url_decode, b64url_encode, hmac_sha256, md5_hex, sha256, MD5_K};
 
 fn hx(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
@@ -171,4 +171,69 @@ fn ffi_hmac_sha256_b64url_empty_inputs() {
     assert_eq!(got, expect);
     ffi::fm_hmac_sha256_b64url_free(slice.ptr);
     ffi::fm_hmac_sha256_b64url_free(std::ptr::null()); // null 容忍
+}
+
+// ========== MD5 (RFC 1321 Appendix A.5, 决策-48: FileResponse etag) ==========
+//
+// 守护 K 表运行时派生正确性（floor(2^32·|sin(i+1 rad)|)，切勿 to_radians）；
+// 向量 = RFC 1321 + coreutils md5sum / python hashlib 双 oracle。
+
+#[test]
+fn md5_empty() {
+    assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+}
+
+#[test]
+fn md5_a() {
+    assert_eq!(md5_hex(b"a"), "0cc175b9c0f1b6a831c399e269772661");
+}
+
+#[test]
+fn md5_abc() {
+    assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+}
+
+#[test]
+fn md5_message_digest() {
+    // 向量 = coreutils md5sum + python hashlib 双 oracle 交叉验证
+    assert_eq!(md5_hex(b"message digest"), "f96b697d7cb7938d525a2f31aaf161d0");
+}
+
+#[test]
+fn md5_lowercase_alphabet() {
+    // 向量 = coreutils md5sum + python hashlib 双 oracle 交叉验证
+    assert_eq!(
+        md5_hex(b"abcdefghijklmnopqrstuvwxyz"),
+        "c3fcd3d76192e4007dfb496cca67e13b"
+    );
+}
+
+#[test]
+fn md5_quick_fox() {
+    assert_eq!(
+        md5_hex(b"The quick brown fox jumps over the lazy dog"),
+        "9e107d9d372bb6826bd81d3542a419d6"
+    );
+}
+
+#[test]
+fn md5_multiblock_boundary() {
+    // 55B（单块内 < 56B padding 边界）+ 64B（恰好整块，padding 溢出到第二块）
+    // 向量 = python3 hashlib.md5（独立 oracle）
+    let s55 = "a".repeat(55);
+    let s64 = "b".repeat(64);
+    assert_eq!(md5_hex(s55.as_bytes()), "ef1772b6dff9a122358552954ad0df65");
+    assert_eq!(md5_hex(s64.as_bytes()), "0b649bcb5a82868817fec9a6e709d233");
+}
+
+#[test]
+fn md5_k_table_matches_sin_derivation() {
+    // const 表 ≡ RFC 1321 运行时派生（glibc 正确舍入 sin；若平台 sin 行为
+    // 漂移导致某位变化，此测试红 — 同时守护 libm 清零后的值不回退）。
+    let derived: [u32; 64] = (0..64)
+        .map(|i| (4294967296.0 * (i as f64 + 1.0).sin().abs()).floor() as u32)
+        .collect::<Vec<u32>>()
+        .try_into()
+        .expect("64 elements");
+    assert_eq!(MD5_K, derived);
 }
