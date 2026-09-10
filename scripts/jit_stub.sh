@@ -9,7 +9,9 @@
 # 被调用则 abort — 自测约束永不含 pat):
 #   export JIT_STUB="$(bash scripts/jit_stub.sh)"
 #   cd src/fastapi_mojo && mojo run -Xlinker "$JIT_STUB" param_constraints_selftest.mojo
-# 不进入 build_single / CI (dev-only; ADR-0029 §7 环境注记).
+# CI「Run unit tests」step 亦调用本脚本: params_typed (import param_constraints)
+# 的 JIT 闭包需 regex_match 符号 (main 不实际触发, 桩安全); 仍不进 build_single /
+# binary (ADR-0029 §7.5).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${JIT_STUB_OUT:-/tmp/jit_regex_stub.so}"

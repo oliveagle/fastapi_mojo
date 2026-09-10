@@ -286,7 +286,13 @@ SHA-1/base64/UTF-8 手写先例同款）支撑。list 元素约束 = 上游本�
 - `dev/jit_regex_stub.rs` + `scripts/jit_stub.sh`（rustc cdylib →
   /tmp/jit_regex_stub.so）: `#[no_mangle] pub extern "C" fn
   regex_match(*const i8, *const i8) -> i32` — **body abort-if-called**
-  （纯链接符号, dev-only, 不进 binary / CI — CI 不跑 Mojo selftest）
+  （纯链接符号, 不进 binary / build_single）。使用面: (a) 本地
+  `param_constraints_selftest.mojo`（dev-only, 约束用例无 pat → 桩永不被
+  调用）; (b) **CI「Run unit tests」step** — 决策-54 后 `params_typed`
+  （CI 循环内生产模块自测）import param_constraints, JIT 闭包需该符号,
+  CI 以 `-Xlinker` 注入桩（其 main 只走 int/bool/enum/list/alias 路径,
+  constraints="", 从不触发 pattern 分支 → 桩安全; 其余 6 模块实测不达
+  FFI 不需桩）
 - **check_str split**: `check_str_constraints` = `check_str_len_constraints`
   （pure）+ `check_str_pattern`（FFI）组合 — JIT 隔离; 生产调用者仍走
   组合入口, 行为等价

@@ -114,8 +114,9 @@
   单一 binary 构建（含 rust toolchain：`cargo build --release` 出 staticlib，
   `-static-libgcc` 静态链接 libgcc_s 保 ldd 干净，见 §3.2）
   + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试（含 `cargo test --release
-  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (79 项起，含
-  WebSocket 增强/并发/精化，扩展中) + 体积预算（中间态 ≤ 6M，终态 ≤ C + 2M）
+  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 428 项, 79 项
+  起扩展, 含 WebSocket 增强/并发/精化 + 参数约束面 CP（ADR-0029）) +
+  体积预算（中间态 ≤ 6M，终态 ≤ C + 2M）
   + **C 清零步骤**（终态门禁：`find src -name '*.c'` = 0；当前 Phase 4-5 为 INFO）
 
 ---
