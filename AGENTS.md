@@ -1020,7 +1020,85 @@
   + /exc/ve 500）/ binary **3.5M**（3,663,872 B，≤4.2M；vs 决策-48
   +32 KB）/ `find src -name '*.c'` = 0 保持
 
-*最后更新：2026-09-10（**决策-49 任意异常类型 handler**（ADR-0024, Goal-0003 P2 矩阵 #13 ✅）：
+- **已决策-50**：**Request.state — 每请求状态存储（声明式
+  `_state_set`/`_reads_state` + `{param}` 插值）（ADR-0025，Goal-0003
+  P2 矩阵 #22 — 对标矩阵 #22 ✅ 全量）**：
+  1. **上游探测（starlette 1.6.0 源码 + uvicorn 活体, P22-1..6）**：
+     `State` = dict 包装（属性/dict 双写读面共享 `_state`; **1.6.0 无
+     下划线前缀禁止**）; `Request.state` = **property**（lazy
+     `scope.setdefault("state", {})` — middleware 与 endpoint 共享同一
+     scope dict）; 缺失读 → AttributeError/KeyError → 500; `del`-缺失
+     → KeyError quirk; `in`/`len`/`iter` 可用（**无 `__contains__`**
+     — `in` 经 `__iter__`）; **每请求隔离**（endpoint 写仅同请求可见,
+     独立请求干净, ×2 活体）。
+  2. **声明式映射（ADR-0004 范式, 零 FFI）**：
+     - **写面** `_state_set = "key:value;key2:value2"`（`;` 分条目,
+       **首个** `:` 分 key/value, value 可再含 `:`）; **值支持
+       `{param}` 插值**（复用 `substitute_params`; ctx = 全部已注入
+       参数 = path+query+body+auth; 缺失键保留 `{key}` 字面量 —
+       KIND_RUN_CMD 同款语义, 防静默填空）; 评估位置 = 全部注入之后、
+       `_reads_state` 注入之前（= 上游「middleware 先写, endpoint 后
+       读」顺序的声明式等价）; 空 key/空条目跳过; **注册期校验**
+       （畸形 spec 启动即 fail — `check_state_specs`, 与
+       `check_body_schemas` 同策略）。
+     - **读面** `_reads_state` CSV → `params["state_<name>"]`（F10
+       `_reads_headers`/`_reads_cookies` 完全同范式）; **缺失键 →
+       `""`**（F10 既有约定; 上游为 500 → 偏差 §3.5-1）。
+  3. **存储 = dispatch 每请求 `Dict[String, String]`**（每请求新建、
+     请求结束即弃 = scope 语义 P22-2/6）; **FFI diff = 0**（纯 Mojo,
+     JIT 可达 — 比决策-49 更轻, 无新 FFI/无新 crate）。
+  4. **接线（http_server_final 1509 → 1551, +42 行）**：import + 每
+     请求 state 构造 + 写/读注入（dispatch 主 JSON 分支,
+     `inject_dep_calls` 之后、`guarded_run_handler` 之前; state 被消费
+     后不再使用, 对后续分支零影响）+ **3 demo 路由**（`/state`
+     set+read / `/state-dyn/{who}` 参数插值 / `/state-missing` 无 set
+     读 `user,ghost` → 双空 = **跨请求隔离证明** — 即使前一请求写
+     user=bob 本请求也读不到, P22-6）+ `check_state_specs` 注册期检查。
+  5. **`request_state.mojo`（124 行 <500）** +
+     **`request_state_selftest.mojo`**（JIT 可达纯逻辑自检: set 解析 /
+     value 保冒号 / `{param}` 插值 / 缺失键字面量 / 空条目跳过 / 读
+     注入 / 缺失 → "" / trim / 注册校验 — file_params_selftest 同
+     模式, 不触 run_handler FFI 闭包）。
+  6. **文档化偏差（ADR-0025 §3.5 ×7）**：① 缺失键读 → `""`（F10
+     约定）vs 上游 500; ② 写面 = 路由声明（handler 前单点评估）vs 代码
+     动态写; ③ 值域 = String vs 任意对象（结构化值可 JSON 编码进
+     字符串）; ④ 无属性反射/集合面（`in`/`len`/`iter`/`del`）; ⑤
+     惰性 property → 每请求显式构造（parity, 语义相同）; ⑥
+     下划线前缀属性 1.6.0 允许（parity）; ⑦ **（环境项）本机 dev
+     环境透明代理**劫持新 bind 端口 ~2s 内首连接（Caddy :80 假空
+     200, 真 server 收不到, taint = 该 bind 生命周期, 实测）→ e2e
+     6 副 server + `fmtool bench` 就绪探针 **bind 后 sleep 5s 再首
+     探针** + `/health` body 须含 `healthy`（假响应 body 为空）防假
+     ready — 干净环境 (CI) 不受影响, 仅多等 5s。
+  验收：e2e **373/373**（366 + 7 XS：/state set+read /
+  /state-dyn/bob 插值 / /state-missing 双空串 / **跨请求隔离**（bob、
+  alice 写后独立请求 state 仍空）/ health 200 / errors/99 404 /
+  exc/ve 500 回归）/ cargo **409/0/4**（FFI diff = 0）/ clippy
+  `-D warnings` 0 警告（双 crate）/ bench 6 场景 0 errors
+  （get_root_10k_100c **32,938 req/s**, 历史区间内）/ **ldd 仅
+  libc** / env -i 干净启动（health + /state + /state-dyn/bob 全对）/
+  binary **3.7M**（3,700,736 B，≤4.2M；vs 决策-49 +36 KB）/
+  `find src -name '*.c'` = 0 保持
+
+*最后更新：2026-09-10（**决策-50 Request.state**（ADR-0025, Goal-0003 P2 矩阵 #22 ✅）：
+starlette 1.6.0 P22-1..6 探测（scope 承载 property / 属性·dict 双面 / 缺失读 500 / del quirk /
+无 __contains__ / 每请求隔离 ×2 活体）→ **声明式映射**（零 FFI, 纯 Mojo）：写面 `_state_set =
+"key:value;…"`（首个 `:` 切分; 值 `{param}` 插值 — 缺失键保留字面量; 评估 = 全部注入之后 =
+「middleware 先写」声明式等价; 注册期校验 check_state_specs）+ 读面 `_reads_state` CSV →
+`state_<name>`（缺失 → "" = F10 约定, 上游 500 → §3.5-1）+ 存储 = dispatch 每请求
+Dict[String,String]（P22-2/6, 请求结束即弃）+ **FFI diff = 0**;
+新模块 request_state.mojo(124<500) + request_state_selftest.mojo(JIT 纯逻辑) + http_server_final
+1509→1551(+42: import + 每请求 state + 写/读接线 + 3 demo /state·/state-dyn/{who}·/state-missing
+(无 set, user,ghost 双空 = 跨请求隔离证明));
+文档化偏差 ×7（ADR-0025 §3.5: ① 缺失读 → "" 非 500 ② 写 = 声明非代码 ③ 值域 String ④ 无反射/集合面
+⑤ 惰性→显式构造(parity) ⑥ 下划线 parity ⑦ 环境项: 本机 dev 环境透明代理劫持新 bind 首连接
+(Caddy :80 假空 200, taint = bind 生命周期) → e2e 6 副 server + fmtool bench 就绪探针
+bind 后 sleep 5s 再首探针 + /health body 须含 healthy 防假 ready（CI 不受影响, 仅 +5s））;
+验收: e2e **373/373**（366+7 XS, 含跨请求隔离）/ cargo **409/0/4**（FFI diff = 0）/ clippy
+0 警告(双 crate) / bench 6 场景 0 errors（get_root_10k_100c 32,938 req/s, 区间内）/ ldd 仅
+libc / env -i 干净启动(health+/state+/state-dyn) / **3.7M**（3,700,736 B, ≤4.2M, +36 KB vs
+决策-49）/ C 清零保持;
+2026-09-10（**决策-49 任意异常类型 handler**（ADR-0024, Goal-0003 P2 矩阵 #13 ✅）：
 Mojo 1.0.0 异常面探测（仅 Error 类型/String(e)=message/std.os.getenv 原生/try-scope 规则）→
 **字符串 tag 约定** `raise Error("TAG: msg")` + **声明式处理表**（env FASTAPI_MOJO_EXCEPTION_HANDLERS
 "TAG:STATUS:BODY[:json];…" 全局, 同 tag 后者胜 / `_exc_handlers` 路由级整体替换超集）+
