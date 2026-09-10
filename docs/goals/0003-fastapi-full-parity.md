@@ -14,7 +14,7 @@
 ## 0. 现状定位（2026-09-05 盘点）
 
 **已达成（v0.5.1 + 决策-31~48）**：
-- 单 binary 3.7M（3,733,504 B），ldd 仅 libc，env -i 干净启动，e2e **383 项**，cargo 431 单测
+- 单 binary 3.7M（3,803,136 B），ldd 仅 libc，env -i 干净启动，e2e **395 项**，cargo 431 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -53,7 +53,7 @@
 | 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | ✅ 全量（HTTPException F2 / 422 F1 既有 + **任意异常类型 handler 决策-49, ADR-0024**：字符串 tag 约定 `raise Error("TAG: msg")`（Mojo 1.0.0 仅 Error 类型, P13-M2/M5）+ 声明式表（env `FASTAPI_MOJO_EXCEPTION_HANDLERS` "TAG:STATUS:BODY[:json];…" 全局 / `_exc_handlers` 路由级整体替换超集 / 同 tag 后者胜 P13-2）+ 声明式 raise 钩子 `_exception_raise`（endpoint body 位置）+ 路由级 try/except guard（= 上游 wrap_app_handling_exceptions；查找 精确 tag → `Exception` catch-all（= ServerErrorMiddleware 500/Exception 键, P13-9）→ 默认 500 "Internal Server Error" text/plain（P13-10 逐字 parity）；body 模板 {exc}/{tag} 插值（json 条目 `_json_escape`）；P13-8 日志 quirk 模拟） | 文档化偏差 ×8（ADR-0024 §3.5：① 无类→字符串 tag（无 MRO）② handler=声明式条目非 callable ③ 无 int status 键（HTTPException 非 raised 异常）④ response_started 路径结构性不可达（单发）⑤ 双层 map→单表 ⑥ 日志 quirk 线形模拟 ⑦ per-route=超集 ⑧ 中间件抛出 gap） | — |
 | 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 + GZip ✅（决策-40 env 声明式） | 用户自定义（Mojo 无闭包：声明式 env / 固定链为等价形态，扩充 P2） | §P2 |
 | 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | ✅ 声明式 env 等价（决策-42, ADR-0017：ORIGINS/METHODS/HEADERS/CREDENTIALS/MAX_AGE + 普通响应条件附带 + 预检 204/400 动态） | 预检 400 体为本实现 JSON 简化 + 裸 OPTIONS 204 超集（均文档化, e2e 守护） | — |
-| 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ | tags/prefix/custom | §P2 |
+| 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ 全量（**OpenAPI 精化 决策-52, ADR-0027**：app 级 9 `FASTAPI_MOJO_OPENAPI_*` env（title/version/description/terms/contact/license/servers/tags/external_docs — /openapi.json 请求期读, 畸形 → 省略字段不 500）+ 路由级 8 声明（`_summary` 默认 = name Python title() / `_description` / `_response_description` 默认 "Successful Response" / `_operation_id` 默认 `{name}{path 逐 /{ }→_}_{method}`（P24-6: 上游 `re.sub(\W→_)` 逐字符**无 `_+` 折叠**）/ `_deprecated` / `_include_in_schema`（不进 paths/components 仍可服务）/ `_status_code`="NNN Reason"（wire 仅当结果恰 "200 OK" 覆写 + spec 主键前 3 位）/ `_responses` 额外状态码（重复主键注册期拒绝））；注册期校验 `check_openapi_specs`（check_ws_specs/check_state_specs 同策略 fail-fast）；operation 键序 P24-4（tags? summary? description? operationId ...）+ 根键序 P24-10（openapi, info, servers?, paths, components?, tags?, externalDocs?；externalDocs description 先）；AnyUrl 2.13.5 规范化（contact/license/externalDocs url：host-only 尾 `/`、path 空且有 `?`/`#` 前插 `/`；**servers url 原样透传** = 上游 AnyUrl|str str 优先, P24-12 修正）；3 demo 路由 /meta/{probe,hidden,made}；**FFI diff = 0**（纯 Mojo：openapi_custom.mojo 381 ln + openapi.mojo 497 ln 重写）） | 文档化偏差 ×9（ADR-0027 §3.5：① 3.0.3 vs 上游 3.1.0（200 schema `{type:object}` vs `{}`）② 无运行期可变 spec（请求期声明式再生成；上游 `extra` 本身 no-op）③ _status_code = 全 status line（_stream_status/_file_status 同型）④ app 级 = env 非构造器（畸形省略）⑤ root_path/openapi_url/docs_url/redoc/webhooks 未实现（P24-11: 0.141.1 root_path 对 spec 无影响）⑥ summary = handler.name title()（同字符串约定）⑦ _responses 重复主键注册期拒绝（上游 dict 覆盖）⑧ 路由 tags 不并入根 tags （P24-2 复刻）⑨ servers url 不规范化（上游 AnyUrl|str, parity）） | — |
 | 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ 全量（决策-34 Basic/Bearer/APIKey + 决策-44 OAuth2/JWT，ADR-0019：/token password grant（宽松 form 422 全收集）+ JWT HS256（alg 白名单 + exp/nbf/sub）+ get_current_user = sub→auth_user + OpenAPI securitySchemes） | 文档化偏差（空 Bearer → 401 非 403；sub 空串也拒；_auth_users CSV = 凭据声明式等价，ADR-0019 §3.5，e2e 守护） | — |
 | 18 | APIRouter | include_router(prefix/tags/dependencies) | ✅ include 时合并，dispatch 零改动（决策-37，ADR-0013）；OpenAPI tags + path 分组 | — | — |
 | 19 | Lifespan | startup/shutdown (context manager) | ✅ 声明式 env 命令（决策-36，Mojo 无闭包的等价形态）；失败→服务不启动 | — | — |
@@ -111,10 +111,38 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52） | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-51 WebSocket 精化**（ADR-0026, P2 矩阵 #23 ✅）：
+*最后更新：2026-09-10（**决策-52 OpenAPI 精化**（ADR-0027, P2 矩阵 #16 ✅）：
+fastapi 0.141.1 / pydantic 2.13.5 活体探测 P24-1..15（+ p24e/f/g 勘误：operationId 默认 =
+`re.sub(\W→_)` 逐字符**无 `_+` 折叠**（`another_one_a__id__b_post`）；servers.url = `AnyUrl |
+str` smart-union str 精确匹配优先 → **不规范化**（`not-a-url` 亦原样）；AnyUrl 2.13.5：
+host-only → 尾 `/`、path 空且有 `?`/`#` → 在其前插 `/`（`https://host?x` → `https://host/?x`））
+→ **声明式映射**（ADR-0004 范式, **FFI diff = 0** 纯 Mojo, JIT 可达）：app 级 9
+`FASTAPI_MOJO_OPENAPI_*` env（/openapi.json 请求期读, 空 = 默认/省略, 畸形 → 省略字段不 500）
++ 路由级 8 声明（`_summary` 默认 = name Python title()（P24-5 全向量）/ `_description` /
+`_response_description` 默认 "Successful Response"（P24-8）/ `_operation_id` 默认
+`{name}{path 逐 /{ }→_}_{method}`（P24-6）/ `_deprecated` / `_include_in_schema`（不进
+paths/components 仍可服务, P24-13）/ `_status_code`="NNN Reason"（wire 仅当 handler 结果恰
+"200 OK" 覆写 — 异常/401/405/422 不覆写; spec responses 主键 = 前 3 位, P24-7）/
+`_responses`="404:Not found;…"（首 `:` 切, desc 可再含 `:`; 仅 description, P24-9; **与主键
+重复 → 注册期拒绝** fail-fast `check_openapi_specs`, check_ws_specs/check_state_specs 同策略））
++ 键序对齐（operation P24-4: tags? summary? description? operationId parameters? requestBody?
+responses security? deprecated?；根 P24-10: openapi, info, servers?, paths, components?,
+tags?, externalDocs?；**externalDocs description 先**）+ AnyUrl quirk 复刻（见上；terms
+无 quirk = 裸 str）+ 3 demo 路由（`/meta/probe` 全 operation 键 / `/meta/hidden` /
+`/meta/made` 201）+ 新模块 `openapi_custom.mojo`（381 ln: title_case / default_operation_id /
+url_host_quirk / info·servers·root tags·externalDocs JSON / parse_response_entries /
+primary_status_key / check_openapi_specs — 纯函数无 FFI）+ `openapi.mojo` 重写（497 ln <500）
+→ e2e **383→395/395**（+OP2-1..12: minimal info / full info 精确 / servers / tags+externalDocs /
+probe op 精确 / hidden / made 201 / 默认 opid+summary / Successful Response / jsoncheck ×2 /
+docs / health 回归）/ cargo **431/0/4**（Rust 零改动）/ clippy **0 警告**（双 crate）/
+ldd 仅 libc / binary **3,803,136 B**（+70 KB vs 决策-51, ≤4.2M 预算）/ env -i 干净启动 /
+bench 6 场景 0 errors（get_root_10k_100c = 33,590, 32.9k–43.9k 带内）/ 孤儿 0 /
+selftest ~60 断言全绿 0 警告
+下一轮：P2 剩余（Header alias / 路径参数约束扩充 / 用户自定义 middleware / TestClient）
+2026-09-10（**决策-51 WebSocket 精化**（ADR-0026, P2 矩阵 #23 ✅）：
 uvicorn 0.52.4 / wsproto 1.3.2 / starlette 1.6.0 活体探测 P23-1..7 + p23i close-wait A..E
 （close reason 帧规范化: 1004/1006→1000 / 1005 无 payload / 123B codepoint 截断; close-wait:
 数据·ping 丢弃 / 任何 close→静默 close / 10s 定时器; 合法接收码集）→ **声明式映射**

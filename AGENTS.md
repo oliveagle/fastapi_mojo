@@ -1144,7 +1144,87 @@
   +33 KB）/ `find src -name '*.c'` = 0 保持 / `mojo run
   ws_directives_selftest.mojo` all passed
 
-*最后更新：2026-09-10（**决策-51 WebSocket 精化**（ADR-0026, Goal-0003 P2 矩阵 #23 ✅）：
+- **已决策-52**：**OpenAPI 精化 — 顶层 tags/info/servers/externalDocs + 路由级
+  summary/description/operation_id/deprecated/include_in_schema/status_code/
+  responses（ADR-0027, Goal-0003 P2 矩阵 #16 — 对标矩阵 #16 ✅ 全量）**：
+  1. **上游探测（fastapi 0.141.1 / pydantic 2.13.5 活体, P24-1..15 + p24e/f/g
+     勘误）**：info 键序 `title, description?, termsOfService?, contact?,
+     license?, version`（缺省省略）；operation 键序 `tags?, summary?,
+     description?, operationId, parameters?, requestBody?, responses,
+     security?, deprecated?`；根键序 `openapi, info, servers?, paths,
+     components?, tags?, externalDocs?`（**externalDocs: description 先**）；
+     **operationId = `re.sub(\W→_)` 逐字符、无 `_+` 折叠**（`foo_bar_x_y__z__get`
+     / `another_one_a__id__b_post` / `calc_calc__a___b__get` — 0.141.1
+     `generate_unique_id` 源码 + 活体双重确认）；summary = 函数名 Python
+     `str.title()`（`_`/`-`→空格, P24-5 全向量）；**AnyUrl 2.13.5 规范化**：
+     contact/license/externalDocs url — host-only → 尾 `/`, path 空且有
+     `?`/`#` → 在其前插 `/`（`https://host?x` → `https://host/?x`）；
+     **servers.url = `AnyUrl | str`，str 精确匹配优先 → 不规范化**（含
+     `not-a-url` 原样, P24-12 修正）；`include_in_schema=False` → 不进
+     paths（仍可服务, P24-13）。
+  2. **声明式映射（ADR-0004 范式, **FFI diff = 0**, JIT 可达）**：app 级
+     9 `FASTAPI_MOJO_OPENAPI_*` env（TITLE/VERSION/DESCRIPTION/TERMS/
+     CONTACT/LICENSE/SERVERS/TAGS/EXTERNAL_DOCS — /openapi.json 请求期
+     读, 空 = 默认/省略, 畸形 → 省略字段不 500）+ 路由级 8 handler.data
+     声明（`_summary` 默认 = name title() / `_description` /
+     `_response_description` 默认 "Successful Response"（P24-8）/
+     `_operation_id` 默认公式（P24-6）/ `_deprecated` / `_include_in_schema`
+     （不进 paths/components, 仍可服务）/ `_status_code`="NNN Reason"
+     （**wire 仅当 handler 结果恰 "200 OK" 时覆写** — 异常/401/405/422
+     不覆写; spec responses 主键 = 前 3 位, P24-7）/ `_responses`（额外
+     状态码, 首 `:` 切, **与主键重复 → 注册期拒绝**））；注册期校验
+     `check_openapi_specs`（check_ws_specs/check_state_specs/check_body_
+     schemas 同策略 fail-fast, 畸形启动即 fail）。
+  3. **接线（http_server_final 1583 → 1642, +59 行）**：import（getenv +
+     check_openapi_specs）+ `check_openapi_specs(router)` + **3 demo 路由**
+     （`/meta/probe` 单路由覆盖全部 operation 级键 / `/meta/hidden` /
+     `/meta/made` 201）+ /openapi.json 调用点读 9 env（TITLE/VERSION 默认
+     保持 `fastapi_mojo API`/`1.8.0`）+ /docs 标题同源 + 主 JSON 分支
+     `_status_code` wire 覆写; **新模块 `openapi_custom.mojo`（381 行
+     <500, 纯函数: title_case / default_operation_id / url_host_quirk /
+     info·servers·root tags·externalDocs JSON 构造 / parse_response_entries
+     / primary_status_key / check_openapi_specs）+
+     `openapi_custom_selftest.mojo`（~60 断言, 0 警告）**；`openapi.mojo`
+     重写（497 行 <500: operation 键序重排 P24-4 + 根键序 P24-10 +
+     hidden 路由跳过 paths/components）。
+  4. **文档化偏差（ADR-0027 §3.5 ×9）**：① 3.0.3 vs 上游 3.1.0（200 schema
+     `{type:object}` vs `{}`）② 无运行期可变 spec（请求期声明式再生成;
+     上游 `extra` 参数本身 no-op）③ _status_code = 全 status line
+     （`_stream_status`/`_file_status` 同型）④ app 级 = env 非构造器
+     （畸形省略）⑤ root_path/openapi_url/docs_url/redoc_url/webhooks 未
+     实现（P24-11: 0.141.1 root_path 对 spec 无影响）⑥ summary =
+     handler.name title()（同字符串约定）⑦ _responses 重复主键注册期
+     拒绝（上游用户 dict 覆盖）⑧ 路由 tags 不并入根 tags（P24-2 复刻）
+     ⑨ servers url 不规范化（上游 AnyUrl|str, parity 列此完备）。
+  验收：e2e **395/395**（383 + 12 OP2：subserver minimal info / full info
+  精确串（terms 无 quirk + contact/license url quirk）/ servers 位置 /
+  根 tags + externalDocs（desc 先）/ `/meta/probe` op 精确串 /
+  `/meta/hidden` 可服务 + spec 缺席 / `/meta/made` wire 201 + spec 主键 /
+  `/health` 默认 opid `health_health_get` + summary `Health` /
+  "Successful Response" 默认 / 双 server jsoncheck 完整合法 / /docs 标题
+  不变 / /health 回归）/ cargo **431/0/4**（Rust 零改动）/ clippy
+  `-D warnings` 0 警告（双 crate）/ `mojo run openapi_custom_selftest.mojo`
+  all passed 0 警告 / bench 6 场景 0 errors（get_root_10k_100c **33,590
+  req/s**, 32.9k–43.9k 区间内, vs 决策-51 34,880 无回归）/ **ldd 仅 libc** /
+  env -i 干净启动 / binary **3.7M**（3,803,136 B，≤4.2M；vs 决策-51 +70 KB
+  — 纯 Mojo）/ `find src -name '*.c'` = 0 保持 / `pgrep -x fastapi_mojo` = 0
+
+*最后更新：2026-09-10（**决策-52 OpenAPI 精化**（ADR-0027, Goal-0003 P2 矩阵 #16 ✅）：
+fastapi 0.141.1 / pydantic 2.13.5 活体 P24-1..15（+ p24e/f/g 勘误：operationId 无 `_+`
+折叠；servers.url = AnyUrl|str str 优先不规范化；AnyUrl 2.13.5 path 空 + `?`/`#` → 前插 `/`）
+→ **声明式映射**（ADR-0004 范式, **FFI diff = 0** 纯 Mojo）：app 级 9
+`FASTAPI_MOJO_OPENAPI_*` env（请求期读, 畸形省略不 500）+ 路由级 8 声明
+（`_summary`/`_description`/`_response_description`/`_operation_id`/`_deprecated`/
+`_include_in_schema`/`_status_code`="NNN Reason"（wire 仅 "200 OK" 覆写 + spec 主键前 3
+位）/`_responses`（重复主键注册期拒绝））+ 键序 P24-4/P24-10（externalDocs desc 先）+
+AnyUrl quirk（contact/license/externalDocs; servers 原样）+ 3 demo 路由
+（/meta/probe · /meta/hidden · /meta/made）+ 新模块 openapi_custom.mojo（381 ln）+
+openapi.mojo 重写（497 ln <500）+ `check_openapi_specs` 注册期校验
+→ e2e **383→395/395** / cargo **431/0/4**（Rust 零改动）/ clippy **0**（双 crate）/
+ldd 仅 libc / binary **3,803,136 B**（+70 KB, ≤4.2M）/ env -i / bench 0 errors
+（33,590 req/s, 带内）/ 孤儿 0 / selftest ~60 断言全绿
+下一轮：P2 剩余（Header alias / 路径参数约束扩充 / 用户自定义 middleware / TestClient）
+2026-09-10（**决策-51 WebSocket 精化**（ADR-0026, Goal-0003 P2 矩阵 #23 ✅）：
 uvicorn 0.52.4 / wsproto 1.3.2 / starlette 1.6.0 活体 P23-1..7 + p23i A..E（close reason
 规范化 1004/1006→1000 / 1005 无 payload / 123B codepoint 截断; close-wait: 数据·ping 丢弃 /
 任何 close → 静默 close / 10s 定时器）→ **声明式映射**（ADR-0004 范式, `run_ws_message`
