@@ -40,6 +40,9 @@ from security_jwt import handle_oauth2_token, check_oauth2  # 决策-44: /token 
 from lifespan import run_lifespan_startup, run_lifespan_shutdown
 from exception_handlers import guarded_run_handler  # 决策-49 (ADR-0024)
 from request_state import apply_state_set, inject_request_state, check_state_specs  # 决策-50 (ADR-0025)
+from param_constraints import (check_param_constraints, get_param_constraints,
+                               get_header_types, parse_reads_headers)
+from param_constraints_run import validate_headers_collect, validate_implicit_constraints
 
 
 def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: String) raises:
@@ -178,12 +181,48 @@ def inject_request_headers(mut params: Dict[String, String], header_names_csv: S
                     var v = String("")
                     var rc = external_call["extract_request_header", Int](
                         pn[1].as_c_string_slice())
-                    if rc == 0:
+                    # 决策-54 (ADR-0029): FFI 三态 — 0=在场(含空值) / -2=缺席(slice 已清空) /
+                    # -1=出错. F3a 注入语义保持: 在场/缺席都注入 (缺席 = 空串).
+                    if rc != -1:
                         var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
                         v = span_to_str(sl.as_bytes())
                     params["header_" + pn[0]] = v
             start = i + 1
         i += 1
+
+def read_headers_present(header_names_csv: String) -> Dict[String, String]:
+    """决策-54 (ADR-0029): typed header 校验用 — 逐 _reads_headers 条目读值.
+    FFI 三态 (extract_request_header): rc==0 在场 (含空值) -> name->value;
+    rc==-2 缺席 -> 不进 dict (missing 语义, 缺失+默认走 default 校验); rc==-1
+    出错 -> 不进 dict. 与 inject_request_headers 同款 FFI (get_header_value_ci
+    多值取首), 仅保留 present 集合."""
+    var out = Dict[String, String]()
+    var n = header_names_csv.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(header_names_csv[byte=i]) == 44)  # ','
+        if is_sep:
+            if i > start:
+                var name = String(header_names_csv[byte=start:i])
+                var b = 0
+                var e = name.byte_length()
+                while b < e and (ord(name[byte=b]) == 32 or ord(name[byte=b]) == 9):
+                    b += 1
+                while e > b and (ord(name[byte=e - 1]) == 32 or ord(name[byte=e - 1]) == 9):
+                    e -= 1
+                if e > b:
+                    var clean = String(name[byte=b:e])
+                    var pn = parse_header_entry(clean)
+                    var nn = pn[1]  # wire (local: as_c_string_slice 需非 rvalue)
+                    var rc = external_call["extract_request_header", Int](nn.as_c_string_slice())
+                    if rc == 0:
+                        var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
+                        var kn = pn[0]
+                        out[kn] = span_to_str(sl.as_bytes())
+            start = i + 1
+        i += 1
+    return out^
 
 # ---------- F-DI (Depends, 决策-33): 依赖注入 ----------
 
@@ -852,6 +891,50 @@ def register_routes(mut router: Router) raises:
     hdr_h.set_data("_reads_headers", "x_token=Token-Literal,client_id")
     router.add_route("/hdr/alias", "GET", hdr_h)
 
+    # 决策-54 (ADR-0029): 参数约束面 demo (矩阵 #2) — path/query/header 约束 + typed header
+    # /con/path/{n}: 数值边界面 (n:int + gt=3,le=10)
+    var con1 = Handler(KIND_ECHO(), "con_path_num")
+    con1.set_data("_param_types", "n:int")
+    con1.set_data("_param_constraints", "n=gt=3,le=10")
+    router.add_route("/con/path/{n}", "GET", con1)
+
+    # /con/str/{s}: 隐式 str 面 (len=2-4, pat=^[a-z]+$)
+    var con2 = Handler(KIND_ECHO(), "con_path_str")
+    con2.set_data("_param_constraints", "s=len=2-4,pat=^[a-z]+$")
+    router.add_route("/con/str/{s}", "GET", con2)
+
+    # /con/query: query 类型化 (q:int=5 + ge=0,lt=100) + 隐式 str (r=len=1-3) 混合
+    var con3 = Handler(KIND_ECHO(), "con_query")
+    con3.set_data("_param_types", "q:int=5")
+    con3.set_data("_param_constraints", "q=ge=0,lt=100;r=len=1-3")
+    router.add_route("/con/query", "GET", con3)
+
+    # /con/hdr: typed header — x_token 转 wire x-token (required int: 缺失 422 /
+    # "abc" int_parsing); x-app 无下划线 wire 原样 (bool 默认 true: 缺失 200 /
+    # "xyz" bool_parsing 完整消息)
+    var con4 = Handler(KIND_ECHO(), "con_hdr")
+    con4.set_data("_reads_headers", "x_token,x-app")
+    con4.set_data("_header_types", "x_token:int;x-app:bool=true")
+    router.add_route("/con/hdr", "GET", con4)
+
+    # /con/hdr2: alias wire (x-ver -> X-Ver) + 默认 + 数值 (ge/le/mo) / 字符串
+    # (len/pat) 约束混合面
+    var con5 = Handler(KIND_ECHO(), "con_hdr2")
+    con5.set_data("_reads_headers", "x-ver=X-Ver,tag")
+    con5.set_data("_header_types", "x-ver:int=1;tag:str=ab")
+    con5.set_data("_param_constraints", "x-ver=ge=1,le=3,mo=1;tag=len=1-2,pat=^[0-9a-z]+$")
+    router.add_route("/con/hdr2", "GET", con5)
+
+    # /con/all/{n}: collect-all 群序断言路由 (ADR-0029 §7 增补, 超出 §3.7 五路由)
+    # — 一个请求同时违 path (n=1<gt=3) + query (q=200>lt=100) + header (x-h
+    # 缺失, 默认 2 违 ge=5, input=2 数字) -> detail 数组 path→query→header
+    var con6 = Handler(KIND_ECHO(), "con_all")
+    con6.set_data("_param_types", "n:int;q:int=1")
+    con6.set_data("_reads_headers", "x-h")
+    con6.set_data("_header_types", "x-h:int=2")
+    con6.set_data("_param_constraints", "n=gt=3;q=lt=100;x-h=ge=5")
+    router.add_route("/con/all/{n}", "GET", con6)
+
     # 决策-49 (ADR-0024): 任意异常类型 handler demo (Goal-0003 矩阵 #13).
     # _exception_raise = 声明式 raise 钩子 (endpoint body 抛异常的位置);
     # 无 env 表/路由表 -> 默认 500 "Internal Server Error" (P13-10);
@@ -926,6 +1009,8 @@ def register_routes(mut router: Router) raises:
     check_openapi_specs(router)
     # 决策-53: _reads_headers 条目 (name / name=alias) 注册期校验 (同策略)
     check_header_specs(router)
+    # 决策-54 (ADR-0029): _param_constraints/_header_types 注册期校验 (同策略)
+    check_param_constraints(router)
 
 
 def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
@@ -1214,13 +1299,32 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         # 这是 dispatch 唯一一处"认识类型化"的代码; 新增类型化路由 = 仅在
                         # register_routes 用 set_data("_param_types", "name:type;name:type").
                         var type_spec = get_param_types(route_result.handler)
+                        # 决策-54 (ADR-0029): 约束面 — 类型化参数约束 + 隐式 str (len/pat) + typed header
+                        var constraints = get_param_constraints(route_result.handler)
+                        var htypes = get_header_types(route_result.handler)
                         var aliases = get_param_aliases(route_result.handler)
                         # 决策-38 (Goal-0003 P1): 参数校验 + body 校验统一为 FastAPI 422 detail
                         # 数组 (loc/msg/type, 收集全部错误: 参数 -> ["path"/"query",x] (+
                         # 决策-43 list 元素下标 i; alias 按 alias key 取值);
                         # body -> ["body",x] + 嵌套/数组下标; Pydantic v2 风格).
                         var perr = validate_params_collect(type_spec, route_result.params,
-                                                           query_params.values, query_params.multi_values, aliases)
+                                                           query_params.values, query_params.multi_values, aliases, constraints)
+                        # 隐式 str (未类型化 path/query) 约束 — dispatch 独立 pass (ADR-0029 §3.3)
+                        var imp_errs = validate_implicit_constraints(constraints, type_spec, htypes,
+                                                                       route_result.params, query_params.values)
+                        # typed header: FFI 读值 (present = name->raw, 含空值) -> 纯校验 (param_constraints_run)
+                        var herr_ok = True
+                        var herr_list = List[String]()
+                        var hvals = Dict[String, String]()
+                        if len(htypes) > 0:
+                            var present = read_headers_present(route_result.handler.data["_reads_headers"])
+                            var reads = parse_reads_headers(route_result.handler.data["_reads_headers"])
+                            var hres = validate_headers_collect(htypes, reads, present, constraints)
+                            herr_ok = hres[0]
+                            for he in hres[1]:
+                                herr_list.append(he)
+                            for hv in hres[2]:
+                                hvals[hv] = hres[2][hv]
                         var sres = validate_body_schema(route_result.handler, effective_method, body_params, body_str)
                         # 决策-45 (ADR-0020): Form 多值/422 parity —
                         # CT 为 form 时 parse_form_multi 收全部 occurrence;
@@ -1259,6 +1363,11 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                         if not perr[0]:
                             for pe in perr[1]:
                                 all_errs.append(pe)
+                        for ie in imp_errs:
+                            all_errs.append(ie)
+                        if not herr_ok:
+                            for he in herr_list:
+                                all_errs.append(he)
                         if not sres[0]:
                             for se in sres[1]:
                                 all_errs.append(se)
@@ -1310,6 +1419,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                     req_params["auth_apikey"] = auth_apikey_in
                                 if "_reads_headers" in route_result.handler.data:
                                     inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
+                                    # 决策-54: typed header 覆盖字符串注入 (在场 = raw 串; 缺失+默认 = 类型化字面量)
+                                    for hn in hvals:
+                                        req_params["header_" + hn] = hvals[hn]
                                 if "_reads_cookies" in route_result.handler.data:
                                     inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
                                 # 决策-45: form 归一化单点注入 — typed

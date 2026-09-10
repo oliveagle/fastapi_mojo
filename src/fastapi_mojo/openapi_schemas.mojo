@@ -9,6 +9,9 @@
 
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field,
                          field_count, _split_top, _trim, _parse_range)
+from param_constraints import (ConstraintSpec, constraint_schema_fragments,
+                               parse_constraint_entry)
+from numlit import parse_base, parse_typed_value
 from string_builder import StringBuilder
 from json import json_escape
 
@@ -137,4 +140,140 @@ def _json_list_array(t: String, csv: String) raises -> String:
         else:
             sb.append("\"" + json_escape(v) + "\"")
     sb.append("]")
+    return sb.take()
+
+# ---------- 参数 schema (决策-54: 自 openapi.mojo 移入 + 约束键) ----------
+
+def _openapi_param_schema(base: String, desc: String, cons: ConstraintSpec) raises -> String:
+    """参数 schema (决策-38 enum + 决策-43 list/default/desc + 决策-54 约束).
+    键序 (ADR-0029 §3.5): type, [enum], minLength, maxLength, pattern,
+    multipleOf, minimum, exclusiveMinimum, maximum, exclusiveMaximum,
+    default, description. 约束键仅 scalar/enum (list+约束注册期已拒).
+    隐式 str (base="string") 恒带 type 键 (§3.5-⑥ 偏差: 比上游更显式)."""
+    var n = base.byte_length()
+    var eq = -1
+    for i in range(n):
+        if ord(base[byte=i]) == 61:
+            eq = i
+            break
+    var spec = base
+    var default_value = ""
+    var has_default = False
+    if eq >= 0:
+        spec = String(base[byte=0:eq])
+        default_value = String(base[byte=eq + 1:n])
+        has_default = True
+    var sn = spec.byte_length()
+    var br = -1
+    for i in range(sn):
+        if ord(spec[byte=i]) == 91:
+            br = i
+            break
+    var sb = StringBuilder()
+    if br >= 0:
+        var t = String(spec[byte=0:br])
+        var j = br + 1
+        var found = -1
+        while j < sn:
+            if ord(spec[byte=j]) == 93:
+                found = j
+                break
+            j += 1
+        var vals = ""
+        if found > br:
+            vals = String(spec[byte=br + 1:found])
+        var ot = _type_to_openapi(t)
+        if vals == "":
+            # list (决策-43): array; 仅显式 '=' 时带 default
+            sb.append("{\"type\":\"array\",\"items\":{\"type\":\"" + ot + "\"}")
+            if has_default:
+                sb.append(",\"default\":" + _json_list_array(t, default_value))
+        else:
+            sb.append("{\"type\":\"" + ot + "\",\"enum\":" + _json_str_array(vals))
+            for f in constraint_schema_fragments(cons):
+                sb.append("," + f)
+            if has_default:
+                sb.append(",\"default\":\"" + json_escape(default_value) + "\"")
+    else:
+        sb.append("{\"type\":\"" + _type_to_openapi(spec) + "\"")
+        for f in constraint_schema_fragments(cons):
+            sb.append("," + f)
+        if has_default:
+            if spec == "int" or spec == "float" or spec == "bool":
+                sb.append(",\"default\":" + default_value)
+            else:
+                sb.append(",\"default\":\"" + json_escape(default_value) + "\"")
+    if desc != "":
+        sb.append(",\"description\":\"" + json_escape(desc) + "\"")
+    sb.append("}")
+    return sb.take()
+
+
+def _header_param_schema(type_spec: String, desc: String, cons: ConstraintSpec) raises -> String:
+    """Header 参数 schema (ADR-0029 §3.5): type + 约束键 + default (类型化:
+    int/float 数字, bool true/false, str 引号) + desc. 未类型化
+    (type_spec="string") = {"type":"string"} (既有行为; 隐式 str 仍可带
+    len/pat). required 由 _generate_parameter 调用方在 parameter 层处理."""
+    var n = type_spec.byte_length()
+    var eq = -1
+    for i in range(n):
+        if ord(type_spec[byte=i]) == 61:
+            eq = i
+            break
+    var spec = type_spec
+    var default_value = ""
+    var has_default = False
+    if eq >= 0:
+        spec = String(type_spec[byte=0:eq])
+        default_value = String(type_spec[byte=eq + 1:n])
+        has_default = True
+    var pb = parse_base(spec)
+    var tname = "str"
+    if pb.ok:
+        tname = pb.type_name
+    var sb = StringBuilder()
+    sb.append("{\"type\":\"" + _type_to_openapi(tname) + "\"")
+    for f in constraint_schema_fragments(cons):
+        sb.append("," + f)
+    if has_default:
+        var tv = parse_typed_value(tname, default_value)
+        if tname == "int" or tname == "float" or tname == "bool":
+            if tv[0]:
+                sb.append(",\"default\":" + tv[1])
+            else:
+                sb.append(",\"default\":" + default_value)
+        else:
+            sb.append(",\"default\":\"" + json_escape(default_value) + "\"")
+    if desc != "":
+        sb.append(",\"description\":\"" + json_escape(desc) + "\"")
+    sb.append("}")
+    return sb.take()
+
+
+def _generate_parameter(param_name: String, in_: String, type_spec: String, required: Bool,
+                        desc: String, cons: Dict[String, String]) raises -> String:
+    """生成单个 OpenAPI parameter 对象 (决策-54: cons 字典按 param_name
+    param_name 查后本点 parse_constraint_entry 按需解析). path/query schema 走
+    _openapi_param_schema; header 走 _header_param_schema (typed header:
+    类型化默认/约束; 未类型化 = string). desc 非空 -> parameter 级
+    "description" (上游 Query/Path(description=...))."""
+    var sb = StringBuilder()
+    sb.append("{\"name\":\"" + json_escape(param_name) + "\",")
+    sb.append("\"in\":\"" + in_ + "\",")
+    sb.append("\"required\":" + ("true" if required else "false") + ",")
+    if in_ == "path" or in_ == "query":
+        if param_name in cons:
+            sb.append("\"schema\":" + _openapi_param_schema(type_spec, desc,
+                                                             parse_constraint_entry(cons[param_name], "")))
+        else:
+            sb.append("\"schema\":" + _openapi_param_schema(type_spec, desc, ConstraintSpec()))
+    else:  # header
+        if param_name in cons:
+            sb.append("\"schema\":" + _header_param_schema(type_spec, desc,
+                                                            parse_constraint_entry(cons[param_name], "")))
+        else:
+            sb.append("\"schema\":" + _header_param_schema(type_spec, desc, ConstraintSpec()))
+    if in_ != "header" and desc != "":
+        sb.append(",\"description\":\"" + json_escape(desc) + "\"")
+    sb.append("}")
     return sb.take()

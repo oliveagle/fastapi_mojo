@@ -27,6 +27,7 @@ use std::os::raw::{c_char, c_int, c_long, c_void};
 // ===== 子模块导入 (全部 `as` 别名以避免与 extern "C" fn 同名冲突) =====
 
 use super::cmd::run_command_json as cmd_run_command_json;
+use super::regex::rgx_match;
 use super::crypto::{b64url_encode as crypto_b64url_encode, hmac_sha256 as crypto_hmac_sha256};
 use super::init_workers::{get_worker_id as init_get_worker_id, init_workers as init_init_workers};
 use super::io::{
@@ -263,7 +264,7 @@ pub extern "C" fn get_query_slice() -> CSlice {
 }
 
 /// F3a: 按名从当前请求的 header 缓冲取值, 结果写入 CurrentRequest.hdr_value.
-/// 返回 -1 = 出错 (无 active conn); 0 = ok (含 header 缺失, 此时 len=0).
+/// 返回: 0 = 找到 (值可能为空串); -2 = 未找到 (len=0); -1 = 出错 (无 active conn).
 /// 调用方再调 get_header_value_slice 读结果.
 #[no_mangle]
 pub extern "C" fn extract_request_header(name: *const c_char) -> c_int {
@@ -722,6 +723,19 @@ pub extern "C" fn mp_part_field_len(i: c_int, field: c_int) -> c_long {
 #[no_mangle]
 pub extern "C" fn mp_part_field_byte(i: c_int, field: c_int, idx: c_long) -> c_long {
     mp_get_part_field_byte_inner(i as usize, field, idx) as c_long
+}
+
+// 决策-54 (ADR-0029): regex search (pattern, s) — 1 = 命中 / 0 = 未中 /
+// -1 = 编译失败. ASCII 域 (文档化); search 语义 = 上游 pydantic 2.13.5
+// parity (P26-h: ^ 仅串首, 任意起点, $ 串尾/尾\n前).
+#[no_mangle]
+pub extern "C" fn regex_match(pattern: *const c_char, s: *const c_char) -> c_int {
+    if pattern.is_null() || s.is_null() {
+        return -1;
+    }
+    let p = unsafe { c_str_lossy(pattern) };
+    let t = unsafe { c_str_lossy(s) };
+    rgx_match(&p, &t)
 }
 
 // 决策-46 (ADR-0021): part body 写盘 (UploadFile save 等价).

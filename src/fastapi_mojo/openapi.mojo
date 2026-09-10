@@ -15,9 +15,11 @@ from handler import Handler
 from params_typed import get_param_types
 from params_query_extra import get_param_aliases, get_param_descs
 from header_params import parse_header_entry  # 决策-53 (ADR-0028): header param 名 = wire 名
+from param_constraints import get_param_constraints, get_header_types
+from numlit import parse_type_spec, parse_base
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
                          _split_top, _trim, _parse_range)
-from openapi_schemas import (_type_to_openapi, _json_str_array, _json_list_array, _openapi_object_schema)
+from openapi_schemas import _openapi_object_schema, _generate_parameter
 from form_params import (form_has_declaration, form_openapi_schema,
                          form_request_body_required, lower_ascii,
                          form_field_names_ordered, get_form_types,
@@ -50,86 +52,6 @@ def _extract_path_params(path: String) -> List[String]:
                 continue
         i += 1
     return out^
-
-def _openapi_param_schema(base: String, desc: String) raises -> String:
-    """参数 schema (决策-38 enum + 决策-43 list/default/desc).
-    "int" / "int=10" (默认) / "str[a,b]" (enum) / "int[]" (array) /
-    "int[]=1,2" (array + CSV 默认). list -> {"type":"array","items":
-    {"type":"t"},"default":[...]} (仅显式 '=' 带 default); enum ->
-    {"type":"t","enum":[...],"default":...}; desc 非空 -> schema 级
-    "description" (上游: description 同时出现在 parameter 与 schema)."""
-    var n = base.byte_length()
-    var eq = -1
-    for i in range(n):
-        if ord(base[byte=i]) == 61:
-            eq = i
-            break
-    var spec = base
-    var default_value = ""
-    var has_default = False
-    if eq >= 0:
-        spec = String(base[byte=0:eq])
-        default_value = String(base[byte=eq + 1:n])
-        has_default = True
-    var sn = spec.byte_length()
-    var br = -1
-    for i in range(sn):
-        if ord(spec[byte=i]) == 91:
-            br = i
-            break
-    var out = ""
-    if br >= 0:
-        var t = String(spec[byte=0:br])
-        var j = br + 1
-        var found = -1
-        while j < sn:
-            if ord(spec[byte=j]) == 93:
-                found = j
-                break
-            j += 1
-        var vals = ""
-        if found > br:
-            vals = String(spec[byte=br + 1:found])
-        var ot = _type_to_openapi(t)
-        if vals == "":
-            # list (决策-43): array; 仅显式 '=' 时带 default
-            out = "{\"type\":\"array\",\"items\":{\"type\":\"" + ot + "\"}"
-            if has_default:
-                out = out + ",\"default\":" + _json_list_array(t, default_value)
-        else:
-            out = "{\"type\":\"" + ot + "\",\"enum\":" + _json_str_array(vals)
-            if has_default:
-                out = out + ",\"default\":\"" + json_escape(default_value) + "\""
-    else:
-        out = "{\"type\":\"" + _type_to_openapi(spec) + "\""
-        if has_default:
-            if spec == "int" or spec == "float" or spec == "bool":
-                out = out + ",\"default\":" + default_value
-            else:
-                out = out + ",\"default\":\"" + json_escape(default_value) + "\""
-    if desc != "":
-        out = out + ",\"description\":\"" + json_escape(desc) + "\""
-    return out + "}"
-
-def _generate_parameter(param_name: String, in_: String, type_spec: String, required: Bool, desc: String) raises -> String:
-    """生成单个 OpenAPI parameter 对象 (type_spec = "int" / "int=10" / "int[]" / "str[a,b]=b").
-    desc 非空 -> parameter 级 "description" (上游 Query/Path(description=...))."""
-    var sb = StringBuilder()
-    sb.append("{\"name\":\"" + json_escape(param_name) + "\",")
-    sb.append("\"in\":\"" + in_ + "\",")
-    sb.append("\"required\":" + ("true" if required else "false") + ",")
-    if in_ == "path" or in_ == "query":
-        sb.append("\"schema\":" + _openapi_param_schema(type_spec, desc))
-    else:  # header
-        sb.append("\"schema\":{\"type\":\"string\"")
-        if desc != "":
-            sb.append(",\"description\":\"" + json_escape(desc) + "\"")
-        sb.append("}")
-    if in_ != "header" and desc != "":
-        sb.append(",\"description\":\"" + json_escape(desc) + "\"")
-    sb.append("}")
-    return sb.take()
-
 def _route_hidden(r: Route) raises -> Bool:
     """`include_in_schema=False` 声明 (决策-52, P24-13): `_include_in_schema="0"`
     → 路由可服务但不进 spec paths/components."""
@@ -211,6 +133,8 @@ def _generate_operation(route: Route) raises -> String:
     var params = List[String]()
     var path_params = _extract_path_params(route.path)
     var type_spec = get_param_types(h)
+    var cons = get_param_constraints(h)
+    var htypes = get_header_types(h)
     var aliases = get_param_aliases(h)
     var descs = get_param_descs(h)
     for p in path_params:
@@ -220,7 +144,7 @@ def _generate_operation(route: Route) raises -> String:
         var ds = ""
         if p in descs:
             ds = descs[p]
-        params.append(_generate_parameter(p, "path", tn, True, ds))
+        params.append(_generate_parameter(p, "path", tn, True, ds, cons))
 
     # _reads_headers
     if "_reads_headers" in h.data:
@@ -242,12 +166,30 @@ def _generate_operation(route: Route) raises -> String:
                         e -= 1
                     if e > b:
                         var hn = String(piece[byte=b:e])
-                        # 决策-53 (ADR-0028): OpenAPI name = wire 名 (alias 原样 / 默认 _→- 转换); desc 查找按声明名
+                        # 决策-53 (ADR-0028): _reads_headers 条目 "name=alias" / "name"
                         var hp = parse_header_entry(hn)
+                        # 决策-54 (ADR-0029): htypes/descs/cons 全部按声明名 keyed —
+                        # 查找必须用 hp[0] (声明名), 输出名 = hp[1] (wire).
+                        # cons 表: _generate_parameter 按 param_name (wire) 查;
+                        # wire≠声明时注入别名条目, 否则 alias header 的约束全部丢失
+                        # (X-Ver 只剩 {"type":"string"}).
+                        if hp[0] != hp[1] and hp[0] in cons:
+                            cons[hp[1]] = cons[hp[0]]
                         var hds = ""
-                        if hn in descs:
-                            hds = descs[hn]
-                        params.append(_generate_parameter(hp[1], "header", "string", False, hds))
+                        if hp[0] in descs:
+                            hds = descs[hp[0]]
+                        var hspec = "string"
+                        var hreq = False
+                        if hp[0] in htypes:
+                            hspec = htypes[hp[0]]
+                            var hts = parse_type_spec(htypes[hp[0]])
+                            var hpb = parse_base(hts.base_type)
+                            if hpb.ok:
+                                if hts.is_list:
+                                    hreq = not hts.default_present
+                                else:
+                                    hreq = hts.default_value == ""
+                        params.append(_generate_parameter(hp[1], "header", hspec, hreq, hds, cons))
                 start = i + 1
             i += 1
 
@@ -263,6 +205,10 @@ def _generate_operation(route: Route) raises -> String:
             var name = k
             if k in aliases:
                 name = aliases[k]
+                # 决策-54: cons 按声明名 keyed, _generate_parameter 按 (alias) 名查 —
+                # 加别名条目 (与 header 分支同型)
+                if k in cons:
+                    cons[name] = cons[k]
             var ds = ""
             if k in descs:
                 ds = descs[k]
@@ -272,7 +218,7 @@ def _generate_operation(route: Route) raises -> String:
                     has_default = True
                     break
             # query param: optional if has default (list: 显式 '=' = 空 list 默认), else required
-            params.append(_generate_parameter(name, "query", ts_str, not has_default, ds))
+            params.append(_generate_parameter(name, "query", ts_str, not has_default, ds, cons))
 
     if len(params) > 0:
         if started:

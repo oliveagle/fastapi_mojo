@@ -216,6 +216,13 @@ def apply_query_extras(mut query: ParsedParams,
                 # 显式默认 (含 "str[]=" 空 list -> "", FastAPI 返回 [] 的
                 # String 世界等价)
                 query.values[key] = list_default_csv(spec)
+        else:
+            # 决策-54 (ADR-0029): 标量 + 显式默认 + 请求缺席 -> 注入默认
+            # (上游 FastAPI: 形参取默认值, 无论是否声明约束; 422 路径先于
+            # 本函数, 不会到达; alias 缺席默认由下方 key!=k 分支处理, 此处
+            # 对 alias 写同值无害).
+            if not in_request and has_eq(spec):
+                query.values[k] = default_part(spec)
         if key != k:
             var bound = ""
             var has_bound = False

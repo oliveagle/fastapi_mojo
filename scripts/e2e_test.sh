@@ -1984,6 +1984,140 @@ B=$(curl -s --max-time 10 -H "client-id: M1" -H "client-id: M2" "$BASE/hdr/alias
 if [[ "$B" == *'"header_client_id": "M1"'* ]]; then pass "OP3-8 multi-value first wins (M1)"
 else fail "OP3-8 multi-value" "got: ${B:0:120}"; fi
 
+
+# ============================================================================
+# CP: 决策-54 (ADR-0029) 参数约束面 — path/query/header 约束 + typed header
+# (矩阵 #2: {param} + 类型 + 约束; e2e 24 checks)
+# ============================================================================
+
+# CP-1: /con/path/2 → gt=3 违反 (n:int + gt=3,le=10)
+B=$(curl -s --max-time 10 "$BASE/con/path/2")
+if [[ "$B" == *'"loc":["path","n"],"msg":"Input should be greater than 3","type":"greater_than","input":"2","ctx":{"gt":3}'* ]]; then pass "CP-1 path gt violation (422 exact object + ctx)"
+else fail "CP-1 path gt" "got: ${B:0:200}"; fi
+
+# CP-2: /con/path/11 → le=10 违反
+B=$(curl -s --max-time 10 "$BASE/con/path/11")
+if [[ "$B" == *'"msg":"Input should be less than or equal to 10","type":"less_than_equal","input":"11","ctx":{"le":10}'* ]]; then pass "CP-2 path le violation"
+else fail "CP-2 path le" "got: ${B:0:200}"; fi
+
+# CP-3: /con/path/5 → 区间内 200
+B=$(curl -s --max-time 10 "$BASE/con/path/5")
+if [[ "$B" == *'"n": "5"'* ]]; then pass "CP-3 path in-range 200 (echo n=5)"
+else fail "CP-3 path in-range" "got: ${B:0:120}"; fi
+
+# CP-4: /con/str/a → min_length=2 违反 (隐式 str)
+B=$(curl -s --max-time 10 "$BASE/con/str/a")
+if [[ "$B" == *'"loc":["path","s"],"msg":"String should have at least 2 characters","type":"string_too_short","input":"a","ctx":{"min_length":2}'* ]]; then pass "CP-4 implicit str min_length"
+else fail "CP-4 str min_length" "got: ${B:0:200}"; fi
+
+# CP-5: /con/str/ABCDE → max_length=4 优先于 pattern
+B=$(curl -s --max-time 10 "$BASE/con/str/ABCDE")
+if [[ "$B" == *'"msg":"String should have at most 4 characters","type":"string_too_long","input":"ABCDE","ctx":{"max_length":4}'* ]]; then pass "CP-5 str max_length priority over pattern"
+else fail "CP-5 str max_length" "got: ${B:0:200}"; fi
+
+# CP-6: /con/str/Ab3 → pattern 违反 (len 通过)
+B=$(curl -s --max-time 10 "$BASE/con/str/Ab3")
+if [[ "$B" == *'"type":"string_pattern_mismatch"'* && "$B" == *'"input":"Ab3"'* && "$B" == *'"pattern":"^[a-z]+$"'* ]]; then pass "CP-6 str pattern mismatch"
+else fail "CP-6 str pattern" "got: ${B:0:200}"; fi
+
+# CP-7: /con/str/ab → len+pattern 全过 200
+B=$(curl -s --max-time 10 "$BASE/con/str/ab")
+if [[ "$B" == *'"s": "ab"'* ]]; then pass "CP-7 str in-range 200"
+else fail "CP-7 str ok" "got: ${B:0:120}"; fi
+
+# CP-8: /con/query?r=ab → q 缺席默认 5 (ge=0,lt=100 过) + r=ab 过 → 200.
+# 200 body 的 query 回显 = query_ 前缀 (dispatch 约定); 默认经
+# apply_query_extras 注入 query.values 后进入回显.
+B=$(curl -s --max-time 10 "$BASE/con/query?r=ab")
+if [[ "$B" == *'"query_q": "5"'* && "$B" == *'"query_r": "ab"'* ]]; then pass "CP-8 query default 5 injected + r ok (200)"
+else fail "CP-8 query default" "got: ${B:0:160}"; fi
+
+# CP-9: /con/query?q=200 → lt=100 违反 (input = 在场 raw 串)
+B=$(curl -s --max-time 10 "$BASE/con/query?q=200")
+if [[ "$B" == *'"loc":["query","q"],"msg":"Input should be less than 100","type":"less_than","input":"200","ctx":{"lt":100}'* ]]; then pass "CP-9 query lt violation (input raw string)"
+else fail "CP-9 query lt" "got: ${B:0:200}"; fi
+
+# CP-10: /con/query?r=abcd → 隐式 str max_length (loc = query)
+B=$(curl -s --max-time 10 "$BASE/con/query?r=abcd")
+if [[ "$B" == *'"loc":["query","r"],"msg":"String should have at most 3 characters","type":"string_too_long","input":"abcd","ctx":{"max_length":3}'* ]]; then pass "CP-10 implicit query str violation"
+else fail "CP-10 implicit query" "got: ${B:0:200}"; fi
+
+# CP-11: /con/query?q=200&r=abcd → 两种类型同 detail 数组 (collect-all)
+B=$(curl -s --max-time 10 "$BASE/con/query?q=200&r=abcd")
+if [[ "$B" == *'"type":"less_than"'* && "$B" == *'"type":"string_too_long"'* ]]; then pass "CP-11 collect-all (typed + implicit in one array)"
+else fail "CP-11 collect-all" "got: ${B:0:200}"; fi
+
+# CP-12: /con/hdr 裸请求 → x-token 缺失 422 (input null; x-app 有默认无错)
+B=$(curl -s --max-time 10 "$BASE/con/hdr")
+if [[ "$B" == *'"loc":["header","x-token"],"msg":"Field required","type":"missing","input":null'* ]]; then pass "CP-12 required header missing (input null)"
+else fail "CP-12 header missing" "got: ${B:0:200}"; fi
+
+# CP-13: /con/hdr x-token:abc → int_parsing 完整消息
+B=$(curl -s --max-time 10 -H "x-token: abc" "$BASE/con/hdr")
+if [[ "$B" == *'"msg":"Input should be a valid integer, unable to parse string as an integer","type":"int_parsing","input":"abc"'* ]]; then pass "CP-13 header int parse error (full msg)"
+else fail "CP-13 header int parse" "got: ${B:0:200}"; fi
+
+# CP-14: /con/hdr x-app:xyz → bool_parsing 完整消息 (矩阵 #3 偏差销账)
+B=$(curl -s --max-time 10 -H "x-app: xyz" "$BASE/con/hdr")
+if [[ "$B" == *'"msg":"Input should be a valid boolean, unable to interpret input","type":"bool_parsing","input":"xyz"'* ]]; then pass "CP-14 header bool parse error (full upstream msg)"
+else fail "CP-14 header bool parse" "got: ${B:0:200}"; fi
+
+# CP-15: /con/hdr x-token:5 → 200 (bool 默认 true 注入)
+B=$(curl -s --max-time 10 -H "x-token: 5" "$BASE/con/hdr")
+if [[ "$B" == *'"header_x_token": "5"'* && "$B" == *'"header_x-app": "true"'* ]]; then pass "CP-15 header present ok + default inject (200)"
+else fail "CP-15 header ok" "got: ${B:0:120}"; fi
+
+# CP-16: /con/hdr2 裸请求 → 双默认 (x-ver=1 过 ge/le/mo; tag=ab 过 len/pat) 200
+B=$(curl -s --max-time 10 "$BASE/con/hdr2")
+if [[ "$B" == *'"header_x-ver": "1"'* && "$B" == *'"header_tag": "ab"'* ]]; then pass "CP-16 header defaults pass constraints (200)"
+else fail "CP-16 header defaults" "got: ${B:0:120}"; fi
+
+# CP-17: /con/hdr2 X-Ver:5 → le=3 违反 (loc = wire alias 原样)
+B=$(curl -s --max-time 10 -H "X-Ver: 5" "$BASE/con/hdr2")
+if [[ "$B" == *'"loc":["header","X-Ver"],"msg":"Input should be less than or equal to 3","type":"less_than_equal","input":"5","ctx":{"le":3}'* ]]; then pass "CP-17 alias header constraint violation"
+else fail "CP-17 alias header" "got: ${B:0:200}"; fi
+
+# CP-18: /con/hdr2 tag:a3b → max_length=2 违反
+B=$(curl -s --max-time 10 -H "tag: a3b" "$BASE/con/hdr2")
+if [[ "$B" == *'"loc":["header","tag"],"msg":"String should have at most 2 characters","type":"string_too_long","input":"a3b","ctx":{"max_length":2}'* ]]; then pass "CP-18 header str max_length"
+else fail "CP-18 header str len" "got: ${B:0:200}"; fi
+
+# CP-19: /con/hdr2 tag:AB → pattern 违反 (len 过)
+B=$(curl -s --max-time 10 -H "tag: AB" "$BASE/con/hdr2")
+if [[ "$B" == *'"type":"string_pattern_mismatch"'* && "$B" == *'"input":"AB"'* && "$B" == *'"pattern":"^[0-9a-z]+$"'* ]]; then pass "CP-19 header str pattern mismatch"
+else fail "CP-19 header str pat" "got: ${B:0:200}"; fi
+
+# CP-20: /con/all/1?q=200 → 三错群序 path→query→header; header = 缺失+默认违反
+#        (input = 类型化字面量裸数字 2, P26-b-8)
+B=$(curl -s --max-time 10 "$BASE/con/all/1?q=200")
+O1=$(grep -bo '"msg":"Input should be greater than 3"' <<<"$B" | cut -d: -f1)
+O2=$(grep -bo '"msg":"Input should be less than 100"' <<<"$B" | cut -d: -f1)
+O3=$(grep -bo '"msg":"Input should be greater than or equal to 5"' <<<"$B" | cut -d: -f1)
+if [[ -n "$O1" && -n "$O2" && -n "$O3" ]] && (( O1 < O2 && O2 < O3 )); then pass "CP-20a collect-all group order path→query→header"
+else fail "CP-20a group order" "offsets: ${O1:-?} ${O2:-?} ${O3:-?}; body: ${B:0:200}"; fi
+if [[ "$B" == *'"loc":["header","x-h"],"msg":"Input should be greater than or equal to 5","type":"greater_than_equal","input":2,"ctx":{"ge":5}'* ]]; then pass "CP-20b default violation input = typed literal (unquoted 2)"
+else fail "CP-20b default input typed" "got: ${B:0:240}"; fi
+
+# CP-21: OpenAPI /con/path — gt→3.0 exclusiveMinimum bool + le→maximum
+curl -sS -m 5 "$BASE/openapi.json" > "$TMP/oa54a.json"
+if grep -qF '"name":"n","in":"path","required":true,"schema":{"type":"integer","minimum":3,"exclusiveMinimum":true,"maximum":10}' "$TMP/oa54a.json"; then pass "CP-21 openapi path int constraints (exclusiveMinimum bool)"
+else fail "CP-21 openapi path" "$(head -c 200 "$TMP/oa54a.json")"; fi
+
+# CP-22: OpenAPI /con/hdr2 — typed header schema (mo/min/max + default; len/pat)
+if grep -qF '"name":"X-Ver","in":"header","required":false,"schema":{"type":"integer","multipleOf":1,"minimum":1,"maximum":3,"default":1}' "$TMP/oa54a.json" \
+   && grep -qF '"name":"tag","in":"header","required":false,"schema":{"type":"string","minLength":1,"maxLength":2,"pattern":"^[0-9a-z]+$","default":"ab"}' "$TMP/oa54a.json"; then
+    pass "CP-22 openapi typed header schemas (numeric + string constraints)"
+else fail "CP-22 openapi headers" "$(head -c 200 "$TMP/oa54a.json")"; fi
+
+# CP-23: OpenAPI /con/str — 隐式 str schema 恒带 type 键 (偏差 ⑥) + len/pat
+if grep -qF '"name":"s","in":"path","required":true,"schema":{"type":"string","minLength":2,"maxLength":4,"pattern":"^[a-z]+$"}' "$TMP/oa54a.json"; then pass "CP-23 openapi implicit str schema (type key always present)"
+else fail "CP-23 openapi implicit str" "$(head -c 200 "$TMP/oa54a.json")"; fi
+
+# CP-24: /typed?count=abc 回归 — int_parsing 完整消息 (决策-54 bool 改动后)
+B=$(curl -s --max-time 10 "$BASE/typed?count=abc&verbose=true")
+if [[ "$B" == *'"loc":["query","count"],"msg":"Input should be a valid integer, unable to parse string as an integer","type":"int_parsing","input":"abc"'* ]]; then pass "CP-24 /typed int_parsing full msg regression"
+else fail "CP-24 /typed regression" "got: ${B:0:200}"; fi
+
 # --- summary ---------------------------------------------------------------------
 
 

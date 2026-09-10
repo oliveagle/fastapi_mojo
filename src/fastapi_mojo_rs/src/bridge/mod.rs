@@ -55,6 +55,8 @@ pub mod lifespan;
 pub mod multipart;
 pub mod time_util;
 
+pub mod regex;
+
 #[cfg(test)]
 mod cmd_tests;
 
@@ -108,3 +110,6 @@ mod state_tests;
 
 #[cfg(test)]
 mod multipart_tests;
+
+#[cfg(test)]
+mod regex_tests;
