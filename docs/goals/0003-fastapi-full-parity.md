@@ -14,7 +14,7 @@
 ## 0. 现状定位（2026-09-05 盘点）
 
 **已达成（v0.5.1 + 决策-31~54）**：
-- 单 binary **3.9M（4,020,232 B）**，ldd 仅 libc，env -i 干净启动，e2e **428 项**，cargo **434** 单测
+- 单 binary **4.0M（4,077,712 B）**，ldd 仅 libc，env -i 干净启动，e2e **438 项**，cargo **453** 单测
 - 已覆盖能力（见 §1 矩阵 ✅）：路由/路径参数/查询参数/类型化参数+422/JSON body/
   Form/multipart 文件上传/Header/Cookie/HTTPException+error_map/Request-Response 对象/
   嵌套 JSON/OpenAPI+SwaggerUI+components schemas/SSE(自定义 status+额外头)//metrics/
@@ -34,6 +34,7 @@
   决策-47)**/
   **FileResponse/StreamingResponse (Range/206/multipart/etag/CD/500 + chunked streaming, Rust bridge 协议层 file_protocol+file_serve, 决策-48)**/
   **参数约束面 (path/query/header gt/ge/lt/le/mo/len/pat + typed header 校验 + 422 ctx + 自研 regex 引擎, 声明式纯 Mojo + FFI +1, 决策-54, ADR-0029)**
+  **用户自定义中间件 (FASTAPI_MOJO_MIDDLEWARE 声明式动词表: 请求面 MAP/REQHDR/BLOCK + 响应面 HDR/STATUS/BODY/LOG + 短路, 纯 Mojo 计划 + Rust bridge FFI +2, 决策-55, ADR-0030)**
 
 ## 1. FastAPI 全功能对标矩阵（✅ 已实现 / 🟡 部分 / ❌ 缺失）
 
@@ -52,7 +53,7 @@
 | 11 | response_model | 只返回声明字段 + exclude/include/none | ✅ include+exclude+exclude_none（决策-35/41, ADR-0016：FastAPI 语义对齐，无模型 no-op） | — | — |
 | 12 | 状态码 | status_code 声明 | ✅ | — | — |
 | 13 | 异常 | HTTPException/RequestValidationError/自定义 handler | ✅ 全量（HTTPException F2 / 422 F1 既有 + **任意异常类型 handler 决策-49, ADR-0024**：字符串 tag 约定 `raise Error("TAG: msg")`（Mojo 1.0.0 仅 Error 类型, P13-M2/M5）+ 声明式表（env `FASTAPI_MOJO_EXCEPTION_HANDLERS` "TAG:STATUS:BODY[:json];…" 全局 / `_exc_handlers` 路由级整体替换超集 / 同 tag 后者胜 P13-2）+ 声明式 raise 钩子 `_exception_raise`（endpoint body 位置）+ 路由级 try/except guard（= 上游 wrap_app_handling_exceptions；查找 精确 tag → `Exception` catch-all（= ServerErrorMiddleware 500/Exception 键, P13-9）→ 默认 500 "Internal Server Error" text/plain（P13-10 逐字 parity）；body 模板 {exc}/{tag} 插值（json 条目 `_json_escape`）；P13-8 日志 quirk 模拟） | 文档化偏差 ×8（ADR-0024 §3.5：① 无类→字符串 tag（无 MRO）② handler=声明式条目非 callable ③ 无 int status 键（HTTPException 非 raised 异常）④ response_started 路径结构性不可达（单发）⑤ 双层 map→单表 ⑥ 日志 quirk 线形模拟 ⑦ per-route=超集 ⑧ 中间件抛出 gap） | — |
-| 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | 🟡 固定3 + GZip ✅（决策-40 env 声明式） | 用户自定义（Mojo 无闭包：声明式 env / 固定链为等价形态，扩充 P2） | §P2 |
+| 14 | 中间件 | BaseHTTPMiddleware/GZip/自定义 | ✅ 全量（固定3链 + **GZip ✅ 决策-40 (ADR-0015)** + **用户自定义 ✅ 决策-55 (ADR-0030)**：单一 env `FASTAPI_MOJO_MIDDLEWARE` 声明式动词表（`;` 分中间件 / `,` 分动词 / 位置字段 `:` / 路径表 `|`; 畸形 → `check_mw_spec` fail-fast 服务不启动）；**请求面** (MAP/REQHDR/BLOCK) = Mojo `mw_spec.mojo` 纯函数 outermost→innermost（BLOCK 短路即停）+ dispatch 钩子（路由/OPTIONS 前, FFI `inject_request_header` 注入合成头）；**响应面** (HDR/STATUS/BODY/LOG) = bridge `send_response` 单点 innermost→outermost（env 正序, GZip 前）；栈序 mw1=innermost…mwN=outermost（P-MW-1）；**短路**（BLOCK 于 mwK → 响应仅过 mwK+1..mwN 外层动词, bridge `plan_request_path` 重推导, 零额外 FFI）（P-MW-3）；同名 HDR 后写胜（P-MW-2）；STATUS 重设（P-MW-4）；BODY 换 body + **重算 Content-Length** + text/plain（P-MW-5）；LOG 行用原始 path） | 文档化偏差 ×7（ADR-0030 §3.5/§7.5：① 无用户闭包→声明式动词表（Mojo 1.0.0）② 用户 mw 固定层位 = GZip/CORS env 层之内 ③ scope 边界: WS 帧/101/chunked/静态/预检不 wrap（P-MW-6）, 请求面适用 OPTIONS+WS 升级 GET ④ 不读/改请求 body ⑤ REQHDR 仅请求头参数面, 不影响 bridge 内部探测 ⑥ path 语义不对称: LOG=原始 path vs BODY/BLOCK/响应 path=post-MAP ⑦ BODY 重算 CL = 文档化优于上游（上游 stale-CL → h11 协议破损）） | — |
 | 15 | CORS | CORSMiddleware (origins/methods/headers/credentials) | ✅ 声明式 env 等价（决策-42, ADR-0017：ORIGINS/METHODS/HEADERS/CREDENTIALS/MAX_AGE + 普通响应条件附带 + 预检 204/400 动态） | 预检 400 体为本实现 JSON 简化 + 裸 OPTIONS 204 超集（均文档化, e2e 守护） | — |
 | 16 | OpenAPI | spec + Swagger + tags/prefix/desc | ✅ 全量（**OpenAPI 精化 决策-52, ADR-0027**：app 级 9 `FASTAPI_MOJO_OPENAPI_*` env（title/version/description/terms/contact/license/servers/tags/external_docs — /openapi.json 请求期读, 畸形 → 省略字段不 500）+ 路由级 8 声明（`_summary` 默认 = name Python title() / `_description` / `_response_description` 默认 "Successful Response" / `_operation_id` 默认 `{name}{path 逐 /{ }→_}_{method}`（P24-6: 上游 `re.sub(\W→_)` 逐字符**无 `_+` 折叠**）/ `_deprecated` / `_include_in_schema`（不进 paths/components 仍可服务）/ `_status_code`="NNN Reason"（wire 仅当结果恰 "200 OK" 覆写 + spec 主键前 3 位）/ `_responses` 额外状态码（重复主键注册期拒绝））；注册期校验 `check_openapi_specs`（check_ws_specs/check_state_specs 同策略 fail-fast）；operation 键序 P24-4（tags? summary? description? operationId ...）+ 根键序 P24-10（openapi, info, servers?, paths, components?, tags?, externalDocs?；externalDocs description 先）；AnyUrl 2.13.5 规范化（contact/license/externalDocs url：host-only 尾 `/`、path 空且有 `?`/`#` 前插 `/`；**servers url 原样透传** = 上游 AnyUrl|str str 优先, P24-12 修正）；3 demo 路由 /meta/{probe,hidden,made}；**FFI diff = 0**（纯 Mojo：openapi_custom.mojo 381 ln + openapi.mojo 497 ln 重写）） | 文档化偏差 ×9（ADR-0027 §3.5：① 3.0.3 vs 上游 3.1.0（200 schema `{type:object}` vs `{}`）② 无运行期可变 spec（请求期声明式再生成；上游 `extra` 本身 no-op）③ _status_code = 全 status line（_stream_status/_file_status 同型）④ app 级 = env 非构造器（畸形省略）⑤ root_path/openapi_url/docs_url/redoc/webhooks 未实现（P24-11: 0.141.1 root_path 对 spec 无影响）⑥ summary = handler.name title()（同字符串约定）⑦ _responses 重复主键注册期拒绝（上游 dict 覆盖）⑧ 路由 tags 不并入根 tags （P24-2 复刻）⑨ servers url 不规范化（上游 AnyUrl|str, parity）） | — |
 | 17 | 安全 | HTTPBasic/HTTPBearer/APIKey/OAuth2/JWT/get_current_user | ✅ 全量（决策-34 Basic/Bearer/APIKey + 决策-44 OAuth2/JWT，ADR-0019：/token password grant（宽松 form 422 全收集）+ JWT HS256（alg 白名单 + exp/nbf/sub）+ get_current_user = sub→auth_user + OpenAPI securitySchemes） | 文档化偏差（空 Bearer → 401 非 403；sub 空串也拒；_auth_users CSV = 凭据声明式等价，ADR-0019 §3.5，e2e 守护） | — |
@@ -86,7 +87,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 ### P2（后续 — 精化/完备）
 - 查询多值 / alias / desc ✅（决策-43, ADR-0018）
 - Form 多值 / alias / desc ✅（决策-45, ADR-0020）
-- 中间件自定义（GZip ✅ 决策-40；自定义逻辑 = 声明式 env 扩充）
+- 中间件自定义（GZip ✅ 决策-40；**用户自定义 ✅ 决策-55 (ADR-0030): FASTAPI_MOJO_MIDDLEWARE 声明式动词表 + 短路**）
 - CORS 完整配置 ✅（决策-42, ADR-0017）
 - OAuth2/JWT（password grant + JWT HS256）✅（决策-44, ADR-0019）
 - 任意异常类型 handler ✅（决策-49, ADR-0024）
@@ -112,10 +113,15 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P1c | Lifespan (startup/shutdown, 决策-36, ADR-0012) | P1 | ✅（e2e LS-1..4, 168/168; cargo 307/0/4; clippy 0 警告; ldd 仅 libc; 2.9M; +F11 out= 垃圾 NUL 契约修复） |
 | T-P1d | Pydantic 式嵌套 body + Field 约束 | P1 | ✅（决策-38, ADR-0014: _body_schema 声明式 spec + 422 全收集 + OpenAPI components; e2e 205/205, cargo 312/0/4, clippy 0, 3.1M） |
 | T-P1e | Enum 类型 | P1 | ✅（决策-38: _param_types T[values] + OpenAPI enum 数组; BS-11/BS-12 e2e） |
-| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52）、Header alias/转换 ✅（决策-53）、参数约束面 ✅（决策-54） | P2 | 📋 |
+| T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52）、Header alias/转换 ✅（决策-53）、参数约束面 ✅（决策-54）、用户自定义中间件 ✅（决策-55） | P2 | 📋 |
 
 ---
-*最后更新：2026-09-10（**决策-54 参数约束面统一落地**（ADR-0029, P2 矩阵 #2 ✅ / #3 bool 偏差销账）：
+*最后更新：2026-09-11（**决策-55 用户自定义中间件声明式落地**（ADR-0030, P2 矩阵 #14 ✅ / 中间件全量）：
+fastapi 0.141.1 / uvicorn 0.52.4 活体探测 P-MW-1..7（栈序 mw1=innermost / 响应头同名后写胜 / 短路跳内层+路由 / status 重设 / body 替换但 CL 不重算 → h11 LocalProtocolError（协议级破损）/ WS scope 直通不 wrap / 请求面仅 scope 可改）→ **单一 env 声明式动词表**（ADR-0004 范式, **FFI diff = +2** `set_req_id`/`inject_request_header`）：`FASTAPI_MOJO_MIDDLEWARE="<mw1>;...;<mwN>"`（`;` 分中间件 / `,` 分动词 / 位置字段 `:` / `|` 分路径表; 畸形 → `check_mw_spec` fail-fast, 服务不启动）；**请求面** (MAP/REQHDR/BLOCK) = Mojo `mw_spec.mojo` 纯函数（outermost→innermost, BLOCK 短路）+ dispatch 钩子（路由/OPTIONS 前, FFI 注入合成头, CI 先注入先胜）；**响应面** (HDR/STATUS/BODY/LOG) = bridge `send_response` 单点（innermost→outermost = env 正序, GZip 前, 同名 HDR 原位替换后写胜, BODY 重算 Content-Length = 文档化优于上游 P-MW-5）
+→ **实施期修复**：bridge 侧短路重推导 `plan_request_path`（bridge 重跑 Mojo 计划, 响应仅过外层, 零额外 FFI）— `send_text_response_status` 委托 `send_response`
+→ e2e **428→438/438**（+MW-1..10: HDR/REQHDR/MAP/LOG/STATUS/BODY/同名 HDR 外层胜/BLOCK 短路 418 仅外层/text/plain/无 env 零回归）/ cargo **453/0/4**（+19 中间件单测）/ clippy **0 警告**（双 crate）/ ldd 仅 libc / binary **4,077,712 B**（+57 KB vs 决策-54, ≤4.2M 预算）/ env -i 干净启动 / bench 6 场景 0 errors（get_root_10k_100c ≈ 31.5k, 32.9k–43.9k 带内）/ 孤儿 0 / `mw_spec.mojo` selftest **10/10** 全绿（FFI-free, CI 普通 mojo run 循环）
+下一轮：P2 剩余（TestClient）
+2026-09-10（**决策-54 参数约束面统一落地**（ADR-0029, P2 矩阵 #2 ✅ / #3 bool 偏差销账）：
 fastapi 0.141.1 / pydantic 2.13.5 活体探测 P26-a..h（约束消息/type/ctx 精确串 /
 每字段首违 only + 优先级 mo→ge→gt→le→lt · minl→maxl→pat / multiple_of=0 no-op /
 str+数值约束上游 no-op → 本实现注册期拒 / list+约束上游 500 → 本实现 fail-fast /

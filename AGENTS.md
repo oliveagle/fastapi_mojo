@@ -114,8 +114,8 @@
   单一 binary 构建（含 rust toolchain：`cargo build --release` 出 staticlib，
   `-static-libgcc` 静态链接 libgcc_s 保 ldd 干净，见 §3.2）
   + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试（含 `cargo test --release
-  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 428 项, 79 项
-  起扩展, 含 WebSocket 增强/并发/精化 + 参数约束面 CP（ADR-0029）) +
+  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 438 项, 79 项
+  起扩展, 含 WebSocket 增强/并发/精化 + 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）) +
   体积预算（中间态 ≤ 6M，终态 ≤ C + 2M）
   + **C 清零步骤**（终态门禁：`find src -name '*.c'` = 0；当前 Phase 4-5 为 INFO）
 
@@ -1330,7 +1330,64 @@
   '*.c'` = 0 保持 / `find . -name '*.py'`（excl .git/docs）= 0 /
   `pgrep -x fastapi_mojo` = 0
 
-*最后更新：2026-09-10（**决策-54 参数约束面统一落地**（ADR-0029, Goal-0003 P2 矩阵 #2 ✅, #3 bool 销账）：
+- **已决策-55**：**用户自定义中间件声明式落地 — `FASTAPI_MOJO_MIDDLEWARE` 单一 env
+  动词表（ADR-0030, Goal-0003 P2 矩阵 #14 — 对标矩阵 #14 ✅ 全量, 中间件全闭环：
+  固定3 + GZip(决策-40) + 用户自定义）**：
+  1. **Spec 语法**：`<mw1>;...;<mwN>`（mw1=先添加=**innermost**…mwN=**outermost**,
+     P-MW-1）；`<mwK>`=动词 `,` 分（书写序=执行序）；`<verb>`=`NAME[:A[:B[:C]]]` 位置字段
+     `:`；路径表 `|`。分隔符集 `;`/`,`/`:`/`|` 值内禁用（解析期 fail-fast, `check_mw_spec`
+     同策略, 服务不启动）。
+  2. **请求面**（Mojo dispatch, outermost→innermost, 全量字段读后、OPTIONS/WS/路由前）：
+     `MAP:FROM:TO`（exact / `-prefix`→TO+rest / `/`-suffix 防双斜杠, P-MW-7 `scope["path"]`
+     等价）/ `REQHDR:NAME:VALUE`（合成请求头 FFI `inject_request_header`, CI 先注入先胜,
+     仅 `_reads_headers`/typed header/auth 可见, 不影响 bridge 内部 Origin/Accept-Encoding/
+     ws_protocol 探测）/ `BLOCK:STATUS:BODY:PATHS`（`*`=全部 / `prefix/` / exact, 早期
+     text/plain 响应 + 短路, P-MW-3）。
+  3. **响应面**（bridge `send_response` 单点, innermost→outermost=**env 正序**, GZip 前）：
+     `HDR:NAME:VALUE`（同名行原位替换, **后写胜**, P-MW-2）/ `STATUS:FROM:TO`（FROM 可
+     `*`, P-MW-4）/ `BODY:TEMPLATE`（{method}{path}{query}{status}{req_id} 插值 +
+     **重算 Content-Length** + CT→text/plain, P-MW-5）/ `LOG`（发送成功后一行
+     `[mw] <req_id> <METHOD> <path>[?<q>] -> <status>`）。
+  4. **短路**（ADR §3.2）：BLOCK 于 mwK（0-based env 序）→ 响应**仅过 mwK+1..mwN 外层**
+     动词（blocker 自身及更内层跳过）；由 bridge `plan_request_path` **重跑** Mojo
+     `mw_plan_request` 算法判定（**零额外 FFI**, diff 仍 = +2）；确认 `send_text_response_status`
+     委托 `send_response` → BLOCK 早期响应也经 mw 钩子（设计自洽）。
+  5. **文件面**：新 `src/fastapi_mojo/mw_spec.mojo`（430 ln：解析/校验 + 纯函数
+     `mw_plan_request` + 插值 + selftest 10/10 FFI-free）+ `bridge/middleware.rs`（428 ln）
+     + `middleware_tests.rs`（238 ln, 19 测）；改 `http_server_final.mojo`（main env
+     fail-fast + dispatch 钩子 + 3 demo 路由 /mw/hdr·/mw/reqhdr·/mw/map-new）/
+     `bridge/{mod,request,conn,send,ffi}.rs`（**FFI +2** `set_req_id`/`inject_request_header`；
+     `CurrentRequest` + req_id(64B NUL) + 合成头表（每请求清）；`extract_request_header`
+     先查合成表再查原 hdr 块）。
+  6. **Path 语义不对称（ADR §7.5 文档化）**：LOG 行 = **原始 client path**（诊断值）；
+     BODY 插值 + 响应 JSON `path` 字段 = **post-MAP path**（重写后有效路径）。
+  7. **文档化优于上游**：上游 fastapi 0.141.1 body 替换不重算 CL → h11 `LocalProtocolError:
+     Too little data for declared Content-Length`（P-MW-5 实测 2 次）；本实现重算 CL。
+  验收：e2e **428→438/438**（+MW-1..10: HDR /health X-Mw / REQHDR /mw/reqhdr 回显 /
+  MAP /mw/map-old→/mw/map-new（post-MAP path）/ LOG 行 / STATUS 200→201 / BODY 替换 +
+  text/plain / 同名 HDR 外层胜 / BLOCK 短路 418 仅 X-Outer / BLOCK text/plain / 无 env
+  零回归）/ cargo **453/0/4**（+19 中间件单测, 含 bridge 短路重推导 6）/ clippy
+  `-D warnings` 0 警告（双 crate）/ `mw_spec.mojo` selftest **10/10**（FFI-free, CI 普通
+  mojo run 循环）/ bench 6 场景 0 errors（get_root_10k_100c ≈ 31.5k req/s, 32.9k–43.9k
+  带内, vs 决策-54 35,124 噪声内无回归）/ **ldd 仅 libc** / env -i 干净启动 / binary
+  **4.0M**（4,077,712 B, ≤4.2M; +57 KB vs 决策-54 = 纯 std 字节/整型）/ `find src -name
+  '*.c'` = 0 保持 / `pgrep -x fastapi_mojo` = 0
+
+*最后更新：2026-09-11（**决策-55 用户自定义中间件声明式落地**（ADR-0030, Goal-0003 P2 矩阵 #14 ✅ 全量）：
+fastapi 0.141.1 / uvicorn 0.52.4 活体 P-MW-1..7（栈序 mw1=innermost / 响应头同名后写胜 /
+短路跳内层+路由 / status 重设 / body 替换但 CL 不重算 → h11 协议破损 / WS scope 直通 /
+请求面仅 scope 可改）→ **单一 env 声明式动词表**（ADR-0004 范式, **FFI diff = +2**
+`set_req_id`/`inject_request_header`）：`FASTAPI_MOJO_MIDDLEWARE`（`;`/`,`/`:`/`|` 分隔;
+畸形 → `check_mw_spec` fail-fast）；请求面 MAP/REQHDR/BLOCK = Mojo `mw_spec.mojo` 纯函数
+（outermost→innermost, BLOCK 短路）+ dispatch 钩子（路由/OPTIONS 前, FFI 注入合成头）；
+响应面 HDR/STATUS/BODY/LOG = bridge `send_response` 单点（innermost→outermost = env 正序,
+GZip 前, 同名 HDR 原位替换后写胜, BODY 重算 CL = 文档化优于上游 P-MW-5）
+→ 实施期修复：bridge 侧短路重推导 `plan_request_path`（响应仅过外层, 零额外 FFI）
+→ e2e **428→438/438**（+MW-1..10）/ cargo **453/0/4**（+19 中间件单测）/ clippy **0**
+（双 crate）/ ldd 仅 libc / binary **4,077,712 B**（+57 KB, ≤4.2M）/ env -i / bench
+0 errors（≈31.5k req/s, 带内）/ 孤儿 0 / `mw_spec.mojo` selftest **10/10**（FFI-free）
+下一轮：P2 剩余（TestClient）
+2026-09-10（**决策-54 参数约束面统一落地**（ADR-0029, Goal-0003 P2 矩阵 #2 ✅, #3 bool 销账）：
 fastapi 0.141.1 / pydantic 2.13.5 活体 P26-a..h（ctx 键序 / 首违 only
 + 优先级 / mo=0 no-op / str+数值上游 no-op → 注册期拒 / list+约束上游
 500 → fail-fast / input 类型化: 在场=raw · 缺失+默认=字面量 unquoted ·
