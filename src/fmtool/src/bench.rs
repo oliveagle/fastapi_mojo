@@ -61,7 +61,14 @@ impl Server {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn() {
-            Ok(child) => s.proc = Some(child),
+            Ok(child) => {
+                s.proc = Some(child);
+                // 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机
+                // 透明代理劫持 (Caddy :80 假空 200; 假 ready 会让 bench 拿到
+                // 空响应假数据) — 首次 /health 探针前先等端口稳定. 干净环境
+                // (CI) 无害: 仅多等 5s.
+                std::thread::sleep(Duration::from_secs(5));
+            }
             Err(e) => {
                 eprintln!("[bench] 无法启动服务器 {bin}: {e}");
                 std::process::exit(1);
@@ -89,6 +96,9 @@ impl Server {
     }
 }
 
+/// /health 就绪探测: 200 **且 body 含 "healthy"** (真 server 的 /health 是
+/// `{"status": "healthy", ...}` JSON; 本机透明代理的假响应是空 body — 决策-50
+/// ADR-0025 §3.5-7 防假 ready).
 fn http_get_200(port: u16) -> bool {
     let mut s = match tcp_connect(&format!("127.0.0.1:{port}"), Duration::from_secs(1)) {
         Ok(s) => s,
@@ -104,7 +114,8 @@ fn http_get_200(port: u16) -> bool {
         if n == 0 { break; }
         buf.extend_from_slice(&tmp[..n]);
     }
-    buf.starts_with(b"HTTP/1.1 200")
+    let healthy = |b: &[u8]| b.windows(7).any(|w| w == b"healthy");
+    buf.starts_with(b"HTTP/1.1 200") && healthy(&buf)
 }
 
 // ---------- WS 负载 (hey-csv 同构) ----------

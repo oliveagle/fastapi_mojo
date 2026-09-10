@@ -35,6 +35,7 @@ from file_form_check import validate_file_vs_form, file_part_fields
 from security_jwt import handle_oauth2_token, check_oauth2  # 决策-44: /token + _auth=oauth2
 from lifespan import run_lifespan_startup, run_lifespan_shutdown
 from exception_handlers import guarded_run_handler  # 决策-49 (ADR-0024)
+from request_state import apply_state_set, inject_request_state, check_state_specs  # 决策-50 (ADR-0025)
 
 
 def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: String) raises:
@@ -827,8 +828,33 @@ def register_routes(mut router: Router) raises:
     exc_dup_h.set_data("_exception_raise", "Dup: d")
     router.add_route("/exc/dup", "GET", exc_dup_h)
 
+    # 决策-50 (ADR-0025): Request.state demo (Goal-0003 矩阵 #22).
+    # _state_set 声明写 (值 {param} 插值) -> _reads_state 声明读 -> state_<name>.
+    # KIND_ECHO: run_handler 的 path_params 实参 = req_params, 故 state_<name>
+    # 注入键会回显到 body (与 /ctx 的 header_ 同机制); "_" 前缀 data 键不回显.
+    var st1 = Handler(KIND_ECHO(), "state_demo")
+    st1.set_data("message", "request state demo")
+    st1.set_data("_state_set", "user:alice;dept:eng")
+    st1.set_data("_reads_state", "user,dept")
+    router.add_route("/state", "GET", st1)
+
+    var st2 = Handler(KIND_ECHO(), "state_dyn")
+    st2.set_data("message", "state from params")
+    st2.set_data("_state_set", "user:{who};greeting:hi {who}")
+    st2.set_data("_reads_state", "user,greeting")
+    router.add_route("/state-dyn/{who}", "GET", st2)
+
+    var st3 = Handler(KIND_ECHO(), "state_missing")
+    st3.set_data("message", "missing state read demo")
+    # 无 _state_set: 本请求 state 必为空 -> user/ghost 双空 = 跨请求隔离证明
+    # (即使前一请求 /state-dyn/bob 写过 user=bob, 本请求也读不到, P22-6).
+    st3.set_data("_reads_state", "user,ghost")
+    router.add_route("/state-missing", "GET", st3)
+
     # 决策-38: _body_schema 注册期语法检查 (畸形 spec 启动即 fail, 不带入请求路径)
     check_body_schemas(router)
+    # 决策-50: _state_set 注册期语法检查 (同策略)
+    check_state_specs(router)
 
 
 def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
@@ -1224,6 +1250,22 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                     # _dep_calls=true -> 注入各 dep 每请求实际派发次数
                                     # (observability 超集, 上游无此面; ADR-0022 §3.5-2).
                                     inject_dep_calls(route_result.handler.data, req_params, dcache)
+                                # 决策-50 (ADR-0025): Request.state — 每请求 scope 存储
+                                # (P22-2/6: 前置阶段写 -> handler 读, 每请求隔离).
+                                # 写面 _state_set (值 {param} 插值, ctx = 全部已注入
+                                # 参数 = 「middleware 先写」声明式等价); 读面
+                                # _reads_state (CSV -> state_<name>, F10 同范式,
+                                # 缺失 -> "" — 上游 500 偏差, ADR-0025 §3.5-1).
+                                var state = Dict[String, String]()
+                                if "_state_set" in route_result.handler.data and \
+                                        route_result.handler.data["_state_set"] != "":
+                                    apply_state_set(state,
+                                                    route_result.handler.data["_state_set"],
+                                                    req_params)
+                                if "_reads_state" in route_result.handler.data and \
+                                        route_result.handler.data["_reads_state"] != "":
+                                    inject_request_state(req_params, state,
+                                                         route_result.handler.data["_reads_state"])
                                 # 决策-49 (ADR-0024): 路由级 try/except guard —
                                 # _exception_raise 钩子 + run_handler; 捕获 Error ->
                                 # 异常类型 handler 表 (env / _exc_handlers;

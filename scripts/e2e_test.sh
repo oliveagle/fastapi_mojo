@@ -184,9 +184,14 @@ echo "[setup] starting server on port $PORT (recv timeout 2s, idle timeout 2s)..
     > "$TMP/server.log" 2>&1 ) &
 SERVER_PID=$!
 
+# 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机透明代理
+# 劫持 (Caddy :80 假空 200, 真 server 收不到) — 就绪探针前先等端口稳定,
+# 且用 body 校验 (含 'healthy'; Caddy 假响应 body 为空) 防假 ready.
+# 干净环境 (CI) 无害: 仅多等 5s.
+sleep 5
 READY=0
 for _ in $(seq 1 30); do
-    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/health"; then
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$PORT/health" 2>/dev/null)" == *healthy* ]]; then
         READY=1; break
     fi
     sleep 0.3
@@ -582,9 +587,14 @@ ACL_LOG="$TMP/access_json.log"
     "$BIN" --port "$ACL_PORT" \
     > "$ACL_LOG" 2>&1 ) &
 ACL_PID=$!
+# 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机透明代理
+# 劫持 (Caddy :80 假空 200, 真 server 收不到) — 就绪探针前先等端口稳定,
+# 且用 body 校验 (含 'healthy'; Caddy 假响应 body 为空) 防假 ready.
+# 干净环境 (CI) 无害: 仅多等 5s.
+sleep 5
 ACL_READY=0
 for _ in $(seq 1 30); do
-    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$ACL_PORT/health"; then
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$ACL_PORT/health" 2>/dev/null)" == *healthy* ]]; then
         ACL_READY=1; break
     fi
     sleep 0.3
@@ -902,9 +912,14 @@ LS_SHUTDOWN=$(printf 'touch %s/shutdown_1.log' "$LS_DIR")
     "$BIN" --port "$LS_PORT" \
     > "$LS_DIR/server.log" 2>&1 ) &
 LS_PID=$!
+# 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机透明代理
+# 劫持 (Caddy :80 假空 200, 真 server 收不到) — 就绪探针前先等端口稳定,
+# 且用 body 校验 (含 'healthy'; Caddy 假响应 body 为空) 防假 ready.
+# 干净环境 (CI) 无害: 仅多等 5s.
+sleep 5
 LS_READY=0
 for _ in $(seq 1 30); do
-    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$LS_PORT/health"; then
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$LS_PORT/health" 2>/dev/null)" == *healthy* ]]; then
         LS_READY=1; break
     fi
     sleep 0.3
@@ -1063,9 +1078,14 @@ GZ_LOG="$TMP/gzip.log"
     "$BIN" --port "$GZ_PORT" \
     > "$GZ_LOG" 2>&1 ) &
 GZ_PID=$!
+# 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机透明代理
+# 劫持 (Caddy :80 假空 200, 真 server 收不到) — 就绪探针前先等端口稳定,
+# 且用 body 校验 (含 'healthy'; Caddy 假响应 body 为空) 防假 ready.
+# 干净环境 (CI) 无害: 仅多等 5s.
+sleep 5
 GZ_READY=0
 for _ in $(seq 1 30); do
-    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$GZ_PORT/health"; then
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$GZ_PORT/health" 2>/dev/null)" == *healthy* ]]; then
         GZ_READY=1; break
     fi
     sleep 0.3
@@ -1132,9 +1152,14 @@ CRS_LOG="$TMP/cors.log"
     "$BIN" --port "$CRS_PORT" \
     > "$CRS_LOG" 2>&1 ) &
 CRS_PID=$!
+# 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机透明代理
+# 劫持 (Caddy :80 假空 200, 真 server 收不到) — 就绪探针前先等端口稳定,
+# 且用 body 校验 (含 'healthy'; Caddy 假响应 body 为空) 防假 ready.
+# 干净环境 (CI) 无害: 仅多等 5s.
+sleep 5
 CRS_READY=0
 for _ in $(seq 1 30); do
-    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$CRS_PORT/health"; then
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$CRS_PORT/health" 2>/dev/null)" == *healthy* ]]; then
         CRS_READY=1; break
     fi
     sleep 0.3
@@ -1670,9 +1695,14 @@ EXC_LOG="$TMP/exc_server.log"
     "$BIN" --port "$EXC_PORT" \
     > "$EXC_LOG" 2>&1 ) &
 EXC_PID=$!
+# 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机透明代理
+# 劫持 (Caddy :80 假空 200, 真 server 收不到) — 就绪探针前先等端口稳定,
+# 且用 body 校验 (含 'healthy'; Caddy 假响应 body 为空) 防假 ready.
+# 干净环境 (CI) 无害: 仅多等 5s.
+sleep 5
 EXC_READY=0
 for _ in $(seq 1 30); do
-    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$EXC_PORT/health"; then
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$EXC_PORT/health" 2>/dev/null)" == *healthy* ]]; then
         EXC_READY=1; break
     fi
     sleep 0.3
@@ -1740,6 +1770,45 @@ fi
 kill -TERM "$EXC_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$EXC_PID" 2>/dev/null
+
+# --- Request.state (决策-50, ADR-0025, Goal-0003 矩阵 #22) --------------------------
+
+echo "== Request.state (每请求 scope 存储, 决策-50, ADR-0025) =="
+# XS-1: _state_set 静态写 + _reads_state 读 (echo 回显 state_<name>)
+S1=$(http_body "$BASE/state")
+if [[ "$S1" == *'"state_user": "alice"'* && "$S1" == *'"state_dept": "eng"'* ]]; then
+    pass "XS-1 /state set+read (state_user/state_dept)"
+else fail "XS-1 /state set+read" "body: ${S1:0:200}"; fi
+# XS-2: 值 {param} 插值 (ctx = 已注入参数)
+S2=$(http_body "$BASE/state-dyn/bob")
+if [[ "$S2" == *'"state_user": "bob"'* && "$S2" == *'"state_greeting": "hi bob"'* ]]; then
+    pass "XS-2 /state-dyn/bob {who} 插值"
+else fail "XS-2 /state-dyn/bob 插值" "body: ${S2:0:200}"; fi
+# XS-3: 无 _state_set -> 两读皆空 (缺失键 -> "" F10 约定, ADR-0025 §3.5-1)
+S3=$(http_body "$BASE/state-missing")
+if [[ "$S3" == *'"state_user": ""'* && "$S3" == *'"state_ghost": ""'* ]]; then
+    pass "XS-3 /state-missing -> 空串 (缺失键 -> \"\")"
+else fail "XS-3 /state-missing 空串" "body: ${S3:0:200}"; fi
+# XS-4: 跨请求隔离 (bob/alice 的写不泄漏进后续独立请求, P22-6)
+curl -s -o /dev/null "$BASE/state-dyn/bob"
+S4a=$(http_body "$BASE/state-missing")
+curl -s -o /dev/null "$BASE/state-dyn/alice"
+S4b=$(http_body "$BASE/state-missing")
+if [[ "$S4a" == *'"state_user": ""'* && "$S4b" == *'"state_user": ""'* ]]; then
+    pass "XS-4 跨请求隔离 (bob/alice 写后, 新请求 state 仍空)"
+else fail "XS-4 跨请求隔离" "a=[${S4a:0:120}] b=[${S4b:0:120}]"; fi
+# XS-5: /health 200 回归
+if [[ "$(http_code "$BASE/health")" == "200" ]]; then
+    pass "XS-5 /health 200 (回归)"
+else fail "XS-5 /health 200" "code=$(http_code "$BASE/health")"; fi
+# XS-6: /errors/99 404 (F2 回归)
+if [[ "$(http_code "$BASE/errors/99")" == "404" ]]; then
+    pass "XS-6 /errors/99 404 (F2 回归)"
+else fail "XS-6 /errors/99 404" "code=$(http_code "$BASE/errors/99")"; fi
+# XS-7: /exc/ve 500 (决策-49 回归: 无 handler 表 -> 默认 500)
+if [[ "$(http_code "$BASE/exc/ve")" == "500" ]]; then
+    pass "XS-7 /exc/ve 500 (决策-49 回归)"
+else fail "XS-7 /exc/ve 500" "code=$(http_code "$BASE/exc/ve")"; fi
 
 # --- summary ---------------------------------------------------------------------
 
