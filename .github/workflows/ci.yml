@@ -207,5 +207,5 @@ jobs:
           cargo build --release
           ./target/release/fmtool --help >/dev/null
 
-      - name: Run e2e suite (79 checks incl. WebSocket enhancements/concurrency/refinements, CI-repeatable)
+      - name: Run e2e suite (428 checks incl. WebSocket enhancements/concurrency/refinements + param constraint surface CP, CI-repeatable)
         run: ./scripts/e2e_test.sh
