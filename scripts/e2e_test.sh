@@ -182,6 +182,13 @@ echo "[setup] starting server on port $PORT (recv timeout 2s, idle timeout 2s)..
 ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
     FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
     FASTAPI_MOJO_WS_CLOSE_WAIT=2000 \
+    FASTAPI_MOJO_OPENAPI_DESCRIPTION="e2e description" \
+    FASTAPI_MOJO_OPENAPI_TERMS="https://tos.example" \
+    FASTAPI_MOJO_OPENAPI_CONTACT="E2E Support|https://support.example|s@example.com" \
+    FASTAPI_MOJO_OPENAPI_LICENSE="MIT|https://opensource.org/licenses/MIT" \
+    FASTAPI_MOJO_OPENAPI_SERVERS="https://api.example/v1:Prod" \
+    FASTAPI_MOJO_OPENAPI_TAGS="items:Item ops;users:User mgmt" \
+    FASTAPI_MOJO_OPENAPI_EXTERNAL_DOCS="https://docs.example/guide|Ext docs" \
     "$BIN" --port "$PORT" \
     > "$TMP/server.log" 2>&1 ) &
 SERVER_PID=$!
@@ -1816,7 +1823,9 @@ else fail "XS-7 /exc/ve 500" "code=$(http_code "$BASE/exc/ve")"; fi
 
 echo "== websocket refinement (ADR-0026, close/exception/binary/json + close-wait) =="
 # 主 server env: FASTAPI_MOJO_WS_CLOSE_WAIT=2000 (close-wait 2s; 1s poll
-# tick 粒度 → 超时 close ∈ [2s, 3s); W1..W8 时序断言基于该值).
+# tick 粒度 → 超时 close ∈ [2s, 3s); W1..W8 时序断言基于该值) +
+# FASTAPI_MOJO_OPENAPI_{DESCRIPTION,TERMS,CONTACT,LICENSE,SERVERS,TAGS,
+# EXTERNAL_DOCS} (决策-52 OP2 断言; TITLE/VERSION 保持默认).
 WS5_OUT=$("$FMTOOL" ws5 "$PORT" 2>&1)
 WS5_FAIL=$(echo "$WS5_OUT" | tail -1)
 for m in W1 W2 W3 W4 W5 W6 W7 W8; do
@@ -1830,6 +1839,102 @@ else fail "WS W9 [ws-exc] log" "no [ws-exc] ws_exc_boom line"; fi
 if [[ "$(cat "$TMP/server.log")" == *"[ws-exc] ws_exc_close: 4002:ws-exc"* ]]; then
     pass "WS W10 _ws_exc_close logged [ws-exc] in server log"
 else fail "WS W10 [ws-exc] log" "no [ws-exc] ws_exc_close line"; fi
+
+# --- OpenAPI refinement (ADR-0027, decision-52) ----------------------------------
+
+echo "== openapi refinement (ADR-0027: info/servers/tags/externalDocs + op-level custom) =="
+# Subserver (no OPENAPI envs) for default-shape checks; main server carries the
+# 7 OPENAPI envs above (TITLE/VERSION intentionally unset -> defaults).
+OA_PORT=$((PORT + 112))
+OA_DIR="$TMP/openapi"
+mkdir -p "$OA_DIR"
+( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+    "$BIN" --port "$OA_PORT" \
+    > "$OA_DIR/server.log" 2>&1 ) &
+OA_PID=$!
+sleep 5
+OA_READY=0
+for _ in $(seq 1 30); do
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$OA_PORT/health" 2>/dev/null)" == *healthy* ]]; then
+        OA_READY=1; break
+    fi
+    sleep 0.3
+done
+if [[ "$OA_READY" != 1 ]]; then
+    fail "OA subserver ready" "second server did not start; log: $(tail -3 "$OA_DIR/server.log")"
+fi
+OA_BASE="http://127.0.0.1:$OA_PORT"
+
+# OP2-1 (subserver, defaults): minimal info + no servers key (info 直连 paths)
+OA1=$(http_body "$OA_BASE/openapi.json")
+if [[ "$OA1" == *'"info":{"title":"fastapi_mojo API","version":"1.8.0"},"paths"'* ]]; then
+    pass "OP2-1 subserver minimal info (title/version only, no servers)"
+else fail "OP2-1 subserver minimal info" "got: ${OA1:0:200}"; fi
+
+# OP2-2 (main): full info exact (键序 + terms 无 quirk + contact/license url quirk)
+OA2=$(http_body "$BASE/openapi.json")
+if [[ "$OA2" == *'"info":{"title":"fastapi_mojo API","description":"e2e description","termsOfService":"https://tos.example","contact":{"name":"E2E Support","url":"https://support.example/","email":"s@example.com"},"license":{"name":"MIT","url":"https://opensource.org/licenses/MIT"},"version":"1.8.0"}'* ]]; then
+    pass "OP2-2 full info (key order + AnyUrl quirk on contact/license)"
+else fail "OP2-2 full info" "got: ${OA2:0:260}"; fi
+
+# OP2-3 (main): servers between info and paths
+if [[ "$OA2" == *'"servers":[{"url":"https://api.example/v1","description":"Prod"}],"paths"'* ]]; then
+    pass "OP2-3 servers array (url:desc split, position before paths)"
+else fail "OP2-3 servers array" "got: ${OA2:0:260}"; fi
+
+# OP2-4 (main): root tags (after components) + externalDocs last (desc-first)
+if [[ "$OA2" == *',"tags":[{"name":"items","description":"Item ops"},{"name":"users","description":"User mgmt"}],"externalDocs":{"description":"Ext docs","url":"https://docs.example/guide"}}'* ]]; then
+    pass "OP2-4 root tags + externalDocs (desc before url, doc terminator)"
+else fail "OP2-4 root tags + externalDocs" "got: ${OA2: -300}"; fi
+
+# OP2-5 (main): /meta/probe operation exact (all op-level keys)
+if [[ "$OA2" == *'"tags":["probe","custom"],"summary":"Probe Sum","description":"Probe desc","operationId":"probe_op","responses":{"200":{"description":"probe ok","content":{"application/json":{"schema":{"type":"object"}}}},"418":{"description":"Teapot custom"}},"deprecated":true'* ]]; then
+    pass "OP2-5 /meta/probe operation exact (tags/summary/desc/opid/responses/deprecated)"
+else fail "OP2-5 /meta/probe operation exact" "got: ${OA2:0:400}"; fi
+
+# OP2-6 (main): /meta/hidden served but absent from spec
+if [[ "$(http_code "$BASE/meta/hidden")" == "200" ]] && [[ "$(grep -c '"meta/hidden"' <(curl -sS -m 5 "$BASE/openapi.json"))" == "0" ]]; then
+    pass "OP2-6 /meta/hidden served 200 + absent from spec (include_in_schema=0)"
+else fail "OP2-6 /meta/hidden" "code=$(http_code "$BASE/meta/hidden")"; fi
+
+# OP2-7 (main): /meta/made wire 201 + spec primary key 201
+if [[ "$(http_code "$BASE/meta/made")" == "201" ]] && [[ "$OA2" == *'"201":{"description":"Successful Response"'* ]]; then
+    pass "OP2-7 /meta/made wire 201 + spec 201 key (Successful Response)"
+else fail "OP2-7 /meta/made" "code=$(http_code "$BASE/meta/made")"; fi
+
+# OP2-8 (main): default operationId formula + summary title-case (P24-5/6)
+if [[ "$OA2" == *'"operationId":"health_health_get"'* ]] && [[ "$OA2" == *'"summary":"Health"'* ]]; then
+    pass "OP2-8 /health defaults (operationId formula + summary title-case)"
+else fail "OP2-8 /health defaults" "got: ${OA2:0:300}"; fi
+
+# OP2-9 (main): 200 default description parity ("Successful Response")
+if [[ "$OA2" == *'"description":"Successful Response"'* ]]; then
+    pass "OP2-9 200 default description = Successful Response"
+else fail "OP2-9 200 default description" "not found in spec"; fi
+
+# OP2-10: full doc valid JSON (fmtool jsoncheck) — main + subserver
+curl -sS -m 5 "$BASE/openapi.json" > "$TMP/oa_main.json"
+curl -sS -m 5 "$OA_BASE/openapi.json" > "$TMP/oa_sub.json"
+if "$FMTOOL" jsoncheck "$TMP/oa_main.json" >/dev/null && "$FMTOOL" jsoncheck "$TMP/oa_sub.json" >/dev/null; then
+    pass "OP2-10 /openapi.json full doc valid JSON (main + subserver)"
+else fail "OP2-10 openapi jsoncheck" "$(head -c 200 "$TMP/oa_main.json")"; fi
+
+# OP2-11 (main): /docs 200 + title (default; TITLE env unset)
+if [[ "$(http_code "$BASE/docs")" == "200" ]] && curl -sS -m 5 "$BASE/docs" | grep -q "fastapi_mojo API - Swagger UI"; then
+    pass "OP2-11 /docs 200 + title intact"
+else fail "OP2-11 /docs" "code=$(http_code "$BASE/docs")"; fi
+
+# OP2-12 (main): /health 200 regression
+expect_code "OP2-12 /health 200 regression" "200" "$BASE/health"
+
+# teardown subserver
+kill -TERM "$OA_PID" 2>/dev/null
+for _ in $(seq 1 20); do
+    if ! kill -0 "$OA_PID" 2>/dev/null; then break; fi
+    sleep 0.3
+done
+kill -9 "$OA_PID" 2>/dev/null
+sleep 0.2
 
 # --- summary ---------------------------------------------------------------------
 

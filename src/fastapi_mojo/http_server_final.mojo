@@ -23,6 +23,8 @@ from file_params import (validate_file_collect,
 from dep_cache import DepCache, inject_dep_calls
 from file_ops_ffi import snapshot_mp_parts, apply_file_ops
 from openapi import generate_openapi, swagger_ui_html
+from openapi_custom import check_openapi_specs  # 决策-52 (ADR-0027)
+from std.os import getenv  # 决策-52: app 级 OPENAPI env (请求期读, 空 = 默认)
 from streaming import build_sse_body, sse_event_count
 from handler import KIND_SSE, KIND_FILE
 from handler import KIND_DEPENDENCY
@@ -818,6 +820,28 @@ def register_routes(mut router: Router) raises:
     wsj_h.set_data("_ws_json", "{\"a\":1,\"b\":\"中文\",\"c\":[1,2]}")
     router.add_ws_route("/ws/json", wsj_h)
 
+    # 决策-52 (ADR-0027): OpenAPI 精化 demo 路由
+    # /meta/probe: 单路由覆盖全部 operation 级键 (tags 不在 root tags → 证明
+    # 不并入; summary/description/response_description/operation_id 显式覆盖;
+    # deprecated; _responses 额外 418)
+    var mp_h = Handler(KIND_ECHO(), "meta_probe")
+    mp_h.set_data("_tags", "probe,custom")
+    mp_h.set_data("_summary", "Probe Sum")
+    mp_h.set_data("_description", "Probe desc")
+    mp_h.set_data("_response_description", "probe ok")
+    mp_h.set_data("_operation_id", "probe_op")
+    mp_h.set_data("_deprecated", "1")
+    mp_h.set_data("_responses", "418:Teapot custom")
+    router.add_route("/meta/probe", "GET", mp_h)
+    # /meta/hidden: include_in_schema=False (200 可服务, spec 无此 path)
+    var mh_h = Handler(KIND_ECHO(), "meta_hidden")
+    mh_h.set_data("_include_in_schema", "0")
+    router.add_route("/meta/hidden", "GET", mh_h)
+    # /meta/made: status_code=201 (wire 201 + spec responses 主键 201)
+    var mm_h = Handler(KIND_ECHO(), "meta_made")
+    mm_h.set_data("_status_code", "201 Created")
+    router.add_route("/meta/made", "GET", mm_h)
+
     # 决策-49 (ADR-0024): 任意异常类型 handler demo (Goal-0003 矩阵 #13).
     # _exception_raise = 声明式 raise 钩子 (endpoint body 抛异常的位置);
     # 无 env 表/路由表 -> 默认 500 "Internal Server Error" (P13-10);
@@ -887,6 +911,9 @@ def register_routes(mut router: Router) raises:
     check_state_specs(router)
     # 决策-51: _ws_* 指令注册期语法检查 (同策略)
     check_ws_specs(router)
+    # 决策-52: OpenAPI 声明注册期语法检查 (_status_code/_responses/_deprecated/
+    # _include_in_schema 畸形 → 启动即 fail, 同策略)
+    check_openapi_specs(router)
 
 
 def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
@@ -997,7 +1024,26 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
             # F4: OpenAPI/Swagger UI (Goal-0002). 动态生成 spec + 内嵌 UI 引导页.
             # 这两个路径不进 route table, 在 dispatch 入口特判 (避免污染路由计数).
             if effective_method == "GET" and path == "/openapi.json":
-                var spec = generate_openapi(router, "fastapi_mojo API", "1.8.0")
+                # 决策-52 (ADR-0027): app 级 9 env 请求期读 (空 = 默认/省略;
+                # 畸形 → openapi_custom 内省略字段, 不 500)
+                var oa_title = "fastapi_mojo API"
+                var oa_version = "1.8.0"
+                var oa_t = getenv("FASTAPI_MOJO_OPENAPI_TITLE")
+                if oa_t != "":
+                    oa_title = oa_t
+                var oa_v = getenv("FASTAPI_MOJO_OPENAPI_VERSION")
+                if oa_v != "":
+                    oa_version = oa_v
+                var oa_desc = getenv("FASTAPI_MOJO_OPENAPI_DESCRIPTION")
+                var oa_terms = getenv("FASTAPI_MOJO_OPENAPI_TERMS")
+                var oa_contact = getenv("FASTAPI_MOJO_OPENAPI_CONTACT")
+                var oa_license = getenv("FASTAPI_MOJO_OPENAPI_LICENSE")
+                var oa_servers = getenv("FASTAPI_MOJO_OPENAPI_SERVERS")
+                var oa_tags = getenv("FASTAPI_MOJO_OPENAPI_TAGS")
+                var oa_extdocs = getenv("FASTAPI_MOJO_OPENAPI_EXTERNAL_DOCS")
+                var spec = generate_openapi(router, oa_title, oa_version, oa_desc,
+                                            oa_terms, oa_contact, oa_license,
+                                            oa_servers, oa_tags, oa_extdocs)
                 var extra_empty = String("")
                 _ = external_call["send_simple_response_extra", Int](
                     cfd,
@@ -1013,7 +1059,12 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                     external_call["conn_done", NoneType](cfd, True)
                 continue
             elif effective_method == "GET" and path == "/docs":
-                var html = swagger_ui_html("fastapi_mojo API", "/openapi.json")
+                # 决策-52: /docs 标题与 /openapi.json 同源 (env 或默认)
+                var d_title = "fastapi_mojo API"
+                var d_t = getenv("FASTAPI_MOJO_OPENAPI_TITLE")
+                if d_t != "":
+                    d_title = d_t
+                var html = swagger_ui_html(d_title, "/openapi.json")
                 _ = external_call["send_html_response", Int](
                     cfd,
                     "200 OK".as_c_string_slice(),
@@ -1326,6 +1377,13 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                     continue
                                 status_line = gres.status_line
                                 resp_data = gres.resp_data.copy()
+                                # 决策-52: _status_code 声明 ("NNN Reason" 全 status
+                                # line, 与 _stream_status/_file_status 同型) — 仅当
+                                # handler 默认成功态 "200 OK" 时覆写 (异常/401/405
+                                # 结果不覆写; spec responses 主键取前 3 位, 同源)
+                                if "_status_code" in route_result.handler.data and route_result.handler.data["_status_code"] != "":
+                                    if status_line == "200 OK":
+                                        status_line = route_result.handler.data["_status_code"]
 
                                 # F5: SSE 一次性推送 (跳过 run_handler, 直接构造 SSE body).
                                 # F9 (v0.5.1): 支持自定义 status_code (对齐上游 FastAPI
