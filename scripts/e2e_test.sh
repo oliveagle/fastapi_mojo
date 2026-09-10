@@ -1619,6 +1619,128 @@ for i in $(seq 1 10); do
 done
 if [[ "$STAB_OK" == 1 ]]; then pass "FR-32 /file ×10 稳定 (200 + CL 30)"
 else fail "FR-32 /file ×10 稳定" "不稳定 (见上面各行)"; fi
+# =====================================================================
+# XH: 任意异常类型 handler (决策-49, ADR-0024, Goal-0003 矩阵 #13)
+#
+# XH-1..6: 主 server (无 FASTAPI_MOJO_EXCEPTION_HANDLERS) —
+#   未处理异常 -> 默认 500 "Internal Server Error" (text/plain, P13-10
+#   parity); 正常路由与声明式 _error_map 路径不受影响 (回归).
+# XH-7..13: 副 server (env 表) — 精确 tag / Exception catch-all /
+#   json 条目 / 路由级 _exc_handlers 覆盖 / 同 tag 后者胜 / 无 tag 消息
+#   落 catch-all / 正常路由不受表影响.
+# =====================================================================
+echo "== exception handlers (XH, 决策-49) =="
+
+# --- 主 server: 无表 -> 默认 500 (P13-10) ---
+for t in "XH-1 /exc/ve:500" "XH-2 /exc/unicorn:500" "XH-3 /exc/unhandled:500" "XH-4 /exc/raise-plain:500"; do
+    name="${t%% *}"
+    path=$(echo "$t" | cut -d: -f1 | cut -d' ' -f2)
+    want=$(echo "$t" | cut -d: -f2)
+    code=$(http_code "$BASE$path")
+    body=$(http_body "$BASE$path")
+    if [[ "$code" == "$want" && "$body" == "Internal Server Error" ]]; then
+        pass "$name $path -> 500 'Internal Server Error' (text/plain, P13-10)"
+    else
+        fail "$name $path -> 500 'Internal Server Error'" "code=$code body=[$body]"
+    fi
+done
+ct=$(curl -s -o /dev/null -w '%{content_type}' --max-time 5 "$BASE/exc/ve")
+if [[ "$ct" == "text/plain; charset=utf-8" ]]; then
+    pass "XH-1b /exc/ve Content-Type = text/plain; charset=utf-8"
+else
+    fail "XH-1b /exc/ve Content-Type" "ct=[$ct]"
+fi
+if [[ "$(http_code "$BASE/health")" == "200" ]]; then
+    pass "XH-5 /health 200 (正常路由不受影响)"
+else
+    fail "XH-5 /health 200" "code=$(http_code "$BASE/health")"
+fi
+if [[ "$(http_code "$BASE/errors/99")" == "404" ]]; then
+    pass "XH-6 /errors/99 404 (声明式 _error_map 路径不受影响, F2 回归)"
+else
+    fail "XH-6 /errors/99 404" "code=$(http_code "$BASE/errors/99")"
+fi
+
+# --- 副 server: env 表 ---
+EXC_PORT=$((PORT + 110))
+EXC_LOG="$TMP/exc_server.log"
+( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+    FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+    FASTAPI_MOJO_EXCEPTION_HANDLERS='ValueError:418:oops {exc};UnicornException:418:rainbow {exc};Exception:503:server down {exc};JsonExc:422:{"detail":"bad {exc}"}:json;Dup:400:first;Dup:404:second {exc}' \
+    "$BIN" --port "$EXC_PORT" \
+    > "$EXC_LOG" 2>&1 ) &
+EXC_PID=$!
+EXC_READY=0
+for _ in $(seq 1 30); do
+    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$EXC_PORT/health"; then
+        EXC_READY=1; break
+    fi
+    sleep 0.3
+done
+if [[ "$EXC_READY" == 1 ]]; then
+    EB="http://127.0.0.1:$EXC_PORT"
+    # XH-7: 精确 tag -> 418 text
+    code=$(http_code "$EB/exc/ve"); body=$(http_body "$EB/exc/ve")
+    if [[ "$code" == "418" && "$body" == "oops bad value from handler" ]]; then
+        pass "XH-7 /exc/ve -> 418 'oops bad value from handler' (精确 tag)"
+    else
+        fail "XH-7 /exc/ve -> 418" "code=$code body=[$body]"
+    fi
+    # XH-8: 自定义"异常类" tag
+    code=$(http_code "$EB/exc/unicorn"); body=$(http_body "$EB/exc/unicorn")
+    if [[ "$code" == "418" && "$body" == "rainbow rainbow lost" ]]; then
+        pass "XH-8 /exc/unicorn -> 418 'rainbow rainbow lost' (自定义 tag)"
+    else
+        fail "XH-8 /exc/unicorn -> 418" "code=$code body=[$body]"
+    fi
+    # XH-9: 无匹配 -> Exception catch-all -> 503
+    code=$(http_code "$EB/exc/unhandled"); body=$(http_body "$EB/exc/unhandled")
+    if [[ "$code" == "503" && "$body" == "server down no entry for this" ]]; then
+        pass "XH-9 /exc/unhandled -> 503 catch-all (Exception 键)"
+    else
+        fail "XH-9 /exc/unhandled -> 503 catch-all" "code=$code body=[$body]"
+    fi
+    # XH-10: json 条目 -> application/json + 转义安全 body
+    code=$(http_code "$EB/exc/ve2"); body=$(http_body "$EB/exc/ve2")
+    ct=$(curl -s -o /dev/null -w '%{content_type}' --max-time 5 "$EB/exc/ve2")
+    if [[ "$code" == "422" && "$body" == '{"detail":"bad boom"}' && "$ct" == "application/json" ]]; then
+        pass "XH-10 /exc/ve2 -> 422 json {detail} (CT application/json)"
+    else
+        fail "XH-10 /exc/ve2 -> 422 json" "code=$code body=[$body] ct=[$ct]"
+    fi
+    # XH-11: 路由级 _exc_handlers 整体替换全局表
+    code=$(http_code "$EB/exc/override"); body=$(http_body "$EB/exc/override")
+    if [[ "$code" == "429" && "$body" == "overridden x" ]]; then
+        pass "XH-11 /exc/override -> 429 (路由级表覆盖全局)"
+    else
+        fail "XH-11 /exc/override -> 429" "code=$code body=[$body]"
+    fi
+    # XH-12: 同 tag 后者胜
+    code=$(http_code "$EB/exc/dup"); body=$(http_body "$EB/exc/dup")
+    if [[ "$code" == "404" && "$body" == "second d" ]]; then
+        pass "XH-12 /exc/dup -> 404 'second d' (同 tag 后者胜, P13-2)"
+    else
+        fail "XH-12 /exc/dup -> 404 last-wins" "code=$code body=[$body]"
+    fi
+    # XH-13: 无 tag 消息 + 正常路由
+    code=$(http_code "$EB/exc/raise-plain"); body=$(http_body "$EB/exc/raise-plain")
+    if [[ "$code" == "503" && "$body" == "server down plain message no colon" ]]; then
+        pass "XH-13a /exc/raise-plain -> 503 (无 tag 消息落 catch-all)"
+    else
+        fail "XH-13a /exc/raise-plain -> 503" "code=$code body=[$body]"
+    fi
+    if [[ "$(http_code "$EB/health")" == "200" ]]; then
+        pass "XH-13b /health 200 (有表但正常路由不受影响)"
+    else
+        fail "XH-13b /health 200 (exc server)" "code=$(http_code "$EB/health")"
+    fi
+else
+    fail "XH-7..13 exception table server" "second server did not start; log: $(tail -3 "$EXC_LOG")"
+fi
+kill -TERM "$EXC_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$EXC_PID" 2>/dev/null
+
 # --- summary ---------------------------------------------------------------------
 
 echo

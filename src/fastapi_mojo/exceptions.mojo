@@ -57,6 +57,7 @@ def standard_status_line(code: Int) -> String:
     if code == 413: return "413 Payload Too Large"
     if code == 414: return "414 URI Too Long"
     if code == 415: return "415 Unsupported Media Type"
+    if code == 418: return "418 I'm a Teapot"  # 决策-49: 自定义异常 demo 常用码
     if code == 422: return "422 Unprocessable Entity"
     if code == 429: return "429 Too Many Requests"
     if code == 500: return "500 Internal Server Error"

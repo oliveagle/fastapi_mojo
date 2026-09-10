@@ -162,6 +162,13 @@ pub fn send_text_response(fd: c_int, body: &[u8]) -> c_long {
     send_response(fd, "200 OK", "text/plain; charset=utf-8", body, true, None) as c_long
 }
 
+/// ADR-0024 (决策-49): 纯文本响应 + 自定义 status (上游 PlainTextResponse(status_code)
+/// parity). 与 send_text_response (200 硬编码, F6 metrics) 同型, 加 status 参数.
+/// 用途: 异常类型 handler 的 text/plain 响应 (418/503/... 非 200).
+pub fn send_text_response_status(fd: c_int, status: &str, body: &[u8]) -> c_long {
+    send_response(fd, status, "text/plain; charset=utf-8", body, true, None) as c_long
+}
+
 /// F5: SSE 响应 (Content-Type: text/event-stream; charset=utf-8).
 /// 调用方传入完整 SSE body (已按 SSE spec 格式化的多事件串), send_response 一次性发送.
 /// 不维护长连接 (避免占 worker; 一次性推送后关 fd).

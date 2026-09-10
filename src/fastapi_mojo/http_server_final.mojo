@@ -34,6 +34,7 @@ from form_params import (validate_form_collect, apply_form_extras, get_form_type
 from file_form_check import validate_file_vs_form, file_part_fields
 from security_jwt import handle_oauth2_token, check_oauth2  # 决策-44: /token + _auth=oauth2
 from lifespan import run_lifespan_startup, run_lifespan_shutdown
+from exception_handlers import guarded_run_handler  # 决策-49 (ADR-0024)
 
 
 def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: String) raises:
@@ -786,6 +787,46 @@ def register_routes(mut router: Router) raises:
     ws_private_h.set_data("ws_token", "secret")  # 升级 query 必须带 token=secret
     router.add_ws_route("/ws/private", ws_private_h)
 
+    # 决策-49 (ADR-0024): 任意异常类型 handler demo (Goal-0003 矩阵 #13).
+    # _exception_raise = 声明式 raise 钩子 (endpoint body 抛异常的位置);
+    # 无 env 表/路由表 -> 默认 500 "Internal Server Error" (P13-10);
+    # FASTAPI_MOJO_EXCEPTION_HANDLERS / _exc_handlers 存在 -> 表驱动响应.
+    var exc_ve_h = Handler(KIND_STATIC(), "exc_value_error")
+    exc_ve_h.set_data("message", "ValueError demo")
+    exc_ve_h.set_data("_exception_raise", "ValueError: bad value from handler")
+    router.add_route("/exc/ve", "GET", exc_ve_h)
+
+    var exc_unicorn_h = Handler(KIND_STATIC(), "exc_unicorn")
+    exc_unicorn_h.set_data("message", "UnicornException demo")
+    exc_unicorn_h.set_data("_exception_raise", "UnicornException: rainbow lost")
+    router.add_route("/exc/unicorn", "GET", exc_unicorn_h)
+
+    var exc_unhandled_h = Handler(KIND_STATIC(), "exc_unhandled")
+    exc_unhandled_h.set_data("message", "unhandled exception demo")
+    exc_unhandled_h.set_data("_exception_raise", "MysteryFailure: no entry for this")
+    router.add_route("/exc/unhandled", "GET", exc_unhandled_h)
+
+    var exc_plain_h = Handler(KIND_STATIC(), "exc_plain")
+    exc_plain_h.set_data("message", "untagged raise demo")
+    exc_plain_h.set_data("_exception_raise", "plain message no colon")
+    router.add_route("/exc/raise-plain", "GET", exc_plain_h)
+
+    var exc_ve2_h = Handler(KIND_STATIC(), "exc_json")
+    exc_ve2_h.set_data("message", "json exception entry demo")
+    exc_ve2_h.set_data("_exception_raise", "JsonExc: boom")
+    router.add_route("/exc/ve2", "GET", exc_ve2_h)
+
+    var exc_ovr_h = Handler(KIND_STATIC(), "exc_override")
+    exc_ovr_h.set_data("message", "route-level table override demo")
+    exc_ovr_h.set_data("_exception_raise", "ValueError: x")
+    exc_ovr_h.set_data("_exc_handlers", "ValueError:429:overridden {exc}")
+    router.add_route("/exc/override", "GET", exc_ovr_h)
+
+    var exc_dup_h = Handler(KIND_STATIC(), "exc_dup")
+    exc_dup_h.set_data("message", "last-wins per tag demo")
+    exc_dup_h.set_data("_exception_raise", "Dup: d")
+    router.add_route("/exc/dup", "GET", exc_dup_h)
+
     # 决策-38: _body_schema 注册期语法检查 (畸形 spec 启动即 fail, 不带入请求路径)
     check_body_schemas(router)
 
@@ -1183,10 +1224,34 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain) raises:
                                     # _dep_calls=true -> 注入各 dep 每请求实际派发次数
                                     # (observability 超集, 上游无此面; ADR-0022 §3.5-2).
                                     inject_dep_calls(route_result.handler.data, req_params, dcache)
-                                var result = run_handler(route_result.handler, req_params,
-                                                         query_params, body_params, info)
-                                status_line = result[0]
-                                resp_data = result[1].copy()
+                                # 决策-49 (ADR-0024): 路由级 try/except guard —
+                                # _exception_raise 钩子 + run_handler; 捕获 Error ->
+                                # 异常类型 handler 表 (env / _exc_handlers;
+                                # 精确 tag -> Exception catch-all -> 默认 500).
+                                var gres = guarded_run_handler(route_result.handler,
+                                                               req_params,
+                                                               query_params,
+                                                               body_params, info)
+                                if gres.is_exc:
+                                    # 异常 handler 响应 (绕过 response_model, 原样发送)
+                                    if gres.is_json:
+                                        _ = external_call["send_simple_response", Int](
+                                            cfd, gres.status_line.as_c_string_slice(),
+                                            gres.body.as_c_string_slice())
+                                    else:
+                                        _ = external_call["send_text_response_status", Int](
+                                            cfd, gres.status_line.as_c_string_slice(),
+                                            gres.body.as_c_string_slice())
+                                    var exc_dur = mw_timing(mw_chain, start_ms)
+                                    mw_logging(mw_chain, req_id, method, path, query,
+                                               gres.status_line + " (exc)", exc_dur)
+                                    if external_call["get_close_after_response", Int]() != 0:
+                                        external_call["conn_done", NoneType](cfd, False)
+                                    else:
+                                        external_call["conn_done", NoneType](cfd, True)
+                                    continue
+                                status_line = gres.status_line
+                                resp_data = gres.resp_data.copy()
 
                                 # F5: SSE 一次性推送 (跳过 run_handler, 直接构造 SSE body).
                                 # F9 (v0.5.1): 支持自定义 status_code (对齐上游 FastAPI

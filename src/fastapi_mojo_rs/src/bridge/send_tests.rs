@@ -199,6 +199,31 @@ fn send_simple_response_and_html() {
 }
 
 #[test]
+fn send_text_response_status_custom_status_and_ct() {
+    let mut cp = ConnPair::new();
+    assert_eq!(send_text_response_status(cp.b, "418 I'm a Teapot", b"oops boom"), 0);
+    let resp = recv_all(&mut cp);
+    let head = String::from_utf8_lossy(&resp[..find_blank_line(&resp)]);
+    assert!(head.starts_with("HTTP/1.1 418 I'm a Teapot\r\n"));
+    assert!(head.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+    assert_eq!(body_after_headers(&resp), b"oops boom");
+}
+
+#[test]
+fn send_text_response_status_default_500_parity() {
+    // P13-10: 未处理异常默认响应 = 500 + "Internal Server Error" (text/plain).
+    let mut cp = ConnPair::new();
+    assert_eq!(
+        send_text_response_status(cp.b, "500 Internal Server Error", b"Internal Server Error"),
+        0
+    );
+    let resp = recv_all(&mut cp);
+    let head = String::from_utf8_lossy(&resp[..find_blank_line(&resp)]);
+    assert!(head.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+    assert_eq!(body_after_headers(&resp), b"Internal Server Error");
+}
+
+#[test]
 fn send_preflight_response_exact_bytes() {
     let mut cp = ConnPair::new();
     let rc = send_preflight_response(cp.b);

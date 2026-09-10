@@ -58,6 +58,7 @@ use super::send::{
     send_sse_response as send_send_sse_response,
     send_sse_response_extra as send_send_sse_response_extra,
     send_text_response as send_send_text_response,
+    send_text_response_status as send_send_text_response_status,
     send_head_response as send_send_head_response,
     send_html_response as send_send_html_response,
     send_preflight_response as send_send_preflight_response,
@@ -414,6 +415,16 @@ pub extern "C" fn send_sse_response_extra(
 pub extern "C" fn send_text_response(fd: c_int, body: *const c_char) -> c_long {
     let b = unsafe { c_str_bytes(body) };
     send_send_text_response(fd, &b) as c_long
+}
+
+/// ADR-0024 (决策-49): 异常 handler 的 text/plain + 自定义 status 响应.
+#[no_mangle]
+pub extern "C" fn send_text_response_status(
+    fd: c_int, status: *const c_char, body: *const c_char,
+) -> c_long {
+    let s = unsafe { c_str_lossy(status) };
+    let b = unsafe { c_str_bytes(body) };
+    send_send_text_response_status(fd, &s, &b) as c_long
 }
 
 #[no_mangle]
