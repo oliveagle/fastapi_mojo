@@ -442,9 +442,10 @@ RSS 平台化（HTTP 2500 req + WS 180k frames）→ 无线性泄漏
          又能 import starlette 风格 handler。设计重，需先调研 ASGI 3.0 spec。
       11. **HTTP/2（远期）**：Rust h2 / hyper 评估；当前 curl/浏览器多数仍
          HTTP/1.1，优先级低。
-      12. **UPX 重新评估（决策-30 挂起）**：当前 UPX 压缩 2.85MB→1.01MB（-64.5%）
-         但 ldd 输出 "not a dynamic executable" 破坏 CI North Star 门禁。可选：
-         CI 旁路断言（UPX 跳过 ldd 检查）或重写 CI 门禁为 readelf 替代。
+      12. **UPX 重新评估（决策-65 已闭环）**：当前 TLS 产物 4,954,416B 用
+         UPX 5.2.1 `-9` → 1,718,420B（-65.32%），冷启动均值 12.1→31.6ms；UPX
+         stub 无 INTERP/NEEDED，readelf 不能替代未压缩产物 ldd。结论：默认
+         build/CI 产物不变，UPX 仍仅 opt-in 手动部署（ADR-0040）。
 
 
 - **说明**：本文件是 `docs/goals/` 下**第一个** goal 文件。仓库此前无 goals 目录；

@@ -130,6 +130,21 @@ scp build/deploy/fastapi_mojo user@host:/opt/fastapi_mojo/
 ssh user@host '/opt/fastapi_mojo'
 ```
 
+### 可选 UPX 压缩（磁盘紧张场景）
+
+```bash
+./build_single.sh
+UPX_BIN=/path/to/upx ./compress_upx.sh --port 18971   # UPX 5.2.1 -9
+./compress_upx.sh --restore                            # 恢复未压缩交付物
+```
+
+决策-65（ADR-0040）保持 UPX **opt-in**：当前实测 4,954,416 B → 1,718,420 B
+（-65.32%），冷启动均值 12.1 ms → 31.6 ms，RSS 持平；`--brute` 仅再省约 187 KiB
+但冷启动约 95 ms，不推荐。压缩副本会让 `ldd` / `readelf` 都看不到原 ELF 的
+`INTERP` / `NEEDED` 元数据，因此 **不能替代未压缩 binary 的 North Star ldd 门禁**。
+脚本会先校验未压缩产物的 ldd 白名单，再对临时 UPX 候选执行 `upx -t` 和
+`env -i /health` smoke，通过后才保存 `.pre-upx` 备份并替换交付副本。
+
 ### 生产部署（Docker / systemd / nginx）
 
 三种方式，全部基于同一 single binary（零外部运行时依赖）：

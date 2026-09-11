@@ -101,7 +101,7 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 
 - 每个 `.mojo` < 500 行；新能力 = 新模块 + 单一 dispatch 钩子（run_handler / 钩子模式）
 - 声明式优先：新增路由/行为 = 数据（`set_data`），核心零改动
-- e2e 全程不回归（每次提交跑全量）；binary ≤4.2M；ldd 仅 libc
+- e2e 全程不回归（每次提交跑全量）；默认 binary ≤6 MiB（UPX 可选副本不进入预算）；ldd 仅 libc
 - ADR 含 6 条架构隔离约束声明；决策先行
 
 ## 4. 任务清单（beads / 决议链）
@@ -117,6 +117,8 @@ FastAPI 使用率最高的能力之一。声明式 + 单一 dispatch 钩子，�
 | T-P2* | 查询多值/alias ✅（决策-43）、Form 多值/alias ✅（决策-45）、中间件 GZip ✅（决策-40）、CORS 完整 ✅（决策-42）、OAuth2/JWT ✅（决策-44）、UploadFile 对象 API ✅（决策-46）、Depends use_cache ✅（决策-47）、File/Streaming 通用响应 ✅（决策-48）、异常 handler ✅（决策-49）、WS 精化 ✅（决策-51）、OpenAPI tags/prefix/custom ✅（决策-52）、Header alias/转换 ✅（决策-53）、参数约束面 ✅（决策-54）、用户自定义中间件 ✅（决策-55） | P2 | 📋 |
 
 ---
+*最后更新：2026-09-12（**决策-65 UPX 复评**（ADR-0040, Goal-0003 packaging extension / upx-revisit bead 销账）：默认交付物与 CI ldd 主门禁不变；UPX 5.2.1 `-9` 仍仅磁盘紧张场景 opt-in 手动副本，4,954,416→1,718,420 B（-65.32%）、冷启动均值 12.1→31.6ms、RSS 持平；`--brute` 1,527,172 B 但约 95ms 冷启动 → 拒绝；UPX 副本 e2e **521/521** / bench 6 场景 0 errors（30,120.48 req/s，单机噪声区间）/ `upx -t` OK / env-i health 200 / 无孤儿；压缩 stub 无 INTERP/NEEDED → **readelf 不能替代未压缩 ldd 证明**，未来只能“未压缩 ldd + 压缩副本 test/smoke”双产物验证；compress_upx.sh 加 ldd 预检、候选临时文件、upx-test、默认 env-i smoke、`.pre-upx` 保护与 `--restore`，恢复后 4,954,416B + ldd libc-only / C=Python=orphans=0）
+下一轮：P1/P2 open beads（multi-arch / json-rust / asgi-shim）
 *最后更新：2026-09-12（**决策-64 原生 TLS/HTTPS**（ADR-0039, Goal-0003 deployment extension / tls-rustls bead 销账）：cert/key/ALPN env opt-in + rustls 0.23.42 / RustCrypto provider 0.0.2-alpha（default features 关闭、无 ring/aws-lc/OpenSSL、enabled 闭包 C/asm=0）+ fd→ServerConnection transport adapter（recv/send/close_notify，HTTP/1/WS/SSE/H2 状态机不感知，**FFI diff=0**）；TLS1.3-only + ALPN h2/http1.1，配置错误 fail-closed；修复 Mojo 64-bit Int 读 C int `-1` 成 4294967295 的 bind 哨兵漏判；e2e openssl/curl 仅 dev 工具 → **511→521/521**（TLS-0..9）/ bridge **486/0/4** / fmtool **35/0** / clippy 0（双 crate）/ bench 6 场景 0 errors（get_root_10k_100c=32,372.94 req/s）/ binary **4,954,416 B**（≤6 MiB, +733,280 B）/ ldd 仅 libc / env-i HTTP+TLS health 200 / 多 worker+keep-alive+ALPN+明文拒绝实测通过 / C=Python=orphans 0；边界=alpha provider、TLS1.2/mTLS/加密 key 密码/热加载/OCSP/SNI 多证书/session ticket 调优不支持，公网生产建议反代终结）
 下一轮：P1/P2 open beads（upx-revisit / asgi-shim / multi-arch / json-rust）
 *最后更新：2026-09-12（**决策-63 HTTP/2 prior-knowledge h2c 子集**（ADR-0038, Goal-0003 P2 / http2 bead 销账）：纯 Rust std 实现 RFC7540/7541 有界子集 — HPACK 静态/动态/Huffman 请求解码 + literal-only 响应编码 + HEADERS/CONTINUATION/DATA/SETTINGS/PING/WINDOW_UPDATE/RST/GOAWAY + 长度/伪头/connection-specific/Content-Length 防御 + phase6 复用 poll + 串行 dispatch（100 ready/pending cap）+ poll 前主动 drain 已缓冲 stream；**FFI diff=0**（H2Request 适配既有 request globals/body NUL 契约）；修复两处集成风险：response facade 不重入 conn_table lock（413/raw error 回归）与 conn_done 后 buffered multiplex 不等待新 socket 事件；fmtool 零依赖 H2 客户端 → e2e **504→511/511**（H2-1..7）/ bridge **483/0/4** / fmtool **35/0** / clippy 0（双 crate）/ bench 6 场景 0 errors（get_root_10k_100c=34,916.2 req/s）/ binary **4,221,136 B**（≤6 MiB CI 门禁, +36,864 B）/ ldd 仅 libc / env -i 干净启动 / C=Python=orphans 0；边界=无 TLS/ALPN/h1 Upgrade、串行 dispatch、无 trailers/server push/WS-over-H2、仅 connection send window 且窗口不足 fail-fast、响应不建 HPACK 动态表）
