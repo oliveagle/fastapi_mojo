@@ -169,7 +169,18 @@ pub fn random_bytes(n: usize) -> Vec<u8> {
 
 /// op: 0x1=text, 0x2=binary, 0x8=close, 0x9=ping, 0xA=pong
 pub fn make_frame(op: u8, payload: &[u8], fin: bool, mask: &[u8; 4]) -> Vec<u8> {
-    let first = if fin { 0x80 | op } else { op };
+    make_frame_ext(op, payload, fin, mask, false)
+}
+
+pub fn make_frame_rsv1(op: u8, payload: &[u8], fin: bool, mask: &[u8; 4]) -> Vec<u8> {
+    make_frame_ext(op, payload, fin, mask, true)
+}
+
+fn make_frame_ext(op: u8, payload: &[u8], fin: bool, mask: &[u8; 4], rsv1: bool) -> Vec<u8> {
+    let mut first = if fin { 0x80 | op } else { op };
+    if rsv1 {
+        first |= 0x40;
+    }
     let mut h = vec![first];
     let n = payload.len();
     if n < 126 {
@@ -190,9 +201,11 @@ pub fn make_frame(op: u8, payload: &[u8], fin: bool, mask: &[u8; 4]) -> Vec<u8> 
     masked
 }
 
+#[derive(Debug)]
 pub struct Frame {
     pub fin: bool,
     pub op: u8,
+    pub rsv1: bool,
     pub payload: Vec<u8>,
 }
 
@@ -200,6 +213,7 @@ pub fn recv_frame(s: &mut TcpStream) -> io::Result<Frame> {
     let h = recv_exact(s, 2)?;
     let fin = (h[0] & 0x80) != 0;
     let op = h[0] & 0x0F;
+    let rsv1 = (h[0] & 0x40) != 0;
     let mut n = (h[1] & 0x7F) as usize;
     if n == 126 {
         let ext = recv_exact(s, 2)?;
@@ -209,7 +223,7 @@ pub fn recv_frame(s: &mut TcpStream) -> io::Result<Frame> {
         n = u64::from_be_bytes([ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7]]) as usize;
     }
     let payload = if n > 0 { recv_exact(s, n)? } else { Vec::new() };
-    Ok(Frame { fin, op, payload })
+    Ok(Frame { fin, op, rsv1, payload })
 }
 
 // ---------- handshake ----------

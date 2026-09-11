@@ -10,17 +10,8 @@
 //!   - ws_message_done (phase 4→3) / ws_conn_close (入队结束事件 + 关闭)
 //!   - get_ws_ping_max (env 一次性解析)
 //!
-//! 与 C 的差异 (语义等价):
-//!   - 全局 `g_ws_key` (256B 栈缓冲) → `WS_KEY_BUF` (Mutex<WsKeyBuf>, 256B);
-//!     ptr 在下次 is_ws_upgrade 写入前有效 (C 同样: static buf 复用)。
-//!   - `g_ws_event_type` 走 `request::set_ws_event_type`/`get_ws_event_type`
-//!     (CurrentRequest 单字段, request.rs 已落地)。
-//!   - `g_path` 走 `request::get_path_slice` (request.rs 已落地)。
-//!   - `ws_event_push` 走 `ws_events()` (conn.rs 已落地 WsEventQueue)。
-//!
-//! FFI 包装 (#[no_mangle] extern "C") 待 `bridge.o` 下线时统一加 (与 conn /
-//! response / signals 同批, 避免当前 `--whole-archive` 同时链接 C 与 Rust
-//! 时的同名符号冲突, 详见 ADR-0010 §3 决策-4)。
+//! 与 C 的差异 (语义等价): 全局 WS key/proto 缓冲改 Mutex; event/path 走
+//! request 与 conn 模块。extern "C" 包装集中在 bridge/ffi.rs。
 
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -30,6 +21,8 @@ use super::conn::parse::{check_ws_upgrade, get_ws_protocol};
 use super::conn::{conn_table, ws_events};
 use super::request::{self, CSlice};
 use super::time_util::now_ms;
+use super::ws_session_deflate::{configure, ws_write_conn_payload};
+use crate::ws::deflate::get_ws_deflate_mode;
 
 // ========== WS key 临时缓冲 (端口 C g_ws_key[256]) ==========
 struct WsKeyBuf {
@@ -126,17 +119,32 @@ fn get_protocol_offer_buf() -> &'static Mutex<Vec<u8>> {
     PROTO_OFFER.get_or_init(|| Mutex::new(Vec::with_capacity(256)))
 }
 
-/// active 连接 101 握手; 端口 C `ws_session_begin` (§1272-1277). 0 = ok.
+/// active 连接 101 握手; 端口 C `ws_session_begin` (§1272-1277).
+/// 0 = ok; 1 = 内部失败; 2 = `FASTAPI_MOJO_WS_DEFLATE=required` 且客户端
+/// 没有可接受的 permessage-deflate offer (Mojo 层映射 400)。
 pub fn ws_session_begin(subprotocol: &str) -> c_int {
-    let fd = {
-        let table = match conn_table().lock() {
+    let mode = get_ws_deflate_mode();
+    let (fd, extension) = {
+        let mut table = match conn_table().lock() {
             Ok(g) => g,
             Err(_) => return 1,
         };
-        match table.active().and_then(|i| table.get(i)) {
+        let idx = match table.active() {
+            Some(i) => i,
+            None => return 1,
+        };
+        let fd = match table.get(idx) {
             Some(c) if c.in_use => c.fd,
             _ => return 1,
-        }
+        };
+        let extension = match table.get_mut(idx) {
+            Some(c) => match configure(c, mode) {
+                Ok(ext) => ext,
+                Err(_) => return 2,
+            },
+            None => return 1,
+        };
+        (fd, extension)
     };
     // ⚠️ ws_handshake 按 NUL 结尾 C 串读 key (FFI 约定): 必须补 NUL,
     // 否则读到 Vec 末尾之外的内存 (实测 accept 值被污染成 u4FMQqF7...)。
@@ -149,10 +157,11 @@ pub fn ws_session_begin(subprotocol: &str) -> c_int {
     };
     // subprotocol 传 CString (含 NUL), C ws_handshake 用 strlen 读
     let sp_c = std::ffi::CString::new(subprotocol.as_bytes()).unwrap_or_default();
-    let rc = crate::ws::ws_handshake(
+    let rc = crate::ws::ws_handshake_inner(
         fd,
         key_bytes.as_ptr() as *const c_char,
         if sp_c.as_bytes().is_empty() { std::ptr::null() } else { sp_c.as_ptr() },
+        extension.as_deref(),
     );
     if rc == 0 { 0 } else { 1 }
 }
@@ -281,9 +290,10 @@ pub fn ws_payload_slice() -> CSlice {
     }
 }
 
+
 /// 零拷贝 echo: 把待处理消息原样发回; 端口 C `ws_write_current` (§1331-1335).
 pub fn ws_write_current(fd: c_int, opcode: c_int) -> c_int {
-    let table = match conn_table().lock() {
+    let mut table = match conn_table().lock() {
         Ok(g) => g,
         Err(_) => return 1,
     };
@@ -292,15 +302,32 @@ pub fn ws_write_current(fd: c_int, opcode: c_int) -> c_int {
         None => return 1,
     };
     let (payload, plen) = match table.get(idx) {
-        Some(c) if c.ws_mlen > 0 => (c.ws_reasm.as_ptr(), c.ws_mlen),
+        Some(c) if c.ws_mlen > 0 => {
+            let p = c.ws_reasm[..c.ws_mlen].to_vec();
+            (p, c.ws_mlen)
+        }
         _ => return 1,
     };
-    crate::ws::ws_write_message(fd, opcode, payload, plen)
+    match table.get_mut(idx) {
+        Some(c) => ws_write_conn_payload(c, fd, opcode, &payload[..plen]),
+        None => 1,
+    }
 }
 
 /// text 回复; 端口 C `ws_write_text` (§1341-1344). data 不可含 NUL.
 pub fn ws_write_text(fd: c_int, data: &[u8]) -> c_int {
-    crate::ws::ws_write_message(fd, 1, data.as_ptr(), data.len())
+    let mut table = match conn_table().lock() {
+        Ok(g) => g,
+        Err(_) => return 1,
+    };
+    let idx = match table.find(fd) {
+        Some(i) => i,
+        None => return crate::ws::ws_write_message(fd, 1, data.as_ptr(), data.len()),
+    };
+    match table.get_mut(idx) {
+        Some(c) => ws_write_conn_payload(c, fd, 1, data),
+        None => crate::ws::ws_write_message(fd, 1, data.as_ptr(), data.len()),
+    }
 }
 
 /// 服务端 close 帧; 端口 C `ws_send_close` (§1347-1350).
@@ -347,13 +374,24 @@ pub fn ws_conn_close(fd: c_int) {
 /// BINARY 回复 (NUL-free 文本数据, 非 echo handler); ADR-0026 决策-51.
 /// data 不可含 NUL (FFI 约定同 ws_write_text).
 pub fn ws_write_binary(fd: c_int, data: &[u8]) -> c_int {
-    crate::ws::ws_write_message(fd, 2, data.as_ptr(), data.len())
+    let mut table = match conn_table().lock() {
+        Ok(g) => g,
+        Err(_) => return 1,
+    };
+    let idx = match table.find(fd) {
+        Some(i) => i,
+        None => return crate::ws::ws_write_message(fd, 2, data.as_ptr(), data.len()),
+    };
+    match table.get_mut(idx) {
+        Some(c) => ws_write_conn_payload(c, fd, 2, data),
+        None => crate::ws::ws_write_message(fd, 2, data.as_ptr(), data.len()),
+    }
 }
 
 /// 零拷贝: 待处理消息载荷原样以 BINARY 帧发回 (NUL 安全,
 /// `ws_write_current` 的 opcode-2 版); ADR-0026 决策-51.
 pub fn ws_write_current_binary(fd: c_int) -> c_int {
-    let table = match conn_table().lock() {
+    let mut table = match conn_table().lock() {
         Ok(g) => g,
         Err(_) => return 1,
     };
@@ -362,10 +400,16 @@ pub fn ws_write_current_binary(fd: c_int) -> c_int {
         None => return 1,
     };
     let (payload, plen) = match table.get(idx) {
-        Some(c) if c.ws_mlen > 0 => (c.ws_reasm.as_ptr(), c.ws_mlen),
+        Some(c) if c.ws_mlen > 0 => {
+            let p = c.ws_reasm[..c.ws_mlen].to_vec();
+            (p, c.ws_mlen)
+        }
         _ => return 1,
     };
-    crate::ws::ws_write_message(fd, 2, payload, plen)
+    match table.get_mut(idx) {
+        Some(c) => ws_write_conn_payload(c, fd, 2, &payload[..plen]),
+        None => 1,
+    }
 }
 
 /// close 帧 (code + reason); wsproto 1.3.2 发送侧规范化 (1004/1006→1000,

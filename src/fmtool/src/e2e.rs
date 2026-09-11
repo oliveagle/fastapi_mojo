@@ -11,6 +11,7 @@
 // 输出约定: 成功打印 marker (如 M1) 或 OK...; 失败打印 FAIL... (e2e 脚本
 // grep marker / OK 前缀判断), 非零退出码.
 
+use crate::deflate::{compress_stored_message, Inflater};
 use crate::net::{recv_until_headers, send_exact, tcp_connect, DEFAULT_TIMEOUT};
 use crate::ws::{self, Frame};
 use std::io::{self, Read};
@@ -819,6 +820,153 @@ pub fn ws5(port: u16) -> i32 {
         Ok(()) => 0,
         Err(e) => { println!("FAIL: {e}"); 1 }
     }
+}
+
+
+// RFC 7692: main-server default mode is ON (WSD1..WSD4).
+pub fn wsdeflate(port: u16) -> i32 {
+    let run = || -> io::Result<()> {
+        // WSD-1: simple offer is accepted; both directions use RSV1 and roundtrip.
+        let offer = "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+        let (mut s, status, hdrs, _) = ws_connect(port, "/ws", offer)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSD1 status {status}")));
+        }
+        if extension_value(&hdrs).as_deref() != Some("permessage-deflate") {
+            return Err(io::Error::other(format!("WSD1 ext missing in {hdrs:?}")));
+        }
+        let first = b"hello rfc7692".to_vec();
+        let mut client_in = Inflater::new();
+        echo_deflate(&mut s, &first, &mut client_in)?;
+        println!("WSD1");
+
+        // WSD-2: one TCP connection and one inflater model server context takeover.
+        let pattern = b"abcdefghij".iter().cycle().take(1600).cloned().collect::<Vec<_>>();
+        echo_deflate(&mut s, &pattern, &mut client_in)?;
+        echo_deflate(&mut s, b"abcdefgh", &mut client_in)?;
+        close_ws(&mut s);
+        println!("WSD2");
+
+        // WSD-3: flags are directional. server_* resets outgoing compression;
+        // client_* tells the server to reset its inflater before each message.
+        let flags = "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n";
+        let (mut s, status, hdrs, _) = ws_connect(port, "/ws", flags)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSD3 status {status}")));
+        }
+        let ext = extension_value(&hdrs).unwrap_or_default();
+        if !ext.contains("server_no_context_takeover") || !ext.contains("client_no_context_takeover") {
+            return Err(io::Error::other(format!("WSD3 ext {ext}")));
+        }
+        let mut fresh_each = Inflater::new();
+        echo_deflate(&mut s, b"reset-one", &mut fresh_each)?;
+        let mut fresh_each = Inflater::new();
+        echo_deflate(&mut s, b"reset-two", &mut fresh_each)?;
+        close_ws(&mut s);
+        println!("WSD3");
+
+        // WSD-4: unsupported 9-bit offer falls back to the valid 15-bit offer.
+        let fallback = "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=9, permessage-deflate; server_max_window_bits=15\r\n";
+        let (mut s, status, hdrs, _) = ws_connect(port, "/ws", fallback)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSD4 status {status}")));
+        }
+        if extension_value(&hdrs).as_deref() != Some("permessage-deflate; server_max_window_bits=15") {
+            return Err(io::Error::other(format!("WSD4 ext {hdrs:?}")));
+        }
+        let mut inflater = Inflater::new();
+        echo_deflate(&mut s, b"fallback-window", &mut inflater)?;
+        close_ws(&mut s);
+        println!("WSD4");
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => { println!("FAIL: {e}"); 1 }
+    }
+}
+
+// RFC 7692: mode=0 declines a valid offer without breaking RFC 6455.
+pub fn wsdeflate_off(port: u16) -> i32 {
+    let run = || -> io::Result<()> {
+        let offer = "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+        let (mut s, status, hdrs, _) = ws_connect(port, "/ws", offer)?;
+        if !status.starts_with("HTTP/1.1 101") || extension_value(&hdrs).is_some() {
+            return Err(io::Error::other(format!("WSD5 status/ext {status} {hdrs:?}")));
+        }
+        send_frame(&mut s, 0x1, b"plain", true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if f.rsv1 || f.op != 0x1 || f.payload != b"plain" {
+            return Err(io::Error::other(format!("WSD5 frame rsv={} {f:?}", f.rsv1)));
+        }
+        close_ws(&mut s);
+        println!("WSD5");
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => { println!("FAIL: {e}"); 1 }
+    }
+}
+
+// RFC 7692: mode=required maps an absent offer to HTTP 400.
+pub fn wsdeflate_required(port: u16) -> i32 {
+    let run = || -> io::Result<()> {
+        let (s, status, hdrs, _) = ws_connect(port, "/ws", "")?;
+        drop(s);
+        if !status.starts_with("HTTP/1.1 400") || extension_value(&hdrs).is_some() {
+            return Err(io::Error::other(format!("WSD6 status/ext {status} {hdrs:?}")));
+        }
+        println!("WSD6");
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => { println!("FAIL: {e}"); 1 }
+    }
+}
+
+fn extension_value(hdrs: &[(String, String)]) -> Option<String> {
+    hdrs.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-extensions"))
+        .map(|(_, v)| v.clone())
+}
+
+fn send_compressed_frame(
+    s: &mut TcpStream,
+    op: u8,
+    payload: &[u8],
+    fin: bool,
+) -> io::Result<()> {
+    let wire = compress_stored_message(payload);
+    let m = mask4();
+    send_exact(s, &ws::make_frame_rsv1(op, &wire, fin, &m))
+}
+
+fn echo_deflate(
+    s: &mut TcpStream,
+    payload: &[u8],
+    inflater: &mut Inflater,
+) -> io::Result<()> {
+    send_compressed_frame(s, 0x1, payload, true)?;
+    let f = recv_frame_timeout(s, DEFAULT_TIMEOUT)?;
+    if !(f.fin && f.rsv1 && f.op == 0x1) {
+        return Err(io::Error::other(format!(
+            "compressed echo flags fin={} rsv1={} op={}",
+            f.fin, f.rsv1, f.op
+        )));
+    }
+    let got = inflater
+        .decompress_message(&f.payload)
+        .map_err(|e| io::Error::other(format!("inflate error {e:?}")))?;
+    if got != payload {
+        return Err(io::Error::other(format!(
+            "inflate mismatch got {} want {}",
+            got.len(),
+            payload.len()
+        )));
+    }
+    Ok(())
 }
 
 // slowloris: 半发送请求行 + stall, 写 holding, 读响应或 TIMEOUT

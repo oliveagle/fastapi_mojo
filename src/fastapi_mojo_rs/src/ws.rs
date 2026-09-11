@@ -2,15 +2,18 @@
 //!
 //! 行为等价翻译自 `ws.c` (380 LOC, ADR-0006~0009)。FFI 导出 6 符号
 //! (ws_parser_init/feed, ws_handshake, ws_write_message, ws_validate_utf8,
-//! ws_reply_close_buf) 与 C 版逐一对齐; `#[repr(C)]` 布局镜像
-//! http_bridge_final.c 的 ws_parser_t (x86_64 SysV, 72B)。
-//! 零第三方 crate; 内部辅助 ws_sha1/ws_b64encode/ws_compute_accept_inner/
+//! ws_reply_close_buf) 与 C 版逐一对齐; 72B C-mirror 布局断言已随 RFC 7692
+//! parser 状态字段扩展退休。内部辅助 ws_sha1/ws_b64encode/ws_compute_accept_inner/
 //! ws_parse_close_code/ws_send_all 为本模块私有。
 //! 行为等价门禁: src/ws/ws_tests.rs (RFC 6455 known vectors + ADR-0009 合并帧)。
 
 use std::os::raw::{c_char, c_int, c_uchar, c_void};
 
+pub mod deflate;
 pub mod parser;
+#[cfg(test)] mod deflate_tests;
+#[cfg(test)] mod parser_tests;
+
 pub use parser::{WsParser, ws_parser_feed, ws_parser_init};
 
 // ========== 常量 ==========
@@ -228,6 +231,17 @@ pub extern "C" fn ws_handshake(
     key: *const c_char,
     subprotocol: *const c_char,
 ) -> c_int {
+    ws_handshake_inner(fd, key, subprotocol, None)
+}
+
+/// 101 handshake with an optional negotiated RFC 7692 extension header.
+/// The three-argument C ABI (`ws_handshake`) remains unchanged.
+pub fn ws_handshake_inner(
+    fd: c_int,
+    key: *const c_char,
+    subprotocol: *const c_char,
+    extension: Option<&[u8]>,
+) -> c_int {
     // 读取 NUL 结尾 C 串 key
     let key_bytes = unsafe {
         let mut len = 0;
@@ -266,41 +280,53 @@ pub extern "C" fn ws_handshake(
             }
         }
     };
-
-    let mut resp = [0u8; 512];
-    let n = if let Some(sp) = sub_bytes {
-        let sp_str = match std::str::from_utf8(sp) {
-            Ok(s) => s,
+    let sub_str = match sub_bytes {
+        Some(b) => match std::str::from_utf8(b) {
+            Ok(s) => Some(s),
             Err(_) => return -1,
-        };
-        let s = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {}\r\n\
-             Sec-WebSocket-Protocol: {}\r\n\r\n",
-            accept_str, sp_str
-        );
-        if s.len() >= resp.len() {
-            return -1;
+        },
+        None => None,
+    };
+    let ext = match extension {
+        Some([]) => None,
+        Some(b) => {
+            if std::str::from_utf8(b).is_err() || b.iter().any(|c| *c == b'\r' || *c == b'\n') {
+                return -1;
+            }
+            Some(String::from_utf8_lossy(b).into_owned())
         }
-        resp[..s.len()].copy_from_slice(s.as_bytes());
-        s.len()
-    } else {
-        let s = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {}\r\n\r\n",
-            accept_str
-        );
-        if s.len() >= resp.len() {
-            return -1;
-        }
-        resp[..s.len()].copy_from_slice(s.as_bytes());
-        s.len()
+        None => None,
     };
 
+    let mut resp = [0u8; 1024];
+    let mut n = 0usize;
+    let mut push = |part: &str| -> bool {
+        let b = part.as_bytes();
+        if n + b.len() >= resp.len() {
+            return false;
+        }
+        resp[n..n + b.len()].copy_from_slice(b);
+        n += b.len();
+        true
+    };
+    if !push("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n")
+        || !push(&format!("Sec-WebSocket-Accept: {accept_str}\r\n"))
+    {
+        return -1;
+    }
+    if let Some(sp) = sub_str {
+        if !push(&format!("Sec-WebSocket-Protocol: {sp}\r\n")) {
+            return -1;
+        }
+    }
+    if let Some(ext) = ext.as_deref() {
+        if !push(&format!("Sec-WebSocket-Extensions: {ext}\r\n")) {
+            return -1;
+        }
+    }
+    if !push("\r\n") {
+        return -1;
+    }
     ws_send_all(fd, &resp[..n])
 }
 
@@ -312,6 +338,26 @@ pub extern "C" fn ws_write_message(
     payload: *const c_uchar,
     plen: usize,
 ) -> c_int {
+    ws_write_message_inner(fd, opcode, payload, plen, false)
+}
+
+/// RFC 7692 writer: `rsv1=true` sets Per-Message Compressed on a first frame.
+pub fn ws_write_message_rsv1(
+    fd: c_int,
+    opcode: c_int,
+    payload: *const c_uchar,
+    plen: usize,
+) -> c_int {
+    ws_write_message_inner(fd, opcode, payload, plen, true)
+}
+
+fn ws_write_message_inner(
+    fd: c_int,
+    opcode: c_int,
+    payload: *const c_uchar,
+    plen: usize,
+    rsv1: bool,
+) -> c_int {
     let payload_slice: &[u8] = if plen == 0 {
         &[]
     } else {
@@ -319,6 +365,9 @@ pub extern "C" fn ws_write_message(
     };
     let mut hdr = [0u8; 10];
     hdr[0] = 0x80 | (opcode as u8 & 0x0F); // FIN=1, 不掩码
+    if rsv1 {
+        hdr[0] |= 0x40;
+    }
     let hlen: usize = if plen < 126 {
         hdr[1] = plen as u8;
         2

@@ -50,6 +50,7 @@ pub mod gzip;
 pub mod signals;
 pub mod socket;
 pub mod ws_session_ffi;
+pub mod ws_session_deflate;
 pub mod state;
 pub mod lifespan;
 pub mod multipart;
@@ -105,6 +106,8 @@ mod socket_tests;
 
 #[cfg(test)]
 mod ws_session_ffi_tests;
+#[cfg(test)]
+mod ws_session_deflate_tests;
 
 #[cfg(test)]
 mod state_tests;

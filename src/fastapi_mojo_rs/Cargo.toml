@@ -7,7 +7,7 @@
 #   - crate-type = ["staticlib"]  (只产 .a, 绝不 cdylib)
 #   - panic = "abort"             (panic 不跨界 unwind)
 #   - lto = true, codegen-units = 1, opt-level = "z"  (体积/速度平衡)
-#   - 唯一第三方 crate = flate2 (GZip 响应压缩 [决策-40, 已落地] + permessage-deflate/RFC7692 [ws-deflate, 预置]; 默认纯 Rust miniz_oxide 后端; 静态链接; ldd 仅 libc 实测; 无 C 路径; SHA-1/base64/UTF-8 手写其余系统调用)
+#   - 第三方 crate 仅限纯 Rust DEFLATE 组合: flate2 (GZip 决策-40) + miniz_oxide (RFC7692 决策-59, 此前已由 flate2 传入并链接); 静态链接; ldd 仅 libc 实测; 无 C 路径; SHA-1/base64/UTF-8 手写其余系统调用
 
 [package]
 name = "fastapi_mojo_rs"
@@ -30,3 +30,5 @@ opt-level = "z"
 
 [dependencies]
 flate2 = "1.0"
+# RFC 7692 uses the same pure-Rust miniz_oxide backend already linked by flate2.
+miniz_oxide = "0.8"

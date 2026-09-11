@@ -50,6 +50,7 @@ use super::state::{get_idle_max_ms, get_max_body_size, get_max_request_ms, get_r
 use super::time_util::now_ms;
 use super::ws_session_ffi::{get_ws_ping_max, ws_send_close};
 use crate::bridge::conn::Conn;
+use crate::ws::deflate::{decompress_message, DecompressError};
 use crate::ws::{ws_parser_feed, ws_reply_close_buf, ws_write_message};
 /// CT = multipart/form-data -> 跳过 body UTF-8 校验 (RFC 2046/RFC 7578 允许
 /// 任意二进制 part body). 判定委托纯函数 `bridge::parse::is_multipart_form_data`
@@ -320,6 +321,9 @@ fn pump_ws_closing(c: &mut Conn) -> i32 {
         let mut opcode: c_int = 0;
         let mut mlen: usize = 0;
         let mut consumed: usize = 0;
+        c.ws_par.deflate_enabled = c.ws_deflate as c_int;
+        c.ws_par.decomp_addr = c.ws_decomp_buf.as_mut_ptr() as usize;
+        c.ws_par.decomp_cap = c.ws_decomp_buf.capacity();
         let rc = ws_parser_feed(
             &mut c.ws_par as *mut _,
             chunk.as_ptr(),
@@ -492,6 +496,9 @@ pub(crate) fn pump_ws_conn(c: &mut Conn) -> i32 {
         // ⚠️ Vec::with_capacity(n) 后 len=0 (踩坑教训); 用 vec![0u8; n] 让 len==cap==n.
         c.ws_reasm = vec![0u8; WS_REASM_INIT];
     }
+    if c.ws_deflate && c.ws_decomp_buf.is_empty() {
+        c.ws_decomp_buf = vec![0u8; WS_REASM_INIT];
+    }
     loop {
         // 数据源: 尾块重放 (上一块消费的剩余) 优先, 否则新 recv
         let (chunk_ptr, chunk_len, was_tail) = if c.ws_tail_len > 0 {
@@ -521,6 +528,9 @@ pub(crate) fn pump_ws_conn(c: &mut Conn) -> i32 {
         let mut opcode: c_int = 0;
         let mut mlen: usize = 0;
         let mut consumed: usize = 0;
+        c.ws_par.deflate_enabled = c.ws_deflate as c_int;
+        c.ws_par.decomp_addr = c.ws_decomp_buf.as_mut_ptr() as usize;
+        c.ws_par.decomp_cap = c.ws_decomp_buf.capacity();
         let rc = ws_parser_feed(
             &mut c.ws_par as *mut _,
             chunk.as_ptr(),
@@ -542,18 +552,29 @@ pub(crate) fn pump_ws_conn(c: &mut Conn) -> i32 {
         }
 
         if rc == -2 {
-            // 重组缓冲不足: 按需翻倍 (上限 1MB+1)
-            let old_cap = c.ws_reasm.capacity();
-            let new_cap = (old_cap * 2).min(MAX_BODY + 1);
+            // RFC 7692: 压缩 payload 在 decomp 缓冲扩容; 普通 payload 在 reasm。
+            let compressed_frame = c.ws_deflate
+                && c.ws_par.msg_rsv != 0
+                && c.ws_par.opcode < 8;
+            let (old_cap, new_cap) = if compressed_frame {
+                let old = c.ws_decomp_buf.capacity();
+                (old, (old * 2).min(MAX_BODY + 1))
+            } else {
+                let old = c.ws_reasm.capacity();
+                (old, (old * 2).min(MAX_BODY + 1))
+            };
             if new_cap <= old_cap {
                 return ws_pump_close(c, 1009); // 超 1MB 上限
             }
-            // 翻倍: 旧内容整体拷贝 (Vec<u8> 字节都是 u8, vec![0u8; n] 初始化,
-            // 已写入 + 未使用零字节全在 buffer 中; parser p.reasm_len 跟踪
-            // 已写字节, 翻倍后重喂尾块会继续从 p.reasm_len 写).
-            let mut new_reasm = vec![0u8; new_cap];
-            new_reasm[..old_cap].copy_from_slice(&c.ws_reasm[..old_cap]);
-            c.ws_reasm = new_reasm;
+            if compressed_frame {
+                let mut new_buf = vec![0u8; new_cap];
+                new_buf[..old_cap].copy_from_slice(&c.ws_decomp_buf[..old_cap]);
+                c.ws_decomp_buf = new_buf;
+            } else {
+                let mut new_reasm = vec![0u8; new_cap];
+                new_reasm[..old_cap].copy_from_slice(&c.ws_reasm[..old_cap]);
+                c.ws_reasm = new_reasm;
+            }
             continue;
         }
         if rc == -1 {
@@ -579,7 +600,37 @@ pub(crate) fn pump_ws_conn(c: &mut Conn) -> i32 {
             continue;
         }
         if rc == 1 {
-            // 数据消息 (text/binary)
+            // 数据消息 (text/binary). 压缩消息先在 pump 层展开到 reasm,
+            // 后续 UTF-8 / Mojo 事件路径与普通消息完全一致。
+            if c.ws_deflate && c.ws_par.msg_rsv != 0 {
+                let compressed = c.ws_decomp_buf[..mlen].to_vec();
+                let expanded = {
+                    let inflater = match c.ws_decomp.as_mut() {
+                        Some(x) => x,
+                        None => return ws_pump_close(c, 1002),
+                    };
+                    decompress_message(
+                        inflater,
+                        &compressed,
+                        c.ws_client_no_context_takeover,
+                    )
+                };
+                let expanded = match expanded {
+                    Ok(x) => x,
+                    Err(DecompressError::Data) => return ws_pump_close(c, 1002),
+                    Err(DecompressError::TooLarge) => return ws_pump_close(c, 1009),
+                };
+                if expanded.len() + 1 > c.ws_reasm.len() {
+                    if expanded.len() >= MAX_BODY {
+                        return ws_pump_close(c, 1009);
+                    }
+                    c.ws_reasm.resize(expanded.len() + 1, 0);
+                }
+                c.ws_reasm[..expanded.len()].copy_from_slice(&expanded);
+                c.ws_reasm[expanded.len()] = 0;
+                mlen = expanded.len();
+                c.ws_par.msg_rsv = 0;
+            }
             if opcode == 1
                 && crate::ws::ws_validate_utf8(c.ws_reasm.as_ptr(), mlen) == 0
             {

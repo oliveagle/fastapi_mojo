@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use super::time_util::now_ms;
+use crate::ws::deflate::{WsCompressor, WsInflater};
 use crate::ws::parser::WsParser;
 
 pub mod deadlines;
@@ -75,6 +76,15 @@ pub struct Conn {
     pub ws_mlen: usize,     // 待处理数据帧长度
     pub ws_strikes: i32,    // 保活 strike 计数
     pub ws_close_at: i64,   // close-wait 起点 ms (0 = 非 close-wait; ADR-0026)
+    /// RFC 7692 已协商 (仅本连接有效; 未 offer 的客户端完全走原路径)。
+    pub ws_deflate: bool,
+    /// 客户端发送方向每条消息使用空 LZ77 window。
+    pub ws_client_no_context_takeover: bool,
+    /// 服务端发送方向每条消息使用空 LZ77 window。
+    pub ws_server_no_context_takeover: bool,
+    pub ws_comp: Option<Box<WsCompressor>>,
+    pub ws_decomp: Option<Box<WsInflater>>,
+    pub ws_decomp_buf: Vec<u8>,
 }
 
 impl Conn {
@@ -102,6 +112,12 @@ impl Conn {
             ws_mlen: 0,
             ws_strikes: 0,
             ws_close_at: 0,
+            ws_deflate: false,
+            ws_client_no_context_takeover: false,
+            ws_server_no_context_takeover: false,
+            ws_comp: None,
+            ws_decomp: None,
+            ws_decomp_buf: Vec::new(),
         }
     }
 
@@ -127,6 +143,12 @@ impl Conn {
         self.ws_mlen = 0;
         self.ws_strikes = 0;
         self.ws_close_at = 0;
+        self.ws_deflate = false;
+        self.ws_client_no_context_takeover = false;
+        self.ws_server_no_context_takeover = false;
+        self.ws_comp = None;
+        self.ws_decomp = None;
+        self.ws_decomp_buf = Vec::new();
         self.par_reset();
     }
 

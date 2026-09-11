@@ -21,11 +21,15 @@
 
 mod bench;
 mod csv;
+mod deflate;
 mod e2e;
 mod json;
 mod net;
 mod ws;
 mod testclient;
+
+#[cfg(test)]
+mod deflate_tests;
 
 use std::process::ExitCode;
 
@@ -45,6 +49,9 @@ USAGE:
   fmtool ws3      <port>
   fmtool ws4      <port>
   fmtool ws5      <port>
+  fmtool wsdeflate <port>          RFC 7692 markers WSD1..WSD4
+  fmtool wsdeflate-off <port>       decline offered extension (WSD5)
+  fmtool wsdeflate-required <port>  reject missing required offer (WSD6)
   fmtool slowloris <port> <tmp>
   fmtool wsbench  <port> <path> <n> <c>
   fmtool testclient http <METHOD> <URL> [--json J] [--data D] [--header N:V]* [--param k=v]*
@@ -81,6 +88,9 @@ fn main() -> ExitCode {
         "ws3" => run_e2e_port("ws3", &rest, e2e::ws3),
         "ws4" => run_e2e_port("ws4", &rest, e2e::ws4),
         "ws5" => run_e2e_port("ws5", &rest, e2e::ws5),
+        "wsdeflate" => run_e2e_port("wsdeflate", &rest, e2e::wsdeflate),
+        "wsdeflate-off" => run_e2e_port("wsdeflate-off", &rest, e2e::wsdeflate_off),
+        "wsdeflate-required" => run_e2e_port("wsdeflate-required", &rest, e2e::wsdeflate_required),
         "slowloris" => run_slowloris(&rest),
         "wsbench" => run_wsbench(&rest),
         "testclient" => testclient::dispatch(&rest),

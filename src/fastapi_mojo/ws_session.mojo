@@ -56,7 +56,8 @@ def ws_check_token(handler: Handler, query: String) raises -> Bool:
 def run_ws_upgrade(cfd: Int, handler: Handler) raises -> Int:
     """101 升级 + 连接移交。返回:
     101 = 移交成功 (连接已是 WS 会话, 调用方**不得** conn_done);
-    400 = 必需子协议未提供 (已响应); 403 = 鉴权失败 (已响应, ADR-0009);
+    400 = 必需子协议未提供 / permessage-deflate required 未提供 (已响应);
+    403 = 鉴权失败 (已响应, ADR-0009);
     500 = 握手失败 (已无会话)。
     非 101 时调用方负责 conn_done(cfd, False)."""
     var required = ""
@@ -78,7 +79,13 @@ def run_ws_upgrade(cfd: Int, handler: Handler) raises -> Int:
         _ = external_call["send_simple_response", Int](
             cfd, "403 Forbidden".as_c_string_slice(), body.as_c_string_slice())
         return 403
-    if external_call["ws_session_begin", Int](sel[1].as_c_string_slice()) != 0:
+    var ws_rc = external_call["ws_session_begin", Int](sel[1].as_c_string_slice())
+    if ws_rc == 2:
+        var deflate_body = "{\"error\": \"permessage-deflate required but not offered\", \"status\": \"400\"}"
+        _ = external_call["send_simple_response", Int](
+            cfd, "400 Bad Request".as_c_string_slice(), deflate_body.as_c_string_slice())
+        return 400
+    if ws_rc != 0:
         return 500  # 客户端在握手期间已走: 无会话可移交
     external_call["ws_conn_upgrade", NoneType](cfd)  # 移交: phase 3, 保存 path
     return 101

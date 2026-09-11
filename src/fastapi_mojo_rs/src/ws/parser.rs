@@ -1,9 +1,10 @@
 //! parser.rs — WebSocket 状态化帧解析器 (ADR-0008/0009)
 //!
 //! God-file 阈值拆分边界 (ADR-0010 §6 约束 3): 从 ws.rs 拆出帧状态机。
-//! WsParser 结构体布局逐字段镜像 C ws_parser_t (x86_64 SysV, 72B)。
+//! WsParser 是 Rust 内部状态 (DC1 后不再存在 C twin), RFC 7692 压缩消息
+//! 重定向到 pump 提供的 decomp 缓冲; FFI 参数表面保持 8 个不变。
 //! feed 语义: 0=暂无消息; 1=数据消息完成; 2=控制帧完成; -1=协议错误
-//! (consumed 指向出错字节); -2=reasm 容量不足 (未越界, 扩容重放)。
+//! (consumed 指向出错字节); -2=reasm/decomp 容量不足 (未越界, 扩容重放)。
 
 use std::os::raw::{c_int, c_uchar};
 use super::WS_MAX_MSG;
@@ -26,17 +27,19 @@ pub struct WsParser {
     pub in_msg: c_int,
     pub msg_opcode: c_int,
     pub reasm_len: usize,
+    /// 当前帧第一字节原样保留的 RSV bits (0x40/0x20/0x10)。
+    pub rsv: c_uchar,
+    /// 本数据消息是否压缩 (首帧 RSV1; 延续帧保持)。
+    pub msg_rsv: c_uchar,
+    /// 已收集的 RFC 7692 压缩字节数。
+    pub decomp_len: usize,
+    /// pump 拥有的压缩输入缓冲; 每次 feed 前刷新, 不改变 FFI 参数表。
+    pub decomp_addr: usize,
+    pub decomp_cap: usize,
+    /// 1 = 本连接协商了 permessage-deflate, RSV1 允许出现在首数据帧。
+    pub deflate_enabled: c_int,
 }
 
-const _: () = {
-    // 编译期布局断言: 与 C 镜像一致 (字段顺序 + 类型大小)
-    // stage (4) + fin (4) + opcode (4) + masked (4) + ext[8] (8) +
-    // ext_need (4) + ext_got (4) + flen (8) + mask[4] (4) + mask_got (4) +
-    // pgot (8) + in_msg (4) + msg_opcode (4) + reasm_len (8)
-    // 期望 (x86_64 SysV, 无 padding 因为 u64 字段前已对齐): 72 bytes
-    assert!(std::mem::size_of::<WsParser>() == 72,
-        "WsParser layout mismatch with C mirror (size differs)");
-};
 
 
 // ========== parser init ==========
@@ -69,6 +72,7 @@ fn ws_parser_frame_done(
     opcode_out: &mut c_int,
     melen_out: &mut usize,
     reasm: &mut [u8],
+    decomp: &mut [u8],
 ) -> c_int {
     if p.opcode >= 8 {
         // 控制帧: 必须 FIN=1 且 ≤125B
@@ -94,16 +98,32 @@ fn ws_parser_frame_done(
         }
         p.msg_opcode = p.opcode;
         p.reasm_len = 0;
+        p.decomp_len = 0;
     }
-    p.reasm_len += p.flen as usize;
+    let compressed = p.msg_rsv != 0;
+    let total = if compressed {
+        p.decomp_len + p.flen as usize
+    } else {
+        p.reasm_len + p.flen as usize
+    };
+    if compressed {
+        p.decomp_len = total;
+    } else {
+        p.reasm_len = total;
+    }
     if p.fin != 0 {
-        if p.reasm_len < reasm.len() {
-            reasm[p.reasm_len] = 0;
+        if compressed {
+            if total < decomp.len() {
+                decomp[total] = 0;
+            }
+        } else if total < reasm.len() {
+            reasm[total] = 0;
         }
         *opcode_out = p.msg_opcode;
-        *melen_out = p.reasm_len;
+        *melen_out = total;
         p.in_msg = 0;
         p.reasm_len = 0;
+        p.decomp_len = 0;
         return 1;
     }
     p.in_msg = 1;
@@ -133,6 +153,11 @@ pub extern "C" fn ws_parser_feed(
         let p = &mut *p;
         let buf = std::slice::from_raw_parts(buf, n);
         let reasm_slice = std::slice::from_raw_parts_mut(reasm, reasm_cap);
+        let decomp_slice = if p.decomp_cap == 0 || p.decomp_addr == 0 {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(p.decomp_addr as *mut c_uchar, p.decomp_cap)
+        };
         let mut off: usize = 0;
 
         while off < n {
@@ -145,19 +170,29 @@ pub extern "C" fn ws_parser_feed(
                 } else {
                     need as usize
                 };
-                // dst: 控制帧内偏移 = pgot; 数据帧再加消息级偏移 reasm_len
-                let dst: usize = if p.opcode >= 8 {
-                    p.pgot as usize
+                // 控制帧与未压缩数据写 reasm; RFC 7692 压缩数据写 decomp。
+                let compressed = p.opcode < 8 && p.msg_rsv != 0;
+                let (out, out_cap, dst): (&mut [u8], usize, usize) = if p.opcode >= 8 {
+                    (reasm_slice, reasm_cap, p.pgot as usize)
+                } else if compressed {
+                    (
+                        decomp_slice,
+                        p.decomp_cap,
+                        p.decomp_len + p.pgot as usize,
+                    )
                 } else {
-                    p.reasm_len + p.pgot as usize
+                    (
+                        reasm_slice,
+                        reasm_cap,
+                        p.reasm_len + p.pgot as usize,
+                    )
                 };
-                if dst + take > reasm_cap {
+                if dst + take > out_cap {
                     *consumed_out = off;
                     return -2;
                 }
                 for i in 0..take {
-                    reasm_slice[dst + i] =
-                        buf[off + i] ^ p.mask[(p.pgot as usize + i) % 4];
+                    out[dst + i] = buf[off + i] ^ p.mask[(p.pgot as usize + i) % 4];
                 }
                 off += take;
                 p.pgot += take as u64;
@@ -167,7 +202,7 @@ pub extern "C" fn ws_parser_feed(
                 p.stage = 0;
                 let mut op: c_int = 0;
                 let mut ml: usize = 0;
-                let r = ws_parser_frame_done(p, &mut op, &mut ml, reasm_slice);
+                let r = ws_parser_frame_done(p, &mut op, &mut ml, reasm_slice, decomp_slice);
                 if r != 0 {
                     *opcode_out = op;
                     *melen_out = ml;
@@ -183,6 +218,7 @@ pub extern "C" fn ws_parser_feed(
             match p.stage {
                 0 => {
                     p.fin = if b & 0x80 != 0 { 1 } else { 0 };
+                    p.rsv = b & 0x70;
                     p.opcode = (b & 0x0F) as c_int;
                     if p.opcode >= 3 && p.opcode <= 7 {
                         *consumed_out = off;
@@ -191,6 +227,26 @@ pub extern "C" fn ws_parser_feed(
                     if p.opcode == 0 && p.in_msg == 0 {
                         *consumed_out = off;
                         return -1;
+                    }
+                    // 本 bridge 只协商 permessage-deflate: RSV2/RSV3 永远非法;
+                    // RSV1 只能出现在压缩数据消息首帧, 控制帧/延续帧禁止。
+                    if p.rsv & 0x30 != 0 {
+                        *consumed_out = off;
+                        return -1;
+                    }
+                    let rsv1 = p.rsv & 0x40 != 0;
+                    if rsv1
+                        && (p.deflate_enabled == 0
+                            || p.opcode >= 8
+                            || p.opcode == 0
+                            || p.in_msg != 0)
+                    {
+                        *consumed_out = off;
+                        return -1;
+                    }
+                    if p.opcode == 1 || p.opcode == 2 {
+                        p.msg_rsv = if rsv1 { 1 } else { 0 };
+                        p.decomp_len = 0;
                     }
                     p.stage = 1;
                 }
@@ -225,9 +281,17 @@ pub extern "C" fn ws_parser_feed(
                             return -1;
                         }
                         // 重组越界预检 (数据帧; 控制帧在 frame_done 再查 ≤125)
-                        if p.opcode == 0
-                            && p.reasm_len + (p.flen as usize) > WS_MAX_MSG
-                        {
+                        if p.opcode == 0 {
+                            let old = if p.msg_rsv != 0 {
+                                p.decomp_len
+                            } else {
+                                p.reasm_len
+                            };
+                            if old + (p.flen as usize) > WS_MAX_MSG {
+                                *consumed_out = off;
+                                return -1;
+                            }
+                        } else if p.opcode < 8 && p.flen > WS_MAX_MSG as u64 {
                             *consumed_out = off;
                             return -1;
                         }

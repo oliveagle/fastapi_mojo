@@ -1,0 +1,98 @@
+use crate::deflate::{compress_stored_message, InflateError, Inflater, MAX_MESSAGE};
+
+const FIXED_DATA: &[u8] = b"Hello, raw DEFLATE world! Hello, raw DEFLATE world! Hello, raw DEFLATE world!";
+const FIXED_DEFLATE: &[u8] = &[
+    0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0xd7, 0x51, 0x28, 0x4a, 0x2c, 0x57, 0x70, 0x71, 0x75, 0xf3,
+    0x71, 0x0c, 0x71, 0x55, 0x28, 0xcf, 0x2f, 0xca, 0x49, 0x51, 0x54, 0xf0, 0x20, 0x5d, 0x06,
+    0x00,
+];
+const DYNAMIC_DATA: &[u8] = b"The quick brown fox jumps over the lazy dog while varying punctuation and byte frequencies appear throughout this raw DEFLATE vector.";
+const DYNAMIC_DEFLATE: &[u8] = &[
+    0x14, 0xcc, 0x41, 0x0e, 0xc2, 0x20, 0x10, 0x46, 0xe1, 0xab, 0xfc, 0x27,
+    0xf0, 0x0e, 0x26, 0xd6, 0x95, 0xcb, 0x5e, 0x60, 0x4a, 0xa7, 0x80, 0x56,
+    0x86, 0x0e, 0x0c, 0x88, 0xa7, 0xb7, 0xee, 0x5e, 0xf2, 0x25, 0x6f, 0x0e,
+    0x8c, 0xc3, 0xa2, 0x7b, 0x61, 0x51, 0xe9, 0x09, 0x9b, 0x7c, 0xf0, 0xb4,
+    0x77, 0x2e, 0x90, 0xc6, 0x8a, 0x7a, 0xf2, 0x4e, 0xdf, 0x81, 0x55, 0x3c,
+    0x7a, 0x88, 0x3b, 0xa3, 0x91, 0x8e, 0x98, 0x3c, 0xb2, 0x25, 0x57, 0x8d,
+    0x6a, 0x94, 0x04, 0x4a, 0x2b, 0x96, 0x51, 0x19, 0x9b, 0xf2, 0x61, 0x9c,
+    0x5c, 0xe4, 0x02, 0xca, 0x99, 0xe9, 0xbf, 0x50, 0x31, 0x1f, 0xc4, 0xea,
+    0x99, 0xb1, 0x40, 0xa9, 0xe3, 0x36, 0xdd, 0x1f, 0xd7, 0x79, 0x42, 0x63,
+    0x57, 0x45, 0x2f, 0x3f, 0x00,
+];
+
+const TAKEOVER_FIRST_DEFLATE: &[u8] = &[
+    0x4a, 0x4c, 0x4a, 0x4e, 0x49, 0x4d, 0x4b, 0xcf, 0xc8, 0xcc, 0x4a, 0x1c, 0x65, 0x8d, 0xb2,
+    0x46, 0x59, 0xa3, 0xac, 0x51, 0xd6, 0x28, 0x8b, 0x68, 0x16, 0x00,
+];
+const TAKEOVER_SECOND_DEFLATE: &[u8] = &[0x82, 0xb1, 0x00, 0x00];
+
+#[test]
+fn stored_vector_roundtrip() {
+    let expected = b"test".as_slice();
+    let mut z = Inflater::new();
+    let compressed = [
+        0x01, 0x04, 0x00, 0xfb, 0xff, b't', b'e', b's', b't', 0x00, 0x00, 0xff, 0xff, 0x00,
+        0x00, 0xff, 0xff,
+    ];
+    assert_eq!(z.decompress_message(&compressed).unwrap(), expected);
+    assert_eq!(
+        z.decompress_message(&compressed).unwrap(),
+        expected.to_vec()
+    );
+}
+
+#[test]
+fn fixed_and_dynamic_huffman_vectors_roundtrip() {
+    let mut fixed = Inflater::new();
+    assert_eq!(fixed.decompress_message(FIXED_DEFLATE).unwrap(), FIXED_DATA);
+    let mut dynamic = Inflater::new();
+    assert_eq!(
+        dynamic.decompress_message(DYNAMIC_DEFLATE).unwrap(),
+        DYNAMIC_DATA
+    );
+}
+
+#[test]
+fn stored_message_encoder_is_self_contained_and_sync_flushed() {
+    let messages: [&[u8]; 3] = [b"", b"hello deflate", &[7u8; 70_000]];
+    for msg in messages {
+        let wire = compress_stored_message(msg);
+        assert_eq!(wire, strip_tail(&with_tail(&wire)));
+        let mut z = Inflater::new();
+        assert_eq!(z.decompress_message(&wire).unwrap(), msg);
+    }
+}
+
+#[test]
+fn persistent_window_decodes_context_takeover() {
+    let first: Vec<u8> = b"abcdefghij".iter().cycle().take(1600).cloned().collect();
+    let second = b"abcdefgh".as_slice();
+    let mut z = Inflater::new();
+    assert_eq!(z.decompress_message(TAKEOVER_FIRST_DEFLATE).unwrap(), first);
+    assert_eq!(z.decompress_message(TAKEOVER_SECOND_DEFLATE).unwrap(), second);
+    let mut fresh = Inflater::new();
+    assert_ne!(
+        fresh.decompress_message(TAKEOVER_SECOND_DEFLATE).unwrap_or_default(),
+        second
+    );
+}
+
+#[test]
+fn invalid_and_oversize_data_rejected() {
+    let mut z = Inflater::new();
+    assert_eq!(z.decompress_message(&[0x07]), Err(InflateError::Data));
+    assert_eq!(
+        z.decompress_message(&vec![0x00; MAX_MESSAGE + 1]),
+        Err(InflateError::TooLarge)
+    );
+}
+
+fn with_tail(data: &[u8]) -> Vec<u8> {
+    let mut out = data.to_vec();
+    out.extend_from_slice(&[0, 0, 0xff, 0xff]);
+    out
+}
+
+fn strip_tail(data: &[u8]) -> Vec<u8> {
+    data[..data.len() - 4].to_vec()
+}

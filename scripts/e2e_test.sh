@@ -1862,6 +1862,80 @@ else fail "WS W9 [ws-exc] log" "no [ws-exc] ws_exc_boom line"; fi
 if [[ "$(cat "$TMP/server.log")" == *"[ws-exc] ws_exc_close: 4002:ws-exc"* ]]; then
     pass "WS W10 _ws_exc_close logged [ws-exc] in server log"
 else fail "WS W10 [ws-exc] log" "no [ws-exc] ws_exc_close line"; fi
+# --- WebSocket permessage-deflate (ADR-0034, 决策-59) ----------------------------
+
+echo "== websocket permessage-deflate (RFC 7692) =="
+WSD_OUT=$("$FMTOOL" wsdeflate "$PORT" 2>&1)
+WSD_FAIL=$(echo "$WSD_OUT" | tail -1)
+for m in WSD1 WSD2 WSD3 WSD4; do
+    if echo "$WSD_OUT" | grep -q "$m"; then pass "WS $m permessage-deflate"
+    else fail "WS $m permessage-deflate" "$WSD_FAIL"; fi
+done
+
+WSD_PORT=$((PORT + 118))
+WSD_DIR="$TMP/ws-deflate"
+mkdir -p "$WSD_DIR"
+( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+    FASTAPI_MOJO_WS_DEFLATE=0 \
+    "$BIN" --port "$WSD_PORT" \
+    > "$WSD_DIR/off.log" 2>&1 ) &
+WSD_PID=$!
+sleep 5
+WSD_READY=0
+for _ in $(seq 1 30); do
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$WSD_PORT/health" 2>/dev/null)" == *healthy* ]]; then
+        WSD_READY=1; break
+    fi
+    sleep 0.3
+done
+if [[ "$WSD_READY" == 1 ]]; then
+    WSD5_OUT=$("$FMTOOL" wsdeflate-off "$WSD_PORT" 2>&1); WSD5_RC=$?
+    if [[ "$WSD5_RC" -eq 0 ]] && echo "$WSD5_OUT" | grep -q WSD5; then
+        pass "WS WSD5 off mode declines offered extension"
+    else
+        fail "WS WSD5 off mode declines offered extension" "rc=$WSD5_RC out=$WSD5_OUT"
+    fi
+else
+    fail "WS WSD5 off mode declines offered extension" "sub-server not ready: $(cat "$WSD_DIR/off.log")"
+fi
+kill -TERM "$WSD_PID" 2>/dev/null || true
+for _ in $(seq 1 10); do
+    if ! kill -0 "$WSD_PID" 2>/dev/null; then break; fi
+    sleep 0.3
+done
+kill -9 "$WSD_PID" 2>/dev/null || true
+wait "$WSD_PID" 2>/dev/null || true
+
+( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+    FASTAPI_MOJO_WS_DEFLATE=required \
+    "$BIN" --port "$WSD_PORT" \
+    > "$WSD_DIR/required.log" 2>&1 ) &
+WSD_PID=$!
+sleep 5
+WSD_READY=0
+for _ in $(seq 1 30); do
+    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$WSD_PORT/health" 2>/dev/null)" == *healthy* ]]; then
+        WSD_READY=1; break
+    fi
+    sleep 0.3
+done
+if [[ "$WSD_READY" == 1 ]]; then
+    WSD6_OUT=$("$FMTOOL" wsdeflate-required "$WSD_PORT" 2>&1); WSD6_RC=$?
+    if [[ "$WSD6_RC" -eq 0 ]] && echo "$WSD6_OUT" | grep -q WSD6; then
+        pass "WS WSD6 required mode rejects absent offer (400)"
+    else
+        fail "WS WSD6 required mode rejects absent offer (400)" "rc=$WSD6_RC out=$WSD6_OUT"
+    fi
+else
+    fail "WS WSD6 required mode rejects absent offer (400)" "sub-server not ready: $(cat "$WSD_DIR/required.log")"
+fi
+kill -TERM "$WSD_PID" 2>/dev/null || true
+for _ in $(seq 1 10); do
+    if ! kill -0 "$WSD_PID" 2>/dev/null; then break; fi
+    sleep 0.3
+done
+kill -9 "$WSD_PID" 2>/dev/null || true
+wait "$WSD_PID" 2>/dev/null || true
 
 # --- OpenAPI refinement (ADR-0027, decision-52) ----------------------------------
 
