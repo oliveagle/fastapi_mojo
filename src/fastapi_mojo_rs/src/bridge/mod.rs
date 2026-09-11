@@ -48,6 +48,13 @@ pub mod response;
 pub mod shim;
 pub mod send;
 pub mod gzip;
+pub mod hpack;
+pub mod hpack_huffman;
+pub mod http2;
+pub mod http2_frames;
+pub mod http2_io;
+pub mod http2_request;
+pub mod http2_response;
 pub mod signals;
 pub mod socket;
 pub mod ws_session_ffi;
@@ -71,6 +78,10 @@ mod file_serve_tests;
 
 #[cfg(test)]
 mod gzip_tests;
+#[cfg(test)]
+mod hpack_tests;
+#[cfg(test)]
+mod http2_tests;
 
 #[cfg(test)]
 mod cors_tests;

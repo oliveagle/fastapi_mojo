@@ -41,8 +41,13 @@ use super::conn::{
 };
 use super::conn::deadlines::{decide, DeadlineAction};
 use super::conn::parse::finish_header;
+use super::http2::H2_PHASE;
+use super::http2_io::{pump_h2_conn, try_start_h2};
 use super::parse as bridge_parse;
-use super::request::{set_accepts_gzip, set_cors_request, set_http_fields, set_range_headers, set_ws_event_type};
+use super::request::{
+    set_accepts_gzip, set_cors_request, set_http2, set_http_fields, set_range_headers,
+    set_ws_event_type,
+};
 use super::send::{send_all, send_error_json};
 use super::signals::is_running;
 use super::socket::setup_conn_fd;
@@ -123,7 +128,7 @@ fn errno() -> c_int {
 ///   - `0`  : EOF (对端关闭)
 ///   - `-1` : EAGAIN/EWOULDBLOCK (spurious); 调用方应 return 0
 ///   - `-2` : 其它错误 (ECONNRESET 等); 调用方应 close
-fn sys_recv(fd: i32, buf: &mut [u8]) -> i32 {
+pub(crate) fn sys_recv(fd: i32, buf: &mut [u8]) -> i32 {
     let n = unsafe {
         recv(fd, buf.as_mut_ptr() as *mut c_void, buf.len(), MSG_DONTWAIT)
     };
@@ -378,12 +383,21 @@ pub fn pump_conn(c: &mut Conn, max_body_size: i32) -> i32 {
     if c.phase == 2 || c.phase == 4 {
         return 0;
     }
+    // HTTP/2 prior knowledge: one request is dispatched at a time.
+    if c.phase == H2_PHASE {
+        return pump_h2_conn(c, max_body_size);
+    }
     // phase 3: WS 会话; phase 5: WS close-wait (ADR-0026, 内部转 pump_ws_closing)
     if c.phase == 3 || c.phase == 5 {
         return pump_ws_conn(c);
     }
     // phase 0: 累积 header
     if c.phase == 0 {
+        match try_start_h2(c) {
+            1 => return pump_h2_conn(c, max_body_size),
+            0 => return 0,
+            _ => {}
+        }
         // 已完整 (跨块累积完毕)? 直接进 finish_header.
         if bridge_parse::find_header_end(&c.hdr[..c.hdr_total]).is_some() {
             return finish_header_into(c, max_body_size);
@@ -764,7 +778,28 @@ pub fn check_deadlines() {
                 table.close(d.idx);
             }
             DeadlineAction::Timeout408 => {
-                send_error_json(d.fd, "408 Request Timeout", "Request timeout");
+                let h2_frames = {
+                    let mut table = conn_table().lock().expect("CONN_TABLE poisoned");
+                    match table.get_mut(d.idx) {
+                        Some(c) if c.h2.is_some() => c
+                            .h2
+                            .as_mut()
+                            .map(|h2| {
+                                h2.enqueue_goaway(0x0000_000b);
+                                h2.take_frames()
+                            })
+                            .unwrap_or_default(),
+                        Some(_) => Vec::new(),
+                        None => continue,
+                    }
+                };
+                if !h2_frames.is_empty() {
+                    for frame in h2_frames {
+                        let _ = send_all(d.fd, &frame);
+                    }
+                } else {
+                    send_error_json(d.fd, "408 Request Timeout", "Request timeout");
+                }
                 let mut table = conn_table().lock().expect("CONN_TABLE poisoned");
                 table.close(d.idx);
             }
@@ -793,6 +828,24 @@ pub fn conn_done(fd: i32, reuse: c_int) {
     };
     // WS 会话/close-wait: 跳过 (与 C 一致; phase 5 = ADR-0026)
     if c.phase == 3 || c.phase == 4 || c.phase == 5 {
+        return;
+    }
+    // HTTP/2 multiplexing retains the transport after one response. Mojo's
+    // reuse=false on edge paths must not tear down a still-valid h2 session.
+    if c.h2.is_some() && (c.phase == 2 || c.phase == H2_PHASE) {
+        if c.phase == 2 {
+            if let Some(h2) = c.h2.as_mut() {
+                h2.finish_current();
+            }
+            c.phase = H2_PHASE;
+        }
+        c.body.clear();
+        c.body_got = 0;
+        c.hdr_total = 0;
+        c.first_data_ms = 0;
+        c.last_data_ms = 0;
+        c.last_active_ms = now_ms() as i64;
+        set_http2(false);
         return;
     }
     c.body.clear();
@@ -844,6 +897,32 @@ pub fn recv_and_parse() -> i32 {
             }
             set_ws_event_type(ev_type);
             return ev_fd;
+        }
+
+        // Buffered H2 streams may already be ready after conn_done; do not wait
+        // for another socket event before dispatching the next one.
+        {
+            let max_body = get_max_body_size();
+            let mut table = conn_table().lock().expect("CONN_TABLE poisoned");
+            for i in 0..MAX_CONNS {
+                let (fd, result) = {
+                    let c = match table.get_mut(i) {
+                        Some(c) if c.in_use && c.phase == H2_PHASE => c,
+                        _ => continue,
+                    };
+                    (c.fd, pump_conn(c, max_body))
+                };
+                if result == 1 {
+                    table.set_active(Some(i));
+                    if let Some(c) = table.get_mut(i) {
+                        c.last_active_ms = now_ms() as i64;
+                    }
+                    set_ws_event_type(0);
+                    drop(table);
+                    super::metrics::metrics_inc_request();
+                    return fd;
+                }
+            }
         }
 
         // poll 设置: pf[0] = listen, pf[1..] = 所有 conn

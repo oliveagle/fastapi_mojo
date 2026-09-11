@@ -13,6 +13,8 @@
 #   - F5 Streaming/SSE (KIND_SSE 一次性推送 + format_sse_event 行切分合规)
 #   - F6 /metrics 端点 (Prometheus 文本, requests_total/active_conns/uptime)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
+#   - HTTP/2: prior-knowledge h2c H2-1..H2-7（HPACK/CONTINUATION/DATA/PING/HEAD/
+#     buffered multiplex, ADR-0038）
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
 #   - 停滞客户端不阻塞服务器 (探针 in <1s)
@@ -2569,6 +2571,17 @@ if [[ "$OTEL_DISABLED" == *'"spans":[]'* ]]; then
 else
     fail "OT-6 disabled by default" "body: ${OTEL_DISABLED:0:200}"
 fi
+
+# Decision-63: HTTP/2 prior-knowledge h2c subset on the main server.
+echo "== HTTP/2 prior knowledge (决策-63) =="
+H2_OUT=$("$FMTOOL" http2 "$PORT" 2>&1); H2_RC=$?
+for marker_name in H2-1 H2-2 H2-3 H2-4 H2-5 H2-6 H2-7; do
+    if [[ $H2_RC -eq 0 ]] && grep -q "$marker_name" <<<"$H2_OUT"; then
+        pass "$marker_name h2c end-to-end"
+    else
+        fail "$marker_name h2c end-to-end" "rc=$H2_RC out=$H2_OUT"
+    fi
+done
 
 # --- summary ---------------------------------------------------------------------
 

@@ -28,7 +28,11 @@
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
-use super::request::{current_accepts_gzip, current_origin, get_close_after_response, set_last_status};
+use super::request::{
+    current_accepts_gzip, current_cors_request, current_origin, get_close_after_response,
+    set_last_status,
+};
+use super::http2_response;
 use super::cors;
 use super::gzip;
 use super::middleware;
@@ -138,6 +142,11 @@ pub fn send_response(
         None => body,
     };
     let extra_out: Option<&str> = gzip_extra.as_deref().or(extra);
+    if http2_response::is_h2(fd) {
+        return http2_response::send_response(
+            fd, status, content_type, body_out, include_body, extra_out,
+        );
+    }
     // ⚠️ get_close_after_response() 返回 "close_after" 语义 (C: g_close_after_response);
     // build_response_headers 的 keep_alive 参数是其**取反**。
     // C 逻辑: `g_close_after_response ? "close" : "keep-alive"`。
@@ -229,6 +238,9 @@ pub fn send_streaming_response(
     media_type: &str,
     extra: &str,
 ) -> c_long {
+    if http2_response::is_h2(fd) {
+        return http2_response::send_streaming(fd, status, body, media_type, extra) as c_long;
+    }
     let conn = if get_close_after_response() { "close" } else { "keep-alive" };
     let mut h = String::with_capacity(256 + status.len() + media_type.len() + extra.len());
     h.push_str(&format!("HTTP/1.1 {status}\r\n"));
@@ -295,6 +307,19 @@ pub fn send_head_response(fd: c_int, status: &str, body: &[u8]) -> c_long {
 /// OPTIONS 预检 (端口 C `send_preflight_response` §1517-1526, 字节串在
 /// response.rs::build_preflight_response)。
 pub fn send_preflight_response(fd: c_int) -> c_long {
+    if http2_response::is_h2(fd) {
+        let (acrm, achr) = current_cors_request();
+        let (status, lines, err) = cors::preflight_build(
+            current_origin().as_deref(), acrm.as_deref(), achr.as_deref(),
+        );
+        let body = err.map(|message| {
+            let escaped = String::from_utf8_lossy(&json_escape(message.as_bytes())).into_owned();
+            format!("{{\"error\":\"{escaped}\",\"status\":\"{status}\"}}").into_bytes()
+        });
+        return http2_response::send_preflight(
+            fd, status, &lines.join("\r\n"), body.as_deref().unwrap_or_default(),
+        ) as c_long;
+    }
     let resp = build_preflight_response();
     send_all(fd, &resp) as c_long
 }

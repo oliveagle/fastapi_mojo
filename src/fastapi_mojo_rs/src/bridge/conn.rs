@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use super::time_util::now_ms;
+use super::http2::H2Connection;
 use crate::ws::deflate::{WsCompressor, WsInflater};
 use crate::ws::parser::WsParser;
 
@@ -85,6 +86,8 @@ pub struct Conn {
     pub ws_comp: Option<Box<WsCompressor>>,
     pub ws_decomp: Option<Box<WsInflater>>,
     pub ws_decomp_buf: Vec<u8>,
+    /// HTTP/2 prior-knowledge transport state (None = HTTP/1.x connection).
+    pub h2: Option<H2Connection>,
 }
 
 impl Conn {
@@ -118,6 +121,7 @@ impl Conn {
             ws_comp: None,
             ws_decomp: None,
             ws_decomp_buf: Vec::new(),
+            h2: None,
         }
     }
 
@@ -149,6 +153,7 @@ impl Conn {
         self.ws_comp = None;
         self.ws_decomp = None;
         self.ws_decomp_buf = Vec::new();
+        self.h2 = None;
         self.par_reset();
     }
 
@@ -305,6 +310,22 @@ pub fn extract_request_header(name: &[u8]) -> i32 {
         Some(c) => c,
         None => return -1,
     };
+    if let Some(request) = conn
+        .h2
+        .as_ref()
+        .and_then(|h2| h2.current_request())
+    {
+        return match request.header_value(name) {
+            Some(value) => {
+                set_header_value(name, value);
+                0
+            }
+            None => {
+                set_header_value(name, b"");
+                -2
+            }
+        };
+    }
     if conn.hdr_total == 0 {
         set_header_value(name, b"");
         return -2;

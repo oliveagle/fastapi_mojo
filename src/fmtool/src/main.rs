@@ -23,6 +23,7 @@ mod bench;
 mod csv;
 mod deflate;
 mod e2e;
+mod http2;
 mod json;
 mod net;
 mod ws;
@@ -44,6 +45,7 @@ USAGE:
   fmtool cont100  <port>
   fmtool keepalive <port>
   fmtool headbody  <port>
+  fmtool http2   <port>          prior-knowledge h2c checks H2-1..H2-7
   fmtool ws1      <port>
   fmtool ws2      <port>
   fmtool ws3      <port>
@@ -84,6 +86,7 @@ fn main() -> ExitCode {
         "cont100" => run_e2e_port("cont100", &rest, e2e::cont100),
         "keepalive" => run_e2e_port("keepalive", &rest, e2e::keepalive),
         "headbody" => run_e2e_port("headbody", &rest, e2e::headbody),
+        "http2" => run_e2e_port("http2", &rest, http2::e2e),
         "ws1" => run_e2e_port("ws1", &rest, e2e::ws1),
         "ws2" => run_e2e_port("ws2", &rest, e2e::ws2),
         "ws3" => run_e2e_port("ws3", &rest, e2e::ws3),

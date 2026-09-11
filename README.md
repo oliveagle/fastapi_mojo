@@ -8,6 +8,7 @@
 **当前阶段：Phase 4 — 去 C 化（Rust bridge，决策-19/20/21）+ Track B 工具链去 Python（决策-22）全部完成；终态 Mojo + Rust only（零 Python + 零 C）**
 
 - ✅ Mojo 原生 HTTP 服务器（**Rust staticlib FFI socket 桥接** + Mojo 路由/参数/JSON，决策-19）
+- ✅ HTTP/2 prior-knowledge h2c 有界子集（HPACK + frame + buffered multiplex，无新增 FFI/依赖，ADR-0038）
 - ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
@@ -151,7 +152,7 @@ journalctl -u fastapi_mojo -f
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，79 项检查含 WebSocket 增强/并发/精化，CI 可重复；
+# 集成测试（单一 binary 端到端，511 项检查含 HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；
 # 工具链 fmtool = Rust, 零 Python，见 .github/workflows/ci.yml）
 ./scripts/e2e_test.sh
 ```

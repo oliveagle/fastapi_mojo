@@ -32,6 +32,8 @@ pub struct CurrentRequest {
     pub query: [u8; MAX_QUERY],
     pub query_len: usize,
     pub protocol_11: bool,
+    /// Decision-63: request was decoded from HTTP/2 prior-knowledge framing.
+    pub http2: bool,
     pub close_after_response: bool,
     /// 当前活跃 conn 的 fd (recv_and_parse 返回时设置).
     pub active_fd: i32,
@@ -83,6 +85,7 @@ impl CurrentRequest {
             query: [0u8; MAX_QUERY],
             query_len: 0,
             protocol_11: false,
+            http2: false,
             close_after_response: true,
             active_fd: -1,
             active_phase: 0,
@@ -151,6 +154,7 @@ pub fn set_http_fields(method: &[u8], path: &[u8], query: &[u8], protocol_11: bo
     g.query[qlen] = 0;    // NUL 终止: 同 path
     g.query_len = qlen;
     g.protocol_11 = protocol_11;
+    g.http2 = false;
     g.close_after_response = close_after;
     // 决策-55: 每请求复位 (req_id 由 Mojo 侧随后 set_req_id; 合成头表清空)
     g.req_id = [0u8; 64];
@@ -159,6 +163,17 @@ pub fn set_http_fields(method: &[u8], path: &[u8], query: &[u8], protocol_11: bo
     g.active_fd = fd;
     g.active_phase = 2;  // HTTP dispatch
     g.ws_event_type = 0;
+}
+
+/// Decision-63: mark the active request as HTTP/2 (or restore HTTP/1 semantics).
+pub fn set_http2(value: bool) {
+    lock_current().http2 = value;
+}
+
+/// Response framing needs the active request protocol without re-entering the
+/// conn_table lock (parser errors send while recv_and_parse holds that lock).
+pub fn is_http2() -> bool {
+    lock_current().http2
 }
 
 /// 在 ws_conn_upgrade 时调用, 把 WS key/path 写入全局.
@@ -196,6 +211,7 @@ pub fn reset_request_fields() {
     g.path_len = 0;
     g.query_len = 0;
     g.protocol_11 = false;
+    g.http2 = false;
     g.close_after_response = true;
     g.active_fd = -1;
     g.active_phase = 0;
