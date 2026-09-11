@@ -1430,8 +1430,12 @@
   干净启动 / binary **4,081,808 B**（≤4.2M, +4 KB vs 决策-55）/ bench 6 场景
   0 errors（get_root_10k_100c = 34,867 req/s, 32.9k–43.9k 带内）/
   `find src -name '*.c'` = 0 / `pgrep -x fastapi_mojo` = 0。
+- **已决策-57**：**body pat=REGEX 约束 + PATCH+body 解析**（ADR-0032, Goal-0003 矩阵 #1/#4/#20 缺口闭环; ADR-0014 两偏差闭环）：body 约束词表 + pat=REGEX（复用 bridge/regex.rs FFI `regex_match`, FFI diff=0, str 标量 only + 注册期 fail-fast, 422 type=string_pattern_mismatch, OpenAPI pattern）+ **PATCH+body 解析**（dispatch body POST/PUT→+PATCH 1 行）；e2e 447→454（BP-1a..e + PATCH-B1a/b）/ cargo 453/0/4 不变 / clippy 0 / ldd 仅 libc / binary 4,085,904 B ≤4.2M / env -i 无孤儿；剩余 = validator closure（Mojo 无闭包=硬边界）+ 元素级（P2）+ OpenAPI 3.0.3 vs 3.1.0（P2）
 
-*最后更新：2026-09-11（**决策-56 TestClient 声明式等价**（ADR-0031, Goal-0003 矩阵 #25 ✅ = **25/25 全量完成**）：
+*最后更新：2026-09-11（**决策-57 body pat=REGEX 约束 + PATCH+body 解析**（ADR-0032, Goal-0003 矩阵 #1/#4/#20 缺口闭环）：
+body 约束词表新增 pat=REGEX（复用 bridge/regex.rs FFI `regex_match`, FFI diff = 0; str 标量 only, 注册期 fail-fast, 422 type=string_pattern_mismatch, OpenAPI 3.0 `pattern`）；dispatch body 解析 POST/PUT→+PATCH 1 行（ADR-0014 两偏差闭环）→ e2e **447→454/454**（BP-1a..e + PATCH-B1a/b）/ cargo **453/0/4** 不变 / fmtool **30/0** 不变 / clippy **0**（双 crate）/ ldd 仅 libc / env -i 干净启动 / binary **4,085,904 B**（≤4.2M, +4 KB）/ bench 6 场景 0 errors（get_root hot-path 未动, 带内）/ 孤儿 0
+剩余缺口：validator-closures（Mojo 1.0.0 无闭包 = 硬边界, ADR-0014 已文档化偏差）；数组元素级约束（P2）；OpenAPI 3.0.3 vs upstream 3.1.0（P2）
+2026-09-11（**决策-56 TestClient 声明式等价**（ADR-0031, Goal-0003 矩阵 #25 ✅ = **25/25 全量完成**）：
 fmtool `testclient` 三子命令（**dev 工具不进 runtime, FFI diff = 0**, binary 仅加 /tc/jar demo 路由）：
 `http`（真实网络 GET/POST + JSON/form + header/param/cookie + cookie-jar 文件 + 重定向
 （303/301-302 POST→GET, 307/308 保持）+ --json-out + 退出码 0-6）/

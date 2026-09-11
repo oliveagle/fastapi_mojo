@@ -5,7 +5,7 @@
 #   - 声明式: Handler.data["_body_schema"] = "name:str;price:float|gt=0;quantity:int=10;..."
 #   - 字段 spec: name:<BASE>[=default][|c1,c2,...]
 #       BASE: str/int/float/bool/obj/arr | T[](数组) | T[v1,v2](enum) | obj{subspec}(嵌套)
-#       约束: gt/ge/lt/le=N (数值) / len=N(-M) (字符串) / items=N(-M) (数组)
+#       约束: gt/ge/lt/le=N (数值) / len=N(-M) (字符串) / items=N(-M) (数组) / pat=REGEX (字符串, 决策-57)
 #   - 校验失败 -> FastAPI 422 detail 数组 (loc/msg/type, Pydantic v2 风格, 全错误收集)
 #   - 校验成功 -> 校验值表 (含默认值), dispatch 注入 body_<name> / <父>_<子>
 #
@@ -288,6 +288,9 @@ def _parse_field(raw: String) raises -> FieldSpec:
         elif key == "len" or key == "items":
             if not _parse_range(val)[0]:
                 raise Error("body_schema: bad range '" + val + "' for " + key)
+        elif key == "pat":
+            if val == "":
+                raise Error("body_schema: empty pattern for pat (field '" + fs.name + "')")
         else:
             raise Error("body_schema: unknown constraint '" + key + "' (field '" + fs.name + "')")
     fs.constraints = cons

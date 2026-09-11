@@ -2,6 +2,7 @@
 #
 # 决策-38 (续): body 校验运行期 — 类型检查/约束/错误构造/FastAPI 422 detail (Goal-0003 P1).
 # spec 解析在 body_schema.mojo; 本文件 = 校验层 + 自测 (拆分边界: 校验不反向 import spec 内部).
+# 决策-57: + pat=REGEX 约束 (bridge/regex.rs FFI regex_match, 复用 param_constraints 同款引擎).
 
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
                          fmt_num, err_obj, _in_enum_csv, _enum_or_msg, _split_top, _trim,
@@ -11,6 +12,14 @@ from router import Router
 from params_query import ParsedParams
 from params_json import parse_body_json
 from json import json_escape
+from std.ffi import external_call, CStringSlice
+
+def _body_rgx_match(pattern: String, s: String) -> Int:
+    """决策-57 FFI: regex_match(pattern, s) -> 1=match / 0=no / -1=编译失败 (bridge/regex.rs)."""
+    var p = pattern
+    var t = s
+    return external_call["regex_match", Int](p.as_c_string_slice(), t.as_c_string_slice())
+
 
 def _type_err(fs: FieldSpec) -> Tuple[String, String]:
     """类型错消息 (msg, type) — 按期望类型."""
@@ -125,7 +134,7 @@ def _json_input_frag(v: String) raises -> String:
 
 def _apply_constraints(fs: FieldSpec, raw: String, elem_count: Int, floc: String,
                        mut errs: List[String]) raises:
-    """应用 gt/ge/lt/le/len/items 约束 (elem_count = 数组元素数, 非数组 = -1)."""
+    """应用 gt/ge/lt/le/len/items/pat 约束 (elem_count = 数组元素数, 非数组 = -1; pat 仅 str 标量, 决策-57)."""
     var cons = fs.constraints
     if cons == "":
         return
@@ -166,6 +175,11 @@ def _apply_constraints(fs: FieldSpec, raw: String, elem_count: Int, floc: String
                     errs.append(err_obj(floc, "List should have at least " + String(pr2[1]) + " item(s)", "too_short", _json_input_frag(raw)))
                 if pr2[2] > 0 and elem_count > pr2[2]:
                     errs.append(err_obj(floc, "List should have at most " + String(pr2[2]) + " item(s)", "too_long", _json_input_frag(raw)))
+        elif key == "pat":
+            if fs.type_name == "str" and not fs.is_array and not fs.is_enum:
+                var ret = _body_rgx_match(val, raw)
+                if ret == 0:
+                    errs.append(err_obj(floc, "String should match pattern '" + val + "'", "string_pattern_mismatch", _json_input_frag(raw)))
 
 
 def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: String,
@@ -251,11 +265,27 @@ def validate_body_schema(handler: Handler, method: String,
 
 
 def check_body_schemas(router: Router) raises:
-    """注册期 _body_schema 语法检查 (决策-38): 畸形 spec 立即 fail, 不带入请求路径."""
+    """注册期 _body_schema 语法检查 (决策-38): 畸形 spec 立即 fail, 不带入请求路径.
+    决策-57: pat=REGEX 仅 str 标量字段 (非 str / 数组 / enum -> fail-fast)."""
     for i in range(router.route_count()):
         var h = router.routes[i].handler.copy()
         if "_body_schema" in h.data and h.data["_body_schema"] != "":
-            _ = parse_body_schema(h.data["_body_schema"])
+            _check_body_spec(h.data["_body_schema"])
+
+
+def _check_body_spec(spec: String) raises:
+    """递归校验 spec: parse + 决策-57 pat 约束仅 str 标量 (否则 raise)."""
+    var s = parse_body_schema(spec)
+    for i in range(field_count(s)):
+        var fs = get_field(s, i)
+        var has_pat = False
+        for c in _split_top(fs.constraints, 44):
+            if _trim(c).startswith("pat="):
+                has_pat = True
+        if has_pat and (fs.type_name != "str" or fs.is_array or fs.is_enum):
+            raise Error("body_schema: pat= 约束要求 str 标量字段 (field '" + fs.name + "')")
+        if fs.type_name == "obj" and fs.nested_spec != "":
+            _check_body_spec(fs.nested_spec)
 
 
 # ---------- 自测 ----------
@@ -334,4 +364,13 @@ def main() raises:
     var r11 = validate_body_schema(h, "POST", parse_body_json("{not json"), "")
     check(not r11[0] and _has(r11[1][0], "json_invalid"), "json_invalid")
     check(validate_body_schema(h, "GET", parse_body_json("x"), "")[0], "GET skip")
+    # 决策-57: pat 约束 — 注册期解析 + 类型 fail-fast (FFI-free; 正则匹配行为走 e2e 真服务器).
+    _ = _check_body_spec("code:str|pat=^[a-z0-9]+$")  # str 标量 + pat -> 注册通过
+    check(get_field(parse_body_schema("code:str|pat=^[a-z0-9]+$"), 0).constraints == "pat=^[a-z0-9]+$", "pat parsed into constraints")
+    var bad_pat = False
+    try:
+        _ = _check_body_spec("n:int|pat=^x$")
+    except:
+        bad_pat = True
+    check(bad_pat, "pat on int -> registration fail")
     print("Mojo body_schema (决策-38) test completed!")

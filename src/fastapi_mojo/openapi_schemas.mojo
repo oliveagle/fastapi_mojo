@@ -94,6 +94,10 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
                         sb.append(",\"minLength\":" + String(pr2[1]))
                     if pr2[2] > 0:
                         sb.append(",\"maxLength\":" + String(pr2[2]))
+        for c in _split_top(fs.constraints, 44):
+            var ct = _trim(c)
+            if ct.startswith("pat="):
+                sb.append(",\"pattern\":\"" + json_escape(String(ct[byte=4:ct.byte_length()])) + "\"")
     if fs.has_default():
         sb.append(",\"default\":" + _openapi_default_value(fs))
     sb.append("}")

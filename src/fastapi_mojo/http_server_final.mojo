@@ -591,6 +591,18 @@ def register_routes(mut router: Router) raises:
         "name:str;price:float|gt=0;quantity:int=10;mode:str[fast,slow]=fast;tags:str[]|items=0-5;meta:obj{city:str|len=2-6;zip:int=0}")
     router.add_route("/validate", "POST", val_h)
 
+    # 决策-57 (Goal-0003): body pat=REGEX 约束 (bridge/regex.rs) —
+    # 有效 -> 200 + body_code; 无效 -> 422 string_pattern_mismatch; OpenAPI 输出 pattern.
+    var pat_h = Handler(KIND_ECHO(), "body_pat")
+    pat_h.set_data("message", "body pattern demo")
+    pat_h.set_data("_body_schema", "code:str|pat=^[a-z0-9]+$")
+    router.add_route("/bs/pat", "POST", pat_h)
+    # 决策-57: PATCH + body 解析 (ADR-0014 既有偏差闭环: dispatch body 解析扩展 POST/PUT/PATCH).
+    var patch_h = Handler(KIND_ECHO(), "body_patch")
+    patch_h.set_data("message", "patch body demo")
+    patch_h.set_data("_body_schema", "note:str")
+    router.add_route("/bs/patch", "PATCH", patch_h)
+
     # Enum 参数 (T-P1e): query 参数声明 T[values] (+ 可选 =default).
     var enum_h = Handler(KIND_ECHO(), "enum_demo")
     enum_h.set_data("message", "enum demo")
@@ -1272,7 +1284,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
 
                 var query_params = parse_query_params(query)
                 var body_params = ParsedParams()
-                if (effective_method == "POST" or effective_method == "PUT") and body_str.byte_length() > 0:
+                if (effective_method == "POST" or effective_method == "PUT" or effective_method == "PATCH") and body_str.byte_length() > 0:
                     body_params = parse_body_json(body_str)
 
                 # --- Handler dispatch ---

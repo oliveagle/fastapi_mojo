@@ -1071,6 +1071,15 @@ expect_body_contains "BS-12a openapi components" '"components"' "$BASE/openapi.j
 expect_body_contains "BS-12b openapi requestBody ref" '"$ref":"#/components/schemas/validate_item"' "$BASE/openapi.json"
 expect_body_contains "BS-12c openapi enum array" '"enum":["low","medium","high"]' "$BASE/openapi.json"
 
+# 决策-57: body pat=REGEX 约束 (bridge/regex.rs) + PATCH+body 解析 (ADR-0014 偏差闭环)
+expect_code "BP-1a body pat valid -> 200" 200 "$BASE/bs/pat" POST '{"code":"abc123"}'
+expect_body_contains "BP-1b body pat echo code" '"body_code": "abc123"' "$BASE/bs/pat" POST '{"code":"abc123"}'
+expect_code "BP-1c body pat invalid (upper/sym) -> 422" 422 "$BASE/bs/pat" POST '{"code":"ABC!"}'
+expect_body_contains "BP-1d body pat 422 type" "string_pattern_mismatch" "$BASE/bs/pat" POST '{"code":"ABC!"}'
+expect_body_contains "BP-1e openapi body pattern" '"pattern":"^[a-z0-9]+$"' "$BASE/openapi.json"
+expect_code "PATCH-B1a PATCH + body -> 200" 200 "$BASE/bs/patch" PATCH '{"note":"hello"}'
+expect_body_contains "PATCH-B1b PATCH body echo note" '"body_note": "hello"' "$BASE/bs/patch" PATCH '{"note":"hello"}'
+
 # --- GZip 中间件 (决策-40, ADR-0015, Goal-0003 P2 矩阵 #24) -----------------------
 # FastAPI/Starlette GZipMiddleware 声明式 env 等价形态: FASTAPI_MOJO_GZIP=1 启用
 # (默认关 = FastAPI 默认) + MIN_SIZE (默认 500, 对齐 Starlette) + MAX_SIZE (1MiB).
