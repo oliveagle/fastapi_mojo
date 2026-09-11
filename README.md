@@ -10,6 +10,7 @@
 - ✅ Mojo 原生 HTTP 服务器（**Rust staticlib FFI socket 桥接** + Mojo 路由/参数/JSON，决策-19）
 - ✅ HTTP/2 prior-knowledge h2c 有界子集（HPACK + frame + buffered multiplex，无新增 FFI/依赖，ADR-0038）
 - ✅ 原生 TLS/HTTPS（opt-in rustls + 纯 Rust RustCrypto provider，TLS 1.3 / ALPN，FFI diff=0，ADR-0039）
+- ✅ 大响应 JSON 序列化 Rust 加速（opt-in，手写 std-only writer；escape 密集 1MiB 端到端 **+24.19%**，ADR-0041）
 - ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
@@ -47,8 +48,9 @@ Mojo 1.0.0 的运行时只以 3 个共享库分发（`libKGENCompilerRTShared.so
 │   ├── router.mojo                # 模式匹配路由（{param} segment）
 │   ├── params_query.mojo          # Path/Query 参数解析 + ParsedParams (values + types)
 │   ├── params_json.mojo           # Body JSON parser（UTF-8 安全 + 类型标记）
-│   ├── json.mojo                  # 线性时间 JSON 序列化
-│   ├── string_builder.mojo        # 线性字符串构建 + UTF-8 字节解码
+│   ├── json.mojo                  # 线性时间 JSON 序列化（默认路径）
+│   ├── json_rust.mojo             # opt-in Rust JSON response writer FFI wrapper（ADR-0041）
+│   ├── string_builder.mojo        # 线性字符串构建 + UTF-8 字节解码（ASCII fast path）
 │   ├── middleware.mojo            # 中间件定义
 │   ├── test_all.mojo              # 集成测试
 │   └── static/                    # 静态文件目录
@@ -86,6 +88,20 @@ FASTAPI_MOJO_WORKERS=8 ./build/fastapi_mojo --port 8000
 # 每个 worker 独立 Mojo 运行时；pkill -x fastapi_mojo 全杀。
 # 实测（32 核）：200 并发 125k rps（单进程 36k，3.5x），P99 18ms（单进程 50.8ms）
 ```
+
+大响应 JSON 序列化 Rust 加速（opt-in，决策-66 / ADR-0041）：
+
+```bash
+FASTAPI_MOJO_JSON_SERIALIZER=rust \
+FASTAPI_MOJO_JSON_RUST_MIN_BYTES=65536 \
+./build/fastapi_mojo
+```
+
+默认关闭并继续使用纯 Mojo `json.mojo`。`rust` 只加速 response JSON object
+序列化；request body 解析仍在 Mojo。阈值按 flat response dict 的输入字节数估
+算（默认 64 KiB），可避免小响应承担每字段 FFI 固定成本。在 1,000,014 B JSON
+request / 1,000,000 个待 escape 引号的保守端到端 benchmark 中，两组均值
+91.27 → 113.35 req/s（**+24.19%**），平均延迟 10.96 → 8.83 ms。
 
 静态文件目录默认为工作目录下的 `./static`，可用环境变量覆盖：
 
@@ -186,8 +202,8 @@ journalctl -u fastapi_mojo -f
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，521 项检查含 TLS/HTTPS、HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；
-# 工具链 fmtool = Rust, 零 Python，见 .github/workflows/ci.yml）
+# 集成测试（单一 binary 端到端，527 项检查含 Rust JSON serializer、TLS/HTTPS、HTTP/2 h2c、
+# WebSocket 与 FastAPI 语义面，CI 可重复；工具链 fmtool = Rust, 零 Python）
 ./scripts/e2e_test.sh
 ```
 
@@ -273,8 +289,8 @@ curl http://127.0.0.1:8000/test.json
 │  http_server_final.mojo                                │
 │  ├── 路由匹配 (router.mojo)                            │
 │  ├── 参数解析 (params_query/params_json, UTF-8 安全)   │
-│  ├── JSON 序列化 (json.mojo, 线性时间)                 │
-│  ├── 字符串构建 (string_builder.mojo, 线性时间)        │
+│  ├── JSON 序列化 (json.mojo 默认 / json_rust opt-in)  │
+│  ├── 字符串构建 (string_builder.mojo, ASCII fast path) │
 │  └── 静态文件 / CORS / 限流 / 日志                     │
 ├────────────────────────────────────────────────────────┤
 │  bridge/*.rs（Rust staticlib，随 binary 静态打包）      │
@@ -314,13 +330,14 @@ curl http://127.0.0.1:8000/test.json
 - **ADR-0008**：高并发 WebSocket（poll 循环驱动 + FIFO 事件队列 + 控制帧/保活 bridge 层自动处理）
 - **ADR-0009**：WebSocket 精化（合并帧丢失修复 + `{param}` 路由 + 鉴权 + 内存/背压加固）
 - **ADR-0039**：原生 TLS/HTTPS（opt-in rustls + 纯 Rust RustCrypto provider，TLS 1.3 / ALPN）
+- **ADR-0041**：大响应 JSON 序列化 opt-in Rust writer（默认 Mojo 路径不变）
 
 决策链：已决策-5~13 见 `docs/adr/0001-mojo-replacement-strategy/` 与 `AGENTS.md` §6。
 
 ## 路线图
 
 - [x] Rust staticlib 桥接（socket I/O / HTTP 解析 / WS 协议 / shim loader，决策-19）
-- [x] JSON 序列化（线性时间）
+- [x] JSON 序列化（线性时间；大响应 opt-in Rust 加速，ADR-0041）
 - [x] 模式匹配路由
 - [x] 参数解析（UTF-8 安全）
 - [x] REST API（11 个路由 + HEAD/OPTIONS/静态文件）

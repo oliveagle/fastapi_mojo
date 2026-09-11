@@ -435,9 +435,13 @@ RSS 平台化（HTTP 2500 req + WS 180k frames）→ 无线性泄漏
          但 traces 当前缺；OTel gRPC 出口需 HTTP/2，先 stub 内存 trace buffer。
       8. **WS 子协议矩阵扩展**：当前 /ws echo + counter + chat（3 个）；加
          /ws/jsonrpc / /ws/graphql-ws / /ws/grpc-web 适配更多上游客户端。
-      9. **JSON 序列化 Rust 化（深度优化）**：当前 json.mojo 已线性时间，但
-         大 body（>1MB）仍占 Mojo 调度。Rust 侧手写 + FFI 暴露
-         `serialize_value_json_v2()` 可作为 opt-in 加速。
+      9. **JSON 序列化 Rust 化（✅ 决策-66 已完成）**：response-only opt-in
+         路径已落地（ADR-0041）。默认仍用线性时间 `json.mojo`；
+         `FASTAPI_MOJO_JSON_SERIALIZER=rust` 时，超过阈值（默认 64 KiB 输入
+         估算）的 flat response object 由 std-only Rust `JsonObjectWriter`
+         承担 escape/缓冲，输出与 Mojo 字节兼容，失败回退。实测 escape 密集
+         1 MiB 端到端 **+24.19% req/s**；request parsing 与任意 JSON value tree
+         序列化仍留在 Mojo。
       10. **Starlette/ASGI 兼容层（远期）**：让用户既可用 fastapi_mojo 原生 DSL，
          又能 import starlette 风格 handler。设计重，需先调研 ASGI 3.0 spec。
       11. **HTTP/2（远期）**：Rust h2 / hyper 评估；当前 curl/浏览器多数仍

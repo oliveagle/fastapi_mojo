@@ -198,7 +198,15 @@ struct HeyRow {
     status: String,
 }
 
-fn run_hey(hey_bin: &str, url: &str, n: usize, c: usize, method: &str, data: Option<&str>) -> Result<Vec<HeyRow>, String> {
+fn run_hey(
+    hey_bin: &str,
+    url: &str,
+    n: usize,
+    c: usize,
+    method: &str,
+    data: Option<&str>,
+    data_file: Option<&str>,
+) -> Result<Vec<HeyRow>, String> {
     let mut cmd = Command::new(hey_bin);
     cmd.arg("-n").arg(n.to_string())
         .arg("-c").arg(c.to_string())
@@ -206,6 +214,8 @@ fn run_hey(hey_bin: &str, url: &str, n: usize, c: usize, method: &str, data: Opt
     if method == "POST" {
         if let Some(d) = data {
             cmd.arg("-m").arg("POST").arg("-d").arg(d);
+        } else if let Some(path) = data_file {
+            cmd.arg("-m").arg("POST").arg("-D").arg(path);
         }
     }
     cmd.arg(url);
@@ -363,6 +373,7 @@ pub struct Scenario {
     pub c: usize,
     pub method: String,
     pub data: Option<String>,
+    pub data_file: Option<String>,
 }
 
 fn load_scenarios(path: Option<&str>) -> Result<Vec<Scenario>, String> {
@@ -371,10 +382,10 @@ fn load_scenarios(path: Option<&str>) -> Result<Vec<Scenario>, String> {
         None => {
             // 内置默认场景 (与 bench.py DEFAULT_SCENARIOS 一致)
             return Ok(vec![
-                Scenario { name: "get_root_10k_100c".into(), url: "http://127.0.0.1:8000/".into(), n: 10000, c: 100, method: "GET".into(), data: None },
-                Scenario { name: "get_root_50k_500c".into(), url: "http://127.0.0.1:8000/".into(), n: 50000, c: 500, method: "GET".into(), data: None },
-                Scenario { name: "get_root_100k_200c".into(), url: "http://127.0.0.1:8000/".into(), n: 100000, c: 200, method: "GET".into(), data: None },
-                Scenario { name: "get_hello_10k_100c".into(), url: "http://127.0.0.1:8000/hello?name=Mojo".into(), n: 10000, c: 100, method: "GET".into(), data: None },
+                Scenario { name: "get_root_10k_100c".into(), url: "http://127.0.0.1:8000/".into(), n: 10000, c: 100, method: "GET".into(), data: None, data_file: None },
+                Scenario { name: "get_root_50k_500c".into(), url: "http://127.0.0.1:8000/".into(), n: 50000, c: 500, method: "GET".into(), data: None, data_file: None },
+                Scenario { name: "get_root_100k_200c".into(), url: "http://127.0.0.1:8000/".into(), n: 100000, c: 200, method: "GET".into(), data: None, data_file: None },
+                Scenario { name: "get_hello_10k_100c".into(), url: "http://127.0.0.1:8000/hello?name=Mojo".into(), n: 10000, c: 100, method: "GET".into(), data: None, data_file: None },
             ]);
         }
     };
@@ -398,7 +409,19 @@ fn load_scenarios(path: Option<&str>) -> Result<Vec<Scenario>, String> {
         let c = item.get("c").and_then(|v| v.as_num()).unwrap_or(0.0) as usize;
         let method = item.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
         let data = item.get("data").and_then(|v| v.as_str()).map(|s| s.to_string());
-        out.push(Scenario { name, url, n, c, method, data });
+        let data_file = item
+            .get("data_file")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        out.push(Scenario {
+            name,
+            url,
+            n,
+            c,
+            method,
+            data,
+            data_file,
+        });
     }
     Ok(out)
 }
@@ -556,7 +579,15 @@ pub fn run_bench(opts: &BenchOpts) -> i32 {
     let do_warmup = |hey: &str, port: u16| {
         if !opts.no_warmup {
             eprintln!("[bench] 预热 {WARMUP_N} 请求 / 并发 {WARMUP_C} ...");
-            let _ = run_hey(hey, &format!("http://127.0.0.1:{port}/"), WARMUP_N, WARMUP_C, "GET", None);
+            let _ = run_hey(
+                hey,
+                &format!("http://127.0.0.1:{port}/"),
+                WARMUP_N,
+                WARMUP_C,
+                "GET",
+                None,
+                None,
+            );
         }
     };
     do_warmup(&opts.hey, opts.port);
@@ -585,7 +616,15 @@ pub fn run_bench(opts: &BenchOpts) -> i32 {
             summarize(&rts, &offs, &sts, n, c, url)
         } else {
             eprintln!("[bench] 场景 {name}: {n} 请求 / 并发 {c} ...");
-            let rows = match run_hey(&opts.hey, url, n, c, &sc.method, sc.data.as_deref()) {
+            let rows = match run_hey(
+                &opts.hey,
+                url,
+                n,
+                c,
+                &sc.method,
+                sc.data.as_deref(),
+                sc.data_file.as_deref(),
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("[bench] {e}");

@@ -12,6 +12,9 @@
 #     sequences become U+FFFD; never calls chr() with a surrogate, which
 #     would abort the process).
 
+from std.ffi import CStringSlice
+
+
 struct StringBuilder:
     """Efficient String builder: appends into small chunks, joins once."""
     var chunks: List[String]
@@ -201,14 +204,36 @@ def main() raises:
     if s4.byte_length() == 262144:
         print("OK: 256KB built linearly")
 
+    # Decision-66 fast path: ASCII spans bulk-construct, UTF-8 spans decode.
+    var span_ascii = "bridge payload"
+    if span_to_str(span_ascii.as_c_string_slice().as_bytes()) == span_ascii:
+        print("OK: span ASCII fast path")
+
+    var span_utf8 = "héllo 😀"
+    if span_to_str(span_utf8.as_c_string_slice().as_bytes()) == span_utf8:
+        print("OK: span UTF-8 decoder")
+
     print("StringBuilder test completed!")
 
 # Bulk decode of a raw byte span (e.g. a CStringSlice.as_bytes() from the
 # C bridge) into a UTF-8 String, in amortized O(n). The C side has already
 # validated the UTF-8; isolated/invalid sequences still degrade to U+FFFD.
-def span_to_str(bs: Span[UInt8, ...]) -> String:
-    var sb = StringBuilder()
+def span_to_str(bs: Span[UInt8, _, address_space=AddressSpace.GENERIC]) -> String:
+    # ASCII spans (the dominant bridge payload: HTTP fields and escaped JSON)
+    # have a direct String construction path. It avoids a byte-by-byte
+    # StringBuilder loop while preserving the robust decoder below for UTF-8.
     var n = len(bs)
+    var all_ascii = True
+    var probe = 0
+    while probe < n:
+        if Int(bs[probe]) >= 0x80:
+            all_ascii = False
+            break
+        probe += 1
+    if all_ascii:
+        return String(unsafe_from_utf8=bs)
+
+    var sb = StringBuilder()
     var i = 0
     while i < n:
         var b = Int(bs[i])

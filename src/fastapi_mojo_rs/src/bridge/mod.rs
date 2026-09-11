@@ -41,6 +41,8 @@ pub mod metrics;
 pub mod otel_traces;
 pub mod init_workers;
 pub mod io;
+pub mod json_ffi;
+pub mod json_writer;
 pub mod parse;
 pub mod request;
 pub mod port;
@@ -98,6 +100,10 @@ mod init_workers_tests;
 
 #[cfg(test)]
 mod io_tests;
+#[cfg(test)]
+mod json_ffi_tests;
+#[cfg(test)]
+mod json_writer_tests;
 
 #[cfg(test)]
 mod parse_tests;

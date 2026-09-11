@@ -27,6 +27,7 @@
 #   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
 #   - Body validation: _body_schema + Field 约束 + Enum + FastAPI 422 detail (决策-38, BS-1..BS-12)
 #   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
+#   - Rust JSON serializer opt-in: FASTAPI_MOJO_JSON_SERIALIZER=rust (决策-66, JR-1..JR-6)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
@@ -197,6 +198,7 @@ echo "[setup] starting server on port $PORT (recv timeout 2s, idle timeout 2s)..
 ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
     FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
     FASTAPI_MOJO_WS_CLOSE_WAIT=2000 \
+    FASTAPI_MOJO_JSON_SERIALIZER=rust FASTAPI_MOJO_JSON_RUST_MIN_BYTES=1 \
     FASTAPI_MOJO_OPENAPI_DESCRIPTION="e2e description" \
     FASTAPI_MOJO_OPENAPI_TERMS="https://tos.example" \
     FASTAPI_MOJO_OPENAPI_CONTACT="E2E Support|https://support.example|s@example.com" \
@@ -259,6 +261,43 @@ expect_code "POST /echo -> 200" 200 "$BASE/echo" POST '{"x":"9","y":"z"}'
 expect_body_contains "POST /echo echoes body" '"x": "9"' "$BASE/echo" POST '{"x":"9","y":"z"}'
 expect_code "GET /items/42 path-echo (ECHO kind) -> 200" 200 "$BASE/items/42"
 expect_body_contains "GET /items/42 echoes path param" '"item_id": "42"' "$BASE/items/42"
+
+# --- Rust JSON serializer (decision-66) -----------------------------------------
+
+echo "== Rust JSON serializer (decision-66; main e2e server opt-in, threshold=1) =="
+JR_HEALTH="$TMP/json_rust_health.body"
+if curl -sS --max-time 5 "$BASE/health" -o "$JR_HEALTH" && "$FMTOOL" jsoncheck "$JR_HEALTH" >/dev/null; then
+    pass "JR-1 opt-in Rust JSON /health valid"
+else fail "JR-1 opt-in Rust JSON /health valid" "$(head -c 160 "$JR_HEALTH" 2>/dev/null)"; fi
+
+JR_ESCAPE_BODY="$TMP/json_rust_escape.body"
+if curl -sS --max-time 5 -H "Content-Type: application/json" \
+    --data-binary '{"s":"a\"b\\c\\nd\\te","nested":{"x":1}}' \
+    "$BASE/echo" -o "$JR_ESCAPE_BODY" && \
+   grep -Fq -- '{"s": "a\"b\\c\\nd\\te", "nested": "{\"x\":1}"' "$JR_ESCAPE_BODY"; then
+    pass "JR-2 escaping and nested string parity"
+else fail "JR-2 escaping and nested string parity" "$(head -c 220 "$JR_ESCAPE_BODY" 2>/dev/null)"; fi
+
+{ printf '{"payload":"'; head -c 1000000 /dev/zero | tr '\0' 'x'; printf '"}'; } > "$TMP/json_rust_request.json"
+{ printf '{"payload": "'; head -c 1000000 /dev/zero | tr '\0' 'x'; printf '"}'; } > "$TMP/json_rust_expected.json"
+JR_CODE=$(curl -sS --max-time 15 -D "$TMP/json_rust_headers" -o "$TMP/json_rust_response.json" \
+    -w '%{http_code}' -X POST -H "Content-Type: application/json" \
+    --data-binary @"$TMP/json_rust_request.json" "$BASE/echo")
+if [[ "$JR_CODE" == "200" ]]; then pass "JR-3 1MB object POST -> 200"
+else fail "JR-3 1MB object POST -> 200" "got $JR_CODE"; fi
+JR_CL=$(tr -d '\r' < "$TMP/json_rust_headers" | grep -i '^Content-Length:' | tail -1 | awk '{print $2}')
+JR_SIZE=$(stat -c '%s' "$TMP/json_rust_response.json")
+if [[ "$JR_CL" == "$JR_SIZE" ]]; then pass "JR-4 1MB response Content-Length exact"
+else fail "JR-4 1MB response Content-Length exact" "header=$JR_CL body=$JR_SIZE"; fi
+JR_PAYLOAD_SIZE=$(($(stat -c '%s' "$TMP/json_rust_expected.json") - 1))
+head -c "$JR_PAYLOAD_SIZE" "$TMP/json_rust_response.json" > "$TMP/json_rust_response.prefix"
+head -c "$JR_PAYLOAD_SIZE" "$TMP/json_rust_expected.json" > "$TMP/json_rust_expected.prefix"
+if cmp -s "$TMP/json_rust_response.prefix" "$TMP/json_rust_expected.prefix"; then
+    pass "JR-5 1MB response payload bytes exact"
+else fail "JR-5 1MB response payload bytes exact" "expected payload $(stat -c %s "$TMP/json_rust_expected.prefix") B, got $JR_SIZE B response"; fi
+if "$FMTOOL" jsoncheck "$TMP/json_rust_response.json" >/dev/null; then
+    pass "JR-6 1MB response valid JSON"
+else fail "JR-6 1MB response valid JSON" "$(head -c 160 "$TMP/json_rust_response.json")"; fi
 
 # --- error paths -------------------------------------------------------------
 

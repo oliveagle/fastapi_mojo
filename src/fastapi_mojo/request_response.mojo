@@ -33,6 +33,7 @@
 from handler import Handler
 from string_builder import StringBuilder
 from json import json_serialize_dict, json_serialize_list, json_escape
+from json_rust import serialize_dict_opt_in
 from params_query import url_decode  # _parse_form_body (决策-44 从 http_server_final 移入)
 
 
@@ -284,7 +285,7 @@ def response_model_body(handler: Handler, resp_data: Dict[String, String]) raise
     整体 no-op (FastAPI: 无 response_model 时 include/exclude 不影响响应).
     """
     if "_response_model" not in handler.data:
-        return json_serialize_dict(resp_data)
+        return serialize_dict_opt_in(resp_data)
     var model_fields = _split_csv(handler.data["_response_model"])
     var exclude = List[String]()
     if "_response_exclude" in handler.data:
@@ -296,4 +297,4 @@ def response_model_body(handler: Handler, resp_data: Dict[String, String]) raise
             var v = resp_data[f]
             if not (exclude_none and _is_null_value(v)):
                 filtered[f] = v
-    return json_serialize_dict(filtered)
+    return serialize_dict_opt_in(filtered)
