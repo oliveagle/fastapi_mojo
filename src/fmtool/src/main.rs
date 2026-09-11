@@ -50,6 +50,7 @@ USAGE:
   fmtool ws4      <port>
   fmtool ws5      <port>
   fmtool wsdeflate <port>          RFC 7692 markers WSD1..WSD4
+  fmtool wsmatrix <port>           WS app subprotocol markers WSP1..WSP8
   fmtool wsdeflate-off <port>       decline offered extension (WSD5)
   fmtool wsdeflate-required <port>  reject missing required offer (WSD6)
   fmtool slowloris <port> <tmp>
@@ -89,6 +90,7 @@ fn main() -> ExitCode {
         "ws4" => run_e2e_port("ws4", &rest, e2e::ws4),
         "ws5" => run_e2e_port("ws5", &rest, e2e::ws5),
         "wsdeflate" => run_e2e_port("wsdeflate", &rest, e2e::wsdeflate),
+        "wsmatrix" => run_e2e_port("wsmatrix", &rest, e2e::wsmatrix),
         "wsdeflate-off" => run_e2e_port("wsdeflate-off", &rest, e2e::wsdeflate_off),
         "wsdeflate-required" => run_e2e_port("wsdeflate-required", &rest, e2e::wsdeflate_required),
         "slowloris" => run_slowloris(&rest),

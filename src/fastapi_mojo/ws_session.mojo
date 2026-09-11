@@ -23,20 +23,29 @@ from handler import Handler, run_ws_message, KIND_WS_ECHO
 from params_query import parse_query_params
 from string_builder import span_to_str, trim_spaces
 from ws_directives import ws_close_spec
+from ws_protocols import run_ws_protocol
 
 
 def ws_select_subprotocol(required: String, offer: String) -> Tuple[Bool, String]:
     """(ok, selected)。required == "" -> 无子协议 (总 ok)。
-    否则 offer (逗号分隔, 允许空白) 必须包含 required, 选中它; 不包含 -> 400."""
+
+    Decision-60: required 支持逗号分隔的 server-preferred 候选列表；
+    offer 仍是客户端偏好顺序。服务端按自身优先级选择第一个交集，
+    这是 WebSocket 子协议协商的合法行为。单候选（如 chat）保持既有语义。
+    """
     if required == "":
         return (True, "")
     if offer == "":
         return (False, "")
-    var parts = offer.split(",")
-    for i in range(len(parts)):
-        var part = String(parts[i])
-        if trim_spaces(part) == required:
-            return (True, required)
+    var wanted = required.split(",")
+    var offered = offer.split(",")
+    for i in range(len(wanted)):
+        var candidate = trim_spaces(String(wanted[i]))
+        if candidate == "":
+            continue
+        for j in range(len(offered)):
+            if trim_spaces(String(offered[j])) == candidate:
+                return (True, candidate)
     return (False, "")
 
 
@@ -133,6 +142,37 @@ def handle_ws_data(cfd: Int, handler: Handler, params: Dict[String, String],
         return state
     var no_reply = "_ws_no_reply" in handler.data and handler.data["_ws_no_reply"] == "1"
     var binary = "_ws_binary" in handler.data and handler.data["_ws_binary"] == "1"
+
+    # Decision-60: application subprotocol adapters run before generic echo.
+    # grpc-web is binary-only and transparent at this layer (NUL-safe echo);
+    # JSON protocols use the FFI-free pure functions in ws_protocols.mojo.
+    if "_ws_protocol" in handler.data:
+        var protocol = handler.data["_ws_protocol"]
+        if protocol == "grpc-web":
+            if opcode == 2 and not no_reply:
+                _ = external_call["ws_write_current_binary", Int](cfd)
+            elif opcode != 2:
+                _ = external_call["ws_send_close", Int](cfd, 1003)
+                external_call["ws_conn_close", NoneType](cfd)
+            return state
+        if opcode == 2:
+            _ = external_call["ws_send_close", Int](cfd, 1003)
+            external_call["ws_conn_close", NoneType](cfd)
+            return state
+        var msg = span_to_str(
+            external_call["ws_payload_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+        var protocol_reply = run_ws_protocol(protocol, msg, state)
+        if protocol_reply[0] == -1:
+            _ws_send_close(cfd, "4400:" + protocol_reply[1])
+            return state
+        if protocol_reply[0] > 0 and not no_reply:
+            var replies = protocol_reply[1].split("\n")
+            for i in range(len(replies)):
+                var item = String(replies[i])
+                if item != "":
+                    _ = external_call["ws_write_text", Int](cfd, item.as_c_string_slice())
+        return protocol_reply[2]
+
     if handler.kind == KIND_WS_ECHO():
         var json_spec = ""
         if "_ws_json" in handler.data:

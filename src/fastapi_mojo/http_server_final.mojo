@@ -34,6 +34,7 @@ from mw_spec import MWSpec, parse_mw_spec, check_mw_spec, mw_plan_request
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
 from ws_session import run_ws_upgrade, handle_ws_data
 from ws_directives import check_ws_specs  # 决策-51 (ADR-0026)
+from ws_protocol_routes import register_ws_protocol_routes  # 决策-60 (ADR-0035)
 from security import AuthResult, check_auth, _get_header
 from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii, missing_err_json)
 from file_form_check import validate_file_vs_form, file_part_fields
@@ -870,6 +871,10 @@ def register_routes(mut router: Router) raises:
     var ws_chat_h = Handler(KIND_WS_ECHO(), "ws_chat")
     ws_chat_h.set_data("ws_sp", "chat")  # 客户端必须提供 Sec-WebSocket-Protocol: chat
     router.add_ws_route("/ws/chat", ws_chat_h)
+
+    # Decision-60 (ADR-0035): application subprotocol matrix lives in
+    # ws_protocol_routes.mojo (JSON-RPC / GraphQL WS / gRPC-Web binary bridge).
+    register_ws_protocol_routes(router)
 
     # ADR-0009: {param} 路由 + 鉴权 (升级 query token)
     router.add_ws_route("/ws/greet/{name}", Handler(KIND_WS_GREET(), "ws_greet"))

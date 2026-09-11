@@ -318,6 +318,11 @@ def test_ws() raises:
     assert not s5[0], "required not in offer"
     var s6 = ws_select_subprotocol("chat", "chatchat")
     assert not s6[0], "substring is not a match"
+    var s7 = ws_select_subprotocol("graphql-transport-ws,graphql-ws",
+                                   "graphql-ws, graphql-transport-ws")
+    assert s7[0] and s7[1] == "graphql-transport-ws", "server preference wins"
+    var s8 = ws_select_subprotocol("jsonrpc,v2.jsonrpc", "v2.jsonrpc")
+    assert s8[0] and s8[1] == "v2.jsonrpc", "legacy fallback selected"
 
     # run_ws_message: echo
     var he = Handler(KIND_WS_ECHO(), "ws_echo")

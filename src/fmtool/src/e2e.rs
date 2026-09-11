@@ -823,6 +823,144 @@ pub fn ws5(port: u16) -> i32 {
 }
 
 
+// Decision-60: application WebSocket subprotocol matrix (WSP1..WSP8).
+pub fn wsmatrix(port: u16) -> i32 {
+    let run = || -> io::Result<()> {
+        // WSP1: preferred JSON-RPC token is selected and echo preserves params.
+        let jsonrpc_header = "Sec-WebSocket-Protocol: v2.jsonrpc, jsonrpc\r\n";
+        let (mut s, status, hdrs, _) = ws_connect(port, "/ws/jsonrpc", jsonrpc_header)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSP1 status {status}")));
+        }
+        if protocol_value(&hdrs).as_deref() != Some("jsonrpc") {
+            return Err(io::Error::other(format!("WSP1 proto {:?}", protocol_value(&hdrs))));
+        }
+        send_frame(&mut s, 0x1, br#"{"jsonrpc":"2.0","id":7,"method":"echo","params":{"text":"hi"}}"#, true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        let expected = br#"{"jsonrpc": "2.0", "id": 7, "result": {"text":"hi"}}"#;
+        if !(f.op == 0x1 && f.payload == expected) {
+            return Err(io::Error::other(format!("WSP1 echo {:?}", f.payload)));
+        }
+        println!("WSP1");
+
+        // WSP2: JSON-RPC notifications produce no response; the next request proves liveness.
+        send_frame(&mut s, 0x1, br#"{"jsonrpc":"2.0","method":"ping"}"#, true)?;
+        send_frame(&mut s, 0x1, br#"{"jsonrpc":"2.0","id":"next","method":"ping"}"#, true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x1 && String::from_utf8_lossy(&f.payload).contains(r#""id": "next""#)) {
+            return Err(io::Error::other(format!("WSP2 {:?}", f.payload)));
+        }
+        close_ws(&mut s);
+        println!("WSP2");
+
+        // WSP3: parse and method errors follow JSON-RPC 2.0 error objects.
+        let (mut s, status, _, _) = ws_connect(port, "/ws/jsonrpc", jsonrpc_header)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSP3 status {status}")));
+        }
+        send_frame(&mut s, 0x1, b"{oops", true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !String::from_utf8_lossy(&f.payload).contains("-32700") {
+            return Err(io::Error::other(format!("WSP3 parse {:?}", f.payload)));
+        }
+        send_frame(&mut s, 0x1, br#"{"jsonrpc":"2.0","id":2,"method":"missing"}"#, true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !String::from_utf8_lossy(&f.payload).contains("-32601") {
+            return Err(io::Error::other(format!("WSP3 method {:?}", f.payload)));
+        }
+        close_ws(&mut s);
+        println!("WSP3");
+
+        // WSP4: GraphQL server preference wins even when legacy token is offered first.
+        let graphql_header = "Sec-WebSocket-Protocol: graphql-ws, graphql-transport-ws\r\n";
+        let (mut s, status, hdrs, _) = ws_connect(port, "/ws/graphql-ws", graphql_header)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSP4 status {status}")));
+        }
+        if protocol_value(&hdrs).as_deref() != Some("graphql-transport-ws") {
+            return Err(io::Error::other(format!("WSP4 proto {:?}", protocol_value(&hdrs))));
+        }
+        send_frame(&mut s, 0x1, br#"{"type":"connection_init"}"#, true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x1 && String::from_utf8_lossy(&f.payload).contains("connection_ack")) {
+            return Err(io::Error::other(format!("WSP4 ack {:?}", f.payload)));
+        }
+        send_frame(&mut s, 0x1, br#"{"type":"subscribe","id":"op1","payload":{"query":"{ hello }"}}"#, true)?;
+        let next = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        let complete = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        let next_text = String::from_utf8_lossy(&next.payload).into_owned();
+        if !(next.op == 0x1 && next_text.contains(r#""type": "next""#) && next_text.contains(r#""query": "{ hello }""#)) {
+            return Err(io::Error::other(format!("WSP4 next {next_text}")));
+        }
+        if !(complete.op == 0x1 && String::from_utf8_lossy(&complete.payload).contains(r#""type": "complete""#)) {
+            return Err(io::Error::other(format!("WSP4 complete {:?}", complete.payload)));
+        }
+        println!("WSP4");
+
+        // WSP5: legacy graphql-ws start/stop message names remain accepted.
+        send_frame(&mut s, 0x1, br#"{"type":"start","id":"legacy","payload":{"query":"{ legacy }"}}"#, true)?;
+        let next = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        let complete = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(String::from_utf8_lossy(&next.payload).contains("legacy") && complete.op == 0x1) {
+            return Err(io::Error::other(format!("WSP5 {:?} {:?}", next.payload, complete.payload)));
+        }
+        close_ws(&mut s);
+        println!("WSP5");
+
+        // WSP6: malformed GraphQL protocol messages close 4400 per graphql-transport-ws.
+        let (mut s, status, _, _) = ws_connect(port, "/ws/graphql-ws", graphql_header)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSP6 status {status}")));
+        }
+        send_frame(&mut s, 0x1, br#"{"type":"bogus"}"#, true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x8 && f.payload.len() >= 2 && u16::from_be_bytes([f.payload[0], f.payload[1]]) == 4400) {
+            return Err(io::Error::other(format!("WSP6 close {:?}", f.payload)));
+        }
+        println!("WSP6");
+
+        // WSP7: grpc-web adapter is binary-only and NUL-safe (transparent frame bridge).
+        let grpc_header = "Sec-WebSocket-Protocol: grpc-web\r\n";
+        let (mut s, status, hdrs, _) = ws_connect(port, "/ws/grpc-web", grpc_header)?;
+        if !status.starts_with("HTTP/1.1 101") {
+            return Err(io::Error::other(format!("WSP7 status {status}")));
+        }
+        if protocol_value(&hdrs).as_deref() != Some("grpc-web") {
+            return Err(io::Error::other(format!("WSP7 proto {:?}", protocol_value(&hdrs))));
+        }
+        let grpc_frame = [0x00, 0x00, 0x00, 0x00, 0x02, 0x11, 0x00];
+        send_frame(&mut s, 0x2, &grpc_frame, true)?;
+        let f = recv_frame_timeout(&mut s, DEFAULT_TIMEOUT)?;
+        if !(f.op == 0x2 && f.payload == grpc_frame) {
+            return Err(io::Error::other(format!("WSP7 binary {:?}", f.payload)));
+        }
+        close_ws(&mut s);
+        println!("WSP7");
+
+        // WSP8: absent required application subprotocol remains an HTTP 400 denial.
+        let (s, status, _, _) = ws_connect(port, "/ws/graphql-ws", "")?;
+        drop(s);
+        if !status.starts_with("HTTP/1.1 400") {
+            return Err(io::Error::other(format!("WSP8 status {status}")));
+        }
+        println!("WSP8");
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            println!("FAIL: {e}");
+            1
+        }
+    }
+}
+
+fn protocol_value(hdrs: &[(String, String)]) -> Option<String> {
+    hdrs.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-protocol"))
+        .map(|(_, v)| v.clone())
+}
+
 // RFC 7692: main-server default mode is ON (WSD1..WSD4).
 pub fn wsdeflate(port: u16) -> i32 {
     let run = || -> io::Result<()> {

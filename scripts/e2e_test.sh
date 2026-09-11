@@ -1937,6 +1937,16 @@ done
 kill -9 "$WSD_PID" 2>/dev/null || true
 wait "$WSD_PID" 2>/dev/null || true
 
+# --- WebSocket application subprotocols (ADR-0035, decision-60) -------------------
+
+echo "== websocket application subprotocols (jsonrpc / graphql-ws / grpc-web) =="
+WSP_OUT=$("$FMTOOL" wsmatrix "$PORT" 2>&1)
+WSP_FAIL=$(echo "$WSP_OUT" | tail -1)
+for m in WSP1 WSP2 WSP3 WSP4 WSP5 WSP6 WSP7 WSP8; do
+    if echo "$WSP_OUT" | grep -q "$m"; then pass "WS $m application subprotocol"
+    else fail "WS $m application subprotocol" "$WSP_FAIL"; fi
+done
+
 # --- OpenAPI refinement (ADR-0027, decision-52) ----------------------------------
 
 echo "== openapi refinement (ADR-0027: info/servers/tags/externalDocs + op-level custom) =="
