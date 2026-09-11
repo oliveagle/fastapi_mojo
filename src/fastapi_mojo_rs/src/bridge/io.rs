@@ -129,6 +129,9 @@ fn errno() -> c_int {
 ///   - `-1` : EAGAIN/EWOULDBLOCK (spurious); 调用方应 return 0
 ///   - `-2` : 其它错误 (ECONNRESET 等); 调用方应 close
 pub(crate) fn sys_recv(fd: i32, buf: &mut [u8]) -> i32 {
+    if let Some(result) = super::tls::recv(fd, buf) {
+        return result;
+    }
     let n = unsafe {
         recv(fd, buf.as_mut_ptr() as *mut c_void, buf.len(), MSG_DONTWAIT)
     };
@@ -962,6 +965,12 @@ pub fn recv_and_parse() -> i32 {
             let cfd = sys_accept(listen_fd);
             if cfd >= 0 {
                 setup_conn_fd(cfd);
+                if !super::tls::accept(cfd) {
+                    unsafe {
+                        close(cfd);
+                    }
+                    continue;
+                }
                 let max_body = get_max_body_size();
                 // alloc + 立即 pump (客户端常握完手即发请求)
                 let mut table = conn_table().lock().expect("CONN_TABLE poisoned");
@@ -976,6 +985,7 @@ pub fn recv_and_parse() -> i32 {
                             "503 Service Unavailable",
                             "Too many connections",
                         );
+                        super::tls::close(cfd);
                         unsafe {
                             close(cfd);
                         }

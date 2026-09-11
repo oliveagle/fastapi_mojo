@@ -1846,14 +1846,19 @@ def main() raises:
     # Listen port: CLI --port N > FASTAPI_MOJO_PORT env > 8000 (C side).
     var port = external_call["get_configured_port", Int]()
     var sfd = external_call["create_bound_socket", Int](port)
-    if sfd < 0:
+    # Mojo reads the C `int` return into a 64-bit Int: a -1 sentinel can arrive
+    # as 0xffffffff. Valid listen fds are small non-negative C ints.
+    if sfd < 0 or sfd > 2147483647:
         print("ERROR: bind failed on port " + String(port))
         external_call["bridge_fail", NoneType]()
         return
     var worker_id = external_call["get_worker_id", Int]()
     if worker_id > 0:
         print("Worker #" + String(worker_id) + " (multi-worker mode, ADR-0005)")
-    print("Listening on http://127.0.0.1:" + String(port))
+    var scheme = "http"
+    if getenv("FASTAPI_MOJO_TLS_CERT").byte_length() > 0 and getenv("FASTAPI_MOJO_TLS_KEY").byte_length() > 0:
+        scheme = "https"
+    print("Listening on " + scheme + "://127.0.0.1:" + String(port))
     print("Press Ctrl+C to stop")
 
     # Lifespan (决策-36): startup 命令 — 仅主进程 (worker_id=0) 执行,

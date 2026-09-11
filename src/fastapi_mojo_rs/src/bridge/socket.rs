@@ -21,6 +21,7 @@ use std::os::raw::{c_int, c_void};
 
 use super::signals::setup_signal_handlers;
 use super::state::init_timeouts_from_env;
+use super::tls;
 
 // ========== Linux 常量 ==========
 const AF_INET: c_int = 2;
@@ -82,6 +83,9 @@ pub fn create_bound_socket(port: u16) -> i32 {
     // 与 C 一致: socket 创建前先初始化信号处理 + 超时配置
     setup_signal_handlers();
     init_timeouts_from_env();
+    if !tls::init_from_env() {
+        return -1;
+    }
 
     let fd = unsafe { socket(AF_INET, SOCK_STREAM, 0) };
     if fd < 0 {

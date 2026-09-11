@@ -7,7 +7,7 @@
 //! ws_parse_close_code/ws_send_all 为本模块私有。
 //! 行为等价门禁: src/ws/ws_tests.rs (RFC 6455 known vectors + ADR-0009 合并帧)。
 
-use std::os::raw::{c_char, c_int, c_uchar, c_void};
+use std::os::raw::{c_char, c_int, c_uchar};
 
 pub mod deflate;
 pub mod parser;
@@ -19,11 +19,6 @@ pub use parser::{WsParser, ws_parser_feed, ws_parser_init};
 // ========== 常量 ==========
 pub const WS_MAX_MSG: usize = 1024 * 1024;
 const WS_GUID: &[u8; 36] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-
-// ========== 系统调用直连 (避免 libc crate 依赖) ==========
-extern "C" {
-    fn send(fd: c_int, buf: *const c_void, n: usize, flags: c_int) -> isize;
-}
 
 // ========== SHA-1 (FIPS 180-1, 行为等价 ws.c 第 37-77 行) ==========
 fn ws_sha1(data: &[u8], out: &mut [u8; 20]) {
@@ -149,23 +144,9 @@ fn ws_compute_accept_inner(key: &[u8], out: &mut [u8]) -> i32 {
 
 // ========== 短写重发 (行为等价 ws.c 第 114-125 行) ==========
 fn ws_send_all(fd: c_int, buf: &[u8]) -> c_int {
-    let mut sent = 0;
-    while sent < buf.len() {
-        let r = unsafe {
-            send(
-                fd,
-                buf.as_ptr().add(sent) as *const c_void,
-                buf.len() - sent,
-                0,
-            )
-        };
-        if r <= 0 {
-            return -1;
-        }
-        sent += r as usize;
-    }
-    0
+    crate::bridge::send::send_all(fd, buf)
 }
+
 
 // ========== close 帧 payload 规范化 (wsproto 1.3.2 发送侧 parity, ADR-0026) ==========
 //

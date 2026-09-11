@@ -67,6 +67,9 @@ fn errno() -> c_int {
 /// 循环 `send(fd, buf[off..])` 直到全部写出 (端口 C `send_all` §1395-1414)。
 /// 任一次 `send <= 0` 返回 -1; 成功返回 0。
 pub fn send_all(fd: c_int, buf: &[u8]) -> c_int {
+    if let Some(result) = super::tls::send_all(fd, buf) {
+        return result;
+    }
     let mut off = 0usize;
     while off < buf.len() {
         let n = unsafe { send(fd, buf.as_ptr().add(off) as *const c_void, buf.len() - off, 0) };

@@ -63,6 +63,7 @@ pub mod state;
 pub mod lifespan;
 pub mod multipart;
 pub mod time_util;
+pub mod tls;
 
 pub mod regex;
 pub mod middleware;
@@ -135,3 +136,6 @@ mod middleware_tests;
 
 #[cfg(test)]
 mod otel_traces_tests;
+
+#[cfg(test)]
+mod tls_tests;

@@ -32,6 +32,10 @@ services:
       # FASTAPI_MOJO_RECV_TIMEOUT=5
       # FASTAPI_MOJO_IDLE_TIMEOUT=5
       FASTAPI_MOJO_ACCESS_LOG: "json"
+      # 原生 TLS (ADR-0039) 是 opt-in: 证书/私钥应由外部 secret 管理注入,
+      # 不能提交到镜像; 未挂载对应文件时不要打开以下两项.
+      # FASTAPI_MOJO_TLS_CERT: /run/secrets/fastapi_mojo_tls_cert
+      # FASTAPI_MOJO_TLS_KEY: /run/secrets/fastapi_mojo_tls_key
     command: ["--host", "0.0.0.0", "--port", "8000", "--workers", "0"]
     # 资源限制 (生产建议):
     # mem_limit: 256m

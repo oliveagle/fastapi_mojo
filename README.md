@@ -9,6 +9,7 @@
 
 - ✅ Mojo 原生 HTTP 服务器（**Rust staticlib FFI socket 桥接** + Mojo 路由/参数/JSON，决策-19）
 - ✅ HTTP/2 prior-knowledge h2c 有界子集（HPACK + frame + buffered multiplex，无新增 FFI/依赖，ADR-0038）
+- ✅ 原生 TLS/HTTPS（opt-in rustls + 纯 Rust RustCrypto provider，TLS 1.3 / ALPN，FFI diff=0，ADR-0039）
 - ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
@@ -92,6 +93,22 @@ FASTAPI_MOJO_WORKERS=8 ./build/fastapi_mojo --port 8000
 FASTAPI_MOJO_STATIC_DIR=/opt/static ./build/fastapi_mojo
 ```
 
+TLS/HTTPS（opt-in，决策-64 / ADR-0039）：
+
+```bash
+FASTAPI_MOJO_TLS_CERT=/etc/fastapi_mojo/cert.pem \
+FASTAPI_MOJO_TLS_KEY=/etc/fastapi_mojo/key.pem \
+FASTAPI_MOJO_TLS_ALPN=h2,http/1.1 \
+./build/fastapi_mojo --port 8443
+
+curl --cacert /etc/fastapi_mojo/cert.pem https://127.0.0.1:8443/health
+```
+
+证书与私钥必须成对设置；任一配置无效都会在启动时 fail closed。默认 ALPN 为
+`h2,http/1.1`。当前使用 **alpha 状态的纯 Rust RustCrypto provider** 且仅支持
+TLS 1.3；公网生产流量建议仍由 nginx/反向代理终结 TLS（见
+`docs/deploy-nginx.md`）。
+
 Lifespan（startup/shutdown，决策-36 / ADR-0012，对标 FastAPI `lifespan` 上下文管理器）：
 声明式 shell 命令（换行分隔），服务启动前执行 startup、停止后执行 shutdown；
 **startup 任一命令失败 → 服务不启动（进程退出）**；多 worker 时仅主进程执行
@@ -136,6 +153,8 @@ journalctl -u fastapi_mojo -f
 
 # 方式 3: nginx 反向代理 (TLS 终结 + WebSocket upgrade)
 #   完整配置见 docs/deploy-nginx.md (SSE 需 proxy_buffering off; WS 需 Connection: upgrade)
+#   单 binary 也可原生监听 HTTPS (见上方 TLS 配置); provider 尚为 alpha,
+#   公网生产建议优先选择 nginx 终结.
 ```
 
 - `Dockerfile` — 预构建 binary 进 ubuntu:24.04 (glibc 2.39, 镜像 ~33MB);
@@ -152,7 +171,7 @@ journalctl -u fastapi_mojo -f
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，511 项检查含 HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；
+# 集成测试（单一 binary 端到端，521 项检查含 TLS/HTTPS、HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；
 # 工具链 fmtool = Rust, 零 Python，见 .github/workflows/ci.yml）
 ./scripts/e2e_test.sh
 ```
@@ -279,6 +298,7 @@ curl http://127.0.0.1:8000/test.json
 - **ADR-0007**：WebSocket 增强（多端点路由 + 子协议协商 + 服务端保活 ping + close/UTF-8 校验）
 - **ADR-0008**：高并发 WebSocket（poll 循环驱动 + FIFO 事件队列 + 控制帧/保活 bridge 层自动处理）
 - **ADR-0009**：WebSocket 精化（合并帧丢失修复 + `{param}` 路由 + 鉴权 + 内存/背压加固）
+- **ADR-0039**：原生 TLS/HTTPS（opt-in rustls + 纯 Rust RustCrypto provider，TLS 1.3 / ALPN）
 
 决策链：已决策-5~13 见 `docs/adr/0001-mojo-replacement-strategy/` 与 `AGENTS.md` §6。
 
@@ -298,3 +318,4 @@ curl http://127.0.0.1:8000/test.json
 - [x] WebSocket 增强（多端点路由 /ws /ws/counter /ws/chat + 子协议协商 + 服务端保活 ping + close 码/UTF-8 校验，ADR-0007）
 - [x] 高并发 WebSocket（多 WS 会话与 HTTP 并发、空闲不阻塞 dispatch，ADR-0008）
 - [x] WebSocket 精化（合并帧不丢失、`{param}` 路由、token 鉴权、内存/背压加固，ADR-0009）
+- [x] 原生 TLS/HTTPS（rustls + RustCrypto provider，TLS 1.3 / ALPN，ADR-0039）

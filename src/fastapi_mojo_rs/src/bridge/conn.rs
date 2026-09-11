@@ -130,6 +130,7 @@ impl Conn {
     pub fn reset_for_close(&mut self) {
         self.in_use = false;
         if self.fd >= 0 {
+            super::tls::close(self.fd);
             sys_close(self.fd);
         }
         self.fd = -1;

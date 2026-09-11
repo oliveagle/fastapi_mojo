@@ -3,6 +3,26 @@
 > 单 binary 监听 `0.0.0.0:8000`. 生产部署建议 nginx 反代 + TLS 终结.
 > WebSocket 原生支持 `/ws`, nginx 需按 RFC 6455 upgrade 转发.
 
+## 0. 原生 TLS 还是反代 TLS？
+
+决策-64（ADR-0039）起，单 binary 也可以原生监听 HTTPS：
+
+```bash
+FASTAPI_MOJO_TLS_CERT=/etc/fastapi_mojo/cert.pem \
+FASTAPI_MOJO_TLS_KEY=/etc/fastapi_mojo/key.pem \
+FASTAPI_MOJO_TLS_ALPN=h2,http/1.1 \
+./fastapi_mojo --port 8443
+```
+
+边界与建议：
+
+- 当前 crypto provider 是 `rustls-rustcrypto` **alpha 版**，且仅支持 TLS 1.3；
+- 面向公网 / 合规生产，建议仍由 nginx、云 LB 或其它经过审计的 TLS 终结层负责证书；
+- 原生 TLS 适合内网、边车、临时入口和单 binary 演示，不要求额外进程；
+- 两种模式不要混用同一监听端口：启用 TLS 后明文 HTTP 会被 TLS 握手拒绝。
+
+下方示例是 **nginx 终结 TLS、fastapi_mojo 保持内网 HTTP** 的推荐形态。
+
 ## 1. 最小 nginx 配置 (HTTP only)
 
 ```nginx

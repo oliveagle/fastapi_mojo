@@ -15,6 +15,8 @@
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HTTP/2: prior-knowledge h2c H2-1..H2-7（HPACK/CONTINUATION/DATA/PING/HEAD/
 #     buffered multiplex, ADR-0038）
+#   - TLS/HTTPS: opt-in rustls transport TLS-0..TLS-9（TLS1.3/ALPN/keep-alive/
+#     plaintext rejection/fail-closed config, ADR-0039）
 #   - HEAD (仅头, 无 body) / OPTIONS 204
 #   - 静态文件: 200, 404, symlink-escape 403, ../-traversal 403
 #   - 停滞客户端不阻塞服务器 (探针 in <1s)
@@ -155,6 +157,7 @@ printf_to_hex() {
 # --- setup --------------------------------------------------------------------
 
 command -v curl >/dev/null || { echo "ERROR: curl not found"; exit 1; }
+command -v openssl >/dev/null || { echo "ERROR: openssl not found (TLS e2e fixture)"; exit 1; }
 
 if [[ "$REBUILD" == 1 || ! -f "$BIN" ]]; then
     echo "[setup] building single binary..."
@@ -168,6 +171,8 @@ fi
 
 TMP="$(mktemp -d /tmp/fm_e2e.XXXXXX)"
 SERVER_PID=""
+TLS_PID=""
+TLS_INVALID_PID=""
 cleanup() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill -TERM "$SERVER_PID" 2>/dev/null
@@ -177,6 +182,13 @@ cleanup() {
         done
         kill -9 "$SERVER_PID" 2>/dev/null
     fi
+    for pid in "$TLS_INVALID_PID" "$TLS_PID"; do
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 0.2
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
     rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -2582,6 +2594,137 @@ for marker_name in H2-1 H2-2 H2-3 H2-4 H2-5 H2-6 H2-7; do
         fail "$marker_name h2c end-to-end" "rc=$H2_RC out=$H2_OUT"
     fi
 done
+
+# Decision-64: opt-in TLS/HTTPS on a secondary server. openssl/curl are CI
+# dev tools only; the delivered binary remains Mojo + Rust and libc-only.
+echo "== TLS/HTTPS (决策-64) =="
+TLS_PORT=$((PORT + 119))
+TLS_INVALID_PORT=$((PORT + 120))
+TLS_CERT="$TMP/tls-cert.pem"
+TLS_KEY="$TMP/tls-key.pem"
+TLS_LOG="$TMP/tls-server.log"
+TLS_INVALID_LOG="$TMP/tls-invalid.log"
+umask 077
+if openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+    -keyout "$TLS_KEY" -out "$TLS_CERT" >/dev/null 2>&1; then
+    ( cd "$SRC" && exec env FASTAPI_MOJO_WORKERS=1 \
+        FASTAPI_MOJO_TLS_CERT="$TLS_CERT" FASTAPI_MOJO_TLS_KEY="$TLS_KEY" \
+        "$BIN" --port "$TLS_PORT" >"$TLS_LOG" 2>&1 ) &
+    TLS_PID=$!
+    TLS_READY=0
+    for _ in $(seq 1 50); do
+        if [[ "$(curl -sk --max-time 1 "https://127.0.0.1:$TLS_PORT/health" 2>/dev/null)" == *healthy* ]]; then
+            TLS_READY=1; break
+        fi
+        kill -0 "$TLS_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+else
+    TLS_READY=0
+fi
+
+if [[ "$TLS_READY" == 1 ]]; then
+    pass "TLS-0 https subserver ready"
+    TLS_BASE="https://127.0.0.1:$TLS_PORT"
+    TLS_HEALTH_CODE=$(curl -sk --max-time 5 -o "$TMP/tls-health.json" \
+        -w '%{http_code}' "$TLS_BASE/health")
+    TLS_HEALTH=$(cat "$TMP/tls-health.json" 2>/dev/null || true)
+    if [[ "$TLS_HEALTH_CODE" == 200 && "$TLS_HEALTH" == *healthy* ]]; then
+        pass "TLS-1 HTTPS /health 200 + body"
+    else
+        fail "TLS-1 HTTPS /health 200 + body" "code=$TLS_HEALTH_CODE body=${TLS_HEALTH:0:200}"
+    fi
+
+    TLS_POST=$(curl -skS --max-time 5 -H 'Content-Type: application/json' \
+        -d '{"name":"tls-e2e","price":7.25}' "$TLS_BASE/items")
+    if [[ "$TLS_POST" == *'"item_name": "tls-e2e"'* && "$TLS_POST" == *'"item_price": "7.25"'* ]]; then
+        pass "TLS-2 HTTPS POST JSON"
+    else
+        fail "TLS-2 HTTPS POST JSON" "body=${TLS_POST:0:240}"
+    fi
+
+    TLS_KA=$(curl -sk --max-time 10 --http1.1 \
+        -o /dev/null -o /dev/null -o /dev/null -o /dev/null -o /dev/null \
+        -w '%{num_connects}' \
+        "$TLS_BASE/health?ka=1" "$TLS_BASE/health?ka=2" \
+        "$TLS_BASE/health?ka=3" "$TLS_BASE/health?ka=4" \
+        "$TLS_BASE/health?ka=5")
+    if [[ "$TLS_KA" == 10000 ]]; then
+        pass "TLS-3 HTTPS keep-alive reuses one connection"
+    else
+        fail "TLS-3 HTTPS keep-alive reuses one connection" "connect vector=$TLS_KA"
+    fi
+
+    TLS_H2=$(curl -skSI --max-time 5 --http2 "$TLS_BASE/health" 2>/dev/null)
+    if [[ "$TLS_H2" == HTTP/2\ * ]]; then
+        pass "TLS-4 ALPN negotiates HTTP/2"
+    else
+        fail "TLS-4 ALPN negotiates HTTP/2" "headers=${TLS_H2:0:200}"
+    fi
+
+    TLS_PROTO=$(curl -sksv --max-time 5 --http1.1 -o /dev/null \
+        "$TLS_BASE/health" 2>&1 | grep 'SSL connection using' | tail -1)
+    if [[ "$TLS_PROTO" == *TLSv1.3* ]]; then
+        pass "TLS-5 negotiates TLS 1.3"
+    else
+        fail "TLS-5 negotiates TLS 1.3" "proto=${TLS_PROTO:-none}"
+    fi
+
+    if ! curl -sk --max-time 5 --tls-max 1.2 --http1.1 \
+        "$TLS_BASE/health" >/dev/null 2>&1; then
+        pass "TLS-6 TLS 1.2 boundary rejects handshake"
+    else
+        fail "TLS-6 TLS 1.2 boundary rejects handshake" "unexpected successful TLS 1.2 handshake"
+    fi
+
+    TLS_PLAIN=$(curl -sS --max-time 3 --http1.1 \
+        "http://127.0.0.1:$TLS_PORT/health" 2>&1)
+    if [[ $? -ne 0 && "$TLS_PLAIN" != HTTP/1.1* ]]; then
+        pass "TLS-7 plaintext HTTP rejected"
+    else
+        fail "TLS-7 plaintext HTTP rejected" "got=${TLS_PLAIN:0:200}"
+    fi
+
+    kill -TERM "$TLS_PID" 2>/dev/null || true
+    wait "$TLS_PID" 2>/dev/null
+    TLS_EXIT=$?
+    if [[ "$TLS_EXIT" == 0 ]] && ! kill -0 "$TLS_PID" 2>/dev/null; then
+        pass "TLS-8 SIGTERM graceful exit"
+    else
+        fail "TLS-8 SIGTERM graceful exit" "exit=$TLS_EXIT"
+    fi
+    TLS_PID=""
+else
+    fail "TLS-0 https subserver ready" "log=$(tail -5 "$TLS_LOG" 2>/dev/null)"
+fi
+
+# Fail closed when TLS is explicitly requested but invalid (no partial HTTP listener).
+printf 'not a certificate\n' >"$TMP/tls-invalid-cert.pem"
+( cd "$SRC" && exec env FASTAPI_MOJO_WORKERS=1 \
+    FASTAPI_MOJO_TLS_CERT="$TMP/tls-invalid-cert.pem" \
+    FASTAPI_MOJO_TLS_KEY="$TLS_KEY" \
+    "$BIN" --port "$TLS_INVALID_PORT" >"$TLS_INVALID_LOG" 2>&1 ) &
+TLS_INVALID_PID=$!
+TLS_INVALID_HUNG=0
+for _ in $(seq 1 30); do
+    kill -0 "$TLS_INVALID_PID" 2>/dev/null || break
+    sleep 0.1
+done
+if kill -0 "$TLS_INVALID_PID" 2>/dev/null; then
+    TLS_INVALID_HUNG=1
+    kill -TERM "$TLS_INVALID_PID" 2>/dev/null || true
+    sleep 0.3
+    kill -9 "$TLS_INVALID_PID" 2>/dev/null || true
+fi
+wait "$TLS_INVALID_PID" 2>/dev/null
+TLS_INVALID_EXIT=$?
+TLS_INVALID_PID=""
+if [[ "$TLS_INVALID_HUNG" == 0 && "$TLS_INVALID_EXIT" -ne 0 ]] && grep -q 'TLS configuration failed' "$TLS_INVALID_LOG"; then
+    pass "TLS-9 invalid config fails closed"
+else
+    fail "TLS-9 invalid config fails closed" "hung=$TLS_INVALID_HUNG exit=$TLS_INVALID_EXIT log=$(tail -3 "$TLS_INVALID_LOG")"
+fi
 
 # --- summary ---------------------------------------------------------------------
 
