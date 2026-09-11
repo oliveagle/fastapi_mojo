@@ -20,6 +20,8 @@ def _type_to_openapi(t: String) -> String:
     if t == "int": return "integer"
     if t == "float": return "number"
     if t == "bool": return "boolean"
+    if t == "obj": return "object"
+    if t == "arr": return "array"
     return "string"  # default
 
 
@@ -53,9 +55,59 @@ def _openapi_default_value(fs: FieldSpec) raises -> String:
     return "\"" + json_escape(d) + "\""
 
 
+def _body_numeric_fragments(cons: String) raises -> List[String]:
+    """Body numeric constraints -> OpenAPI 3.0 fragments (same boolean
+    exclusive encoding as parameter schemas in ADR-0029)."""
+    var out = List[String]()
+    var min_value = ""
+    var min_exclusive = False
+    var max_value = ""
+    var max_exclusive = False
+    for c in _split_top(cons, 44):
+        var ct = _trim(c)
+        if ct.startswith("gt="):
+            min_value = String(ct[byte=3:ct.byte_length()])
+            min_exclusive = True
+        elif ct.startswith("ge="):
+            if min_value == "":
+                min_value = String(ct[byte=3:ct.byte_length()])
+        elif ct.startswith("lt="):
+            max_value = String(ct[byte=3:ct.byte_length()])
+            max_exclusive = True
+        elif ct.startswith("le="):
+            if max_value == "":
+                max_value = String(ct[byte=3:ct.byte_length()])
+    if min_value != "":
+        out.append("\"minimum\":" + min_value)
+        if min_exclusive:
+            out.append("\"exclusiveMinimum\":true")
+    if max_value != "":
+        out.append("\"maximum\":" + max_value)
+        if max_exclusive:
+            out.append("\"exclusiveMaximum\":true")
+    return out^
+
+
 def _openapi_field_schema(fs: FieldSpec) raises -> String:
     """单字段 schema (决策-38): type/format/enum/min-maxItems/min-maxLength/default."""
     var sb = StringBuilder()
+    # Decision-61: an array of models uses the recursive object schema as its
+    # OpenAPI `items` value; array size/default constraints remain outer-level.
+    if fs.is_array and fs.elem == "obj" and fs.nested_spec != "":
+        sb.append("{\"type\":\"array\",\"items\":" + _openapi_object_schema(fs.nested_spec))
+        for c in _split_top(fs.constraints, 44):
+            var ct = _trim(c)
+            if ct.startswith("items="):
+                var pr = _parse_range(String(ct[byte=6:ct.byte_length()]))
+                if pr[0]:
+                    if pr[1] > 0:
+                        sb.append(",\"minItems\":" + String(pr[1]))
+                    if pr[2] > 0:
+                        sb.append(",\"maxItems\":" + String(pr[2]))
+        if fs.has_default():
+            sb.append(",\"default\":" + _openapi_default_value(fs))
+        sb.append("}")
+        return sb.take()
     if fs.is_array:
         # Decision-58: elem-level constraints live INSIDE the items schema;
         # minItems/maxItems stay on the array schema (outer level).
@@ -75,19 +127,8 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
                 if ct3.startswith("pat="):
                     sb.append(",\"pattern\":\"" + json_escape(String(ct3[byte=4:ct3.byte_length()])) + "\"")
         elif fs.elem == "int" or fs.elem == "float":
-            for k4 in _split_top("ge,le,gt,lt", 44):
-                var kk = _trim(k4)
-                var oa = "minimum"
-                if kk == "le":
-                    oa = "maximum"
-                if kk == "gt":
-                    oa = "exclusiveMinimum"
-                if kk == "lt":
-                    oa = "exclusiveMaximum"
-                for c5 in _split_top(fs.constraints, 44):
-                    var ct5 = _trim(c5)
-                    if ct5.startswith(kk + "="):
-                        sb.append(",\"" + oa + "\":" + String(ct5[byte=3:ct5.byte_length()]))
+            for f in _body_numeric_fragments(fs.constraints):
+                sb.append("," + f)
         sb.append("}")
         for c in _split_top(fs.constraints, 44):
             var ct = _trim(c)
@@ -115,6 +156,9 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
         sb.append(",\"format\":\"int32\"")
     if fs.type_name == "float":
         sb.append(",\"format\":\"double\"")
+    if fs.type_name == "int" or fs.type_name == "float":
+        for f in _body_numeric_fragments(fs.constraints):
+            sb.append("," + f)
     if fs.type_name == "str":
         for c in _split_top(fs.constraints, 44):
             var ct = _trim(c)

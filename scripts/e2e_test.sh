@@ -1093,6 +1093,27 @@ expect_body_contains "BP-2i elem ge 422 type" "greater_than_equal" "$BASE/valida
 expect_body_contains "BP-2j openapi items minLength+pattern" '"items":{"type":"string","minLength":1,"maxLength":3,"pattern":"^[a-z0-9]+$"}' "$BASE/openapi.json"
 expect_body_contains "BP-2k openapi items minimum" '"minimum":0' "$BASE/openapi.json"
 
+# Decision-61: recursive body schemas, including every element of obj[]{...}.
+JS_VALID='{"root":"nest","models":[{"id":7,"tag":"ab"},{"id":9,"tag":"xyz"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_code "JS-1a nested schema valid -> 200" 200 "$BASE/validate/nested" POST "$JS_VALID"
+expect_body_contains "JS-1b object-array element value" '"body_models_0_id": "7"' "$BASE/validate/nested" POST "$JS_VALID"
+expect_body_contains "JS-1c deep nested object value" '"body_profile_address_city": "Shanghai"' "$BASE/validate/nested" POST "$JS_VALID"
+expect_code "JS-2a nested array missing field -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-2b nested array field loc" '["body","models",0,"id"]' "$BASE/validate/nested" POST '{"root":"nest","models":[{"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-2c nested array input is element" '"input":{"tag":"ab"}' "$BASE/validate/nested" POST '{"root":"nest","models":[{"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_code "JS-3a nested array wrong type -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"7","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-3b nested array int_parsing" '"type":"int_parsing"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"7","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_code "JS-4a nested array constraint -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":0,"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-4b nested array greater_than_equal" '"type":"greater_than_equal"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":0,"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_code "JS-5a object-array max items -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":1,"tag":"ab"},{"id":2,"tag":"cd"},{"id":3,"tag":"ef"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-5b object-array too_long" '"type":"too_long"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":1,"tag":"ab"},{"id":2,"tag":"cd"},{"id":3,"tag":"ef"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_code "JS-6a non-object array element -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[7],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-6b object-array model_type" '"type":"model_type"' "$BASE/validate/nested" POST '{"root":"nest","models":[7],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_code "JS-7a deep object missing -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":1,"tag":"ab"}],"profile":{"email":"a@b.co","address":{}}}'
+expect_body_contains "JS-7b deep object loc" '["body","profile","address","city"]' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":1,"tag":"ab"}],"profile":{"email":"a@b.co","address":{}}}'
+expect_body_contains "JS-8a OpenAPI obj[] recursive item schema" '"items":{"type":"object","properties":{"id":{"type":"integer","format":"int32","minimum":1}' "$BASE/openapi.json"
+expect_body_contains "JS-8b OpenAPI object-array sizes" '"minItems":1,"maxItems":2' "$BASE/openapi.json"
+
 # --- GZip 中间件 (决策-40, ADR-0015, Goal-0003 P2 矩阵 #24) -----------------------
 # FastAPI/Starlette GZipMiddleware 声明式 env 等价形态: FASTAPI_MOJO_GZIP=1 启用
 # (默认关 = FastAPI 默认) + MIN_SIZE (默认 500, 对齐 Starlette) + MAX_SIZE (1MiB).

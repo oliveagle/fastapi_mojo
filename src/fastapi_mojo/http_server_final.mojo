@@ -35,6 +35,7 @@ from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder,
 from ws_session import run_ws_upgrade, handle_ws_data
 from ws_directives import check_ws_specs  # 决策-51 (ADR-0026)
 from ws_protocol_routes import register_ws_protocol_routes  # 决策-60 (ADR-0035)
+from body_schema_routes import register_body_schema_routes  # 决策-38/57/58/61
 from security import AuthResult, check_auth, _get_header
 from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii, missing_err_json)
 from file_form_check import validate_file_vs_form, file_part_fields
@@ -582,33 +583,9 @@ def register_routes(mut router: Router) raises:
     ws_api.add_ws_route("/echo", Handler(KIND_WS_ECHO(), "ws_api_echo"))
     router.include_router(ws_api)
 
-    # 决策-38 (Goal-0003 P1, T-P1d+T-P1e): Pydantic 式 body 校验 + Field 约束 + Enum.
-    # _body_schema 声明式: name:type[=default][|约束]; 类型 str/int/float/bool/obj/arr/
-    # T[](数组)/T[enum 值]/obj{嵌套}; 约束 gt/ge/lt/le/len=N-M/items=N-M.
-    # 失败 -> 422 + FastAPI detail 数组 (loc/msg/type); 成功 -> 注入 body_<name> (含默认值).
-    var val_h = Handler(KIND_ECHO(), "validate_item")
-    val_h.set_data("message", "validated item")
-    val_h.set_data("_body_schema",
-        "name:str;price:float|gt=0;quantity:int=10;mode:str[fast,slow]=fast;tags:str[]|items=0-5;meta:obj{city:str|len=2-6;zip:int=0}")
-    router.add_route("/validate", "POST", val_h)
-
-    # 决策-57 (Goal-0003): body pat=REGEX 约束 (bridge/regex.rs) —
-    # 有效 -> 200 + body_code; 无效 -> 422 string_pattern_mismatch; OpenAPI 输出 pattern.
-    var pat_h = Handler(KIND_ECHO(), "body_pat")
-    pat_h.set_data("message", "body pattern demo")
-    pat_h.set_data("_body_schema", "code:str|pat=^[a-z0-9]+$")
-    router.add_route("/bs/pat", "POST", pat_h)
-    # 决策-57: PATCH + body 解析 (ADR-0014 既有偏差闭环: dispatch body 解析扩展 POST/PUT/PATCH).
-    var patch_h = Handler(KIND_ECHO(), "body_patch")
-    patch_h.set_data("message", "patch body demo")
-    patch_h.set_data("_body_schema", "note:str")
-    router.add_route("/bs/patch", "PATCH", patch_h)
-
-    # Decision-58 (Goal-0003): array elem-level constraints (pat/len per str elem; ge per int elem; OpenAPI into items).
-    var elem_h = Handler(KIND_ECHO(), "validate_elems")
-    elem_h.set_data("message", "elem constraints demo")
-    elem_h.set_data("_body_schema", "items:str[]|items=0-5,len=1-3,pat=^[a-z0-9]+$;nums:int[]|items=0-3,ge=0")
-    router.add_route("/validate/elems", "POST", elem_h)
+    # 决策-38/57/58/61: declarative body schema routes live in
+    # body_schema_routes.mojo (including nested object arrays).
+    register_body_schema_routes(router)
 
     # Enum 参数 (T-P1e): query 参数声明 T[values] (+ 可选 =default).
     var enum_h = Handler(KIND_ECHO(), "enum_demo")

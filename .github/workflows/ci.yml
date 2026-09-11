@@ -5,7 +5,7 @@
 #   2. ldd 断言：仅 libc + 内核组件（禁 libstdc++/libgcc_s/libm/Python/运行时 .so）
 #   3. 干净环境（env -i）启动断言：无 Python / 无 LD_LIBRARY_PATH 即可服务
 #   4. 单元测试（各 .mojo 自检）
-#   5. e2e 集成测试（scripts/e2e_test.sh，479 项检查含 WebSocket（含 ADR-0007 增强 / ADR-0008 并发 / ADR-0009 精化 / ADR-0034 permessage-deflate / ADR-0035 WS 子协议矩阵）+ 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）+ TestClient TC（ADR-0031），CI 可重复）
+#   5. e2e 集成测试（scripts/e2e_test.sh，497 项检查含 WebSocket（含 ADR-0007 增强 / ADR-0008 并发 / ADR-0009 精化 / ADR-0034 permessage-deflate / ADR-0035 WS 子协议矩阵）+ 嵌套 JSON Schema JS（ADR-0036）+ 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）+ TestClient TC（ADR-0031），CI 可重复）
 #
 # 依赖：Mojo 1.0.0（pip install "mojo==1.0.0"，装出 site-packages/modular/ namespace 包）、gcc、binutils、curl
 name: CI
@@ -167,15 +167,16 @@ jobs:
           # 的 JIT 会话加载不了 Rust staticlib → "Symbols not found"（本机与
           # CI 同款失败，pre-existing at HEAD，实测）。test_all 的 assert 本就是
           # compile-smoke（Mojo assert no-op, 决策-38）；真实行为覆盖 = e2e
-          # 套件（下方 479 项）+ Build single binary 全量编译，故此处移出。
+          # 套件（下方 497 项）+ Build single binary 全量编译，故此处移出。
           # 决策-54 (ADR-0029): params_typed import param_constraints —
           # check_str_constraints -> check_str_pattern -> FFI regex_match;
           # Mojo JIT 按"调用可达"闭包 materialize external_call 符号（含条件
           # 调用边; JIT env 无 bridge lib）→ 以 -Xlinker 注入桩 .so
           # （LD_PRELOAD 无效 — materialize 早于进程加载）。桩 body
           # abort-if-called: params_typed.main 只走 int/bool/enum/list/alias
-          # 路径（constraints=""）, 从不触发 pattern 分支 → 安全。其余 6 模块
-          # 不达 FFI（实测）→ 不需桩。
+          # 路径（constraints=""）, 从不触发 pattern 分支 → 安全。决策-61
+          # body_validate_test.mojo 同样只 materialize regex_match（测试不调用
+          # pattern 分支）。其余 7 个模块不达 FFI（实测）→ 不需桩。
           JIT_STUB="$(bash scripts/jit_stub.sh)"
           cd src/fastapi_mojo
           # 决策-55 (ADR-0030): mw_spec.mojo = FFI-free（仅 std.os）→ 普通 loop（无 -Xlinker 桩）。
@@ -185,6 +186,8 @@ jobs:
           done
           echo "=== mojo run params_typed.mojo (-Xlinker 桩: regex_match) ==="
           mojo run -Xlinker "$JIT_STUB" params_typed.mojo
+          echo "=== mojo run body_validate_test.mojo (-Xlinker 桩: regex_match) ==="
+          mojo run -Xlinker "$JIT_STUB" body_validate_test.mojo
           echo "PASS: all bridge-free unit tests (Mojo)"
 
       # ADR-0010: Rust bridge 单元测试. env 变体测试 (state_tests) 与 fork/signal
@@ -208,5 +211,5 @@ jobs:
           cargo build --release
           ./target/release/fmtool --help >/dev/null
 
-      - name: Run e2e suite (479 checks incl. WebSocket enhancements/concurrency/refinements/permessage-deflate/app-subprotocols + param constraint surface CP + user middleware MW + TestClient TC, CI-repeatable)
+      - name: Run e2e suite (497 checks incl. WebSocket enhancements/concurrency/refinements/permessage-deflate/app-subprotocols + nested JSON schemas + param constraint surface CP + user middleware MW + TestClient TC, CI-repeatable)
         run: ./scripts/e2e_test.sh
