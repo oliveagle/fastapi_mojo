@@ -57,7 +57,38 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
     """单字段 schema (决策-38): type/format/enum/min-maxItems/min-maxLength/default."""
     var sb = StringBuilder()
     if fs.is_array:
-        sb.append("{\"type\":\"array\",\"items\":{\"type\":\"" + _type_to_openapi(fs.elem) + "\"}")
+        # Decision-58: elem-level constraints live INSIDE the items schema;
+        # minItems/maxItems stay on the array schema (outer level).
+        sb.append("{\"type\":\"array\",\"items\":{\"type\":\"" + _type_to_openapi(fs.elem) + "\"")
+        if fs.elem == "str":
+            for c2 in _split_top(fs.constraints, 44):
+                var ct2 = _trim(c2)
+                if ct2.startswith("len="):
+                    var pr3 = _parse_range(String(ct2[byte=4:ct2.byte_length()]))
+                    if pr3[0]:
+                        if pr3[1] > 0:
+                            sb.append(",\"minLength\":" + String(pr3[1]))
+                        if pr3[2] > 0:
+                            sb.append(",\"maxLength\":" + String(pr3[2]))
+            for c3 in _split_top(fs.constraints, 44):
+                var ct3 = _trim(c3)
+                if ct3.startswith("pat="):
+                    sb.append(",\"pattern\":\"" + json_escape(String(ct3[byte=4:ct3.byte_length()])) + "\"")
+        elif fs.elem == "int" or fs.elem == "float":
+            for k4 in _split_top("ge,le,gt,lt", 44):
+                var kk = _trim(k4)
+                var oa = "minimum"
+                if kk == "le":
+                    oa = "maximum"
+                if kk == "gt":
+                    oa = "exclusiveMinimum"
+                if kk == "lt":
+                    oa = "exclusiveMaximum"
+                for c5 in _split_top(fs.constraints, 44):
+                    var ct5 = _trim(c5)
+                    if ct5.startswith(kk + "="):
+                        sb.append(",\"" + oa + "\":" + String(ct5[byte=3:ct5.byte_length()]))
+        sb.append("}")
         for c in _split_top(fs.constraints, 44):
             var ct = _trim(c)
             if ct.startswith("items="):

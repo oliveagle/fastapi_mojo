@@ -160,7 +160,7 @@ def _apply_constraints(fs: FieldSpec, raw: String, elem_count: Int, floc: String
                 errs.append(err_obj(floc, "Input should be less than " + fmt_num(cv[1]), "less_than", _json_input_frag(raw)))
             elif key == "le" and not (rv[1] <= cv[1]):
                 errs.append(err_obj(floc, "Input should be less than or equal to " + fmt_num(cv[1]), "less_than_equal", _json_input_frag(raw)))
-        elif key == "len":
+        elif key == "len" and not fs.is_array:
             var rl = raw.byte_length()
             var pr = _parse_range(val)
             if pr[0]:
@@ -180,6 +180,62 @@ def _apply_constraints(fs: FieldSpec, raw: String, elem_count: Int, floc: String
                 var ret = _body_rgx_match(val, raw)
                 if ret == 0:
                     errs.append(err_obj(floc, "String should match pattern '" + val + "'", "string_pattern_mismatch", _json_input_frag(raw)))
+
+
+def _strip_quotes(v: String) -> String:
+    """Strip outer JSON quotes of an elem raw: "\"abc\"" -> "abc" (unquoted if not quoted)."""
+    var n = v.byte_length()
+    if n >= 2 and ord(v[byte=0]) == 34 and ord(v[byte=n - 1]) == 34:
+        return String(v[byte=1:n - 1])
+    return v
+
+
+def _apply_elem_constraints(elem_t: String, e: String, fs: FieldSpec, eloc: String,
+                            mut errs: List[String]) raises:
+    """Decision-58: per-element constraints (pat/len -> str elem; gt/ge/lt/le -> int/float elem).
+    e = elem raw (str elems carry outer quotes -> stripped via _strip_quotes first);
+    eloc = '["body",<field>,<idx>]'. pat matching reuses the decision-57 _body_rgx_match
+    FFI (bridge/regex.rs). items key is field-level only (no-op here)."""
+    var cons = fs.constraints
+    if cons == "":
+        return
+    var unq = _strip_quotes(e)
+    for c in _split_top(cons, 44):
+        var ct = _trim(c)
+        if ct == "":
+            continue
+        var ck = _find_eq(ct)
+        var key = String(ct[byte=0:ck])
+        var val = String(ct[byte=ck + 1:ct.byte_length()])
+        if (key == "pat" or key == "len") and elem_t == "str":
+            if key == "pat":
+                var ret = _body_rgx_match(val, unq)
+                if ret == 0:
+                    errs.append(err_obj(eloc, "String should match pattern '" + val + "'", "string_pattern_mismatch", _json_input_frag(unq)))
+            else:
+                var rl = unq.byte_length()
+                var pr = _parse_range(val)
+                if pr[0]:
+                    if pr[1] > 0 and rl < pr[1]:
+                        errs.append(err_obj(eloc, "String should have at least " + String(pr[1]) + " character(s)", "string_too_short", _json_input_frag(unq)))
+                    if pr[2] > 0 and rl > pr[2]:
+                        errs.append(err_obj(eloc, "String should have at most " + String(pr[2]) + " character(s)", "string_too_long", _json_input_frag(unq)))
+        elif key == "gt" or key == "ge" or key == "lt" or key == "le":
+            if elem_t == "int" or elem_t == "float":
+                var rv = _parse_f64(e)
+                if not rv[0]:
+                    continue
+                var cv = _parse_f64(val)
+                if not cv[0]:
+                    continue
+                if key == "gt" and not (rv[1] > cv[1]):
+                    errs.append(err_obj(eloc, "Input should be greater than " + fmt_num(cv[1]), "greater_than", _json_input_frag(e)))
+                elif key == "ge" and not (rv[1] >= cv[1]):
+                    errs.append(err_obj(eloc, "Input should be greater than or equal to " + fmt_num(cv[1]), "greater_than_equal", _json_input_frag(e)))
+                elif key == "lt" and not (rv[1] < cv[1]):
+                    errs.append(err_obj(eloc, "Input should be less than " + fmt_num(cv[1]), "less_than", _json_input_frag(e)))
+                elif key == "le" and not (rv[1] <= cv[1]):
+                    errs.append(err_obj(eloc, "Input should be less than or equal to " + fmt_num(cv[1]), "less_than_equal", _json_input_frag(e)))
 
 
 def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: String,
@@ -225,9 +281,12 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
         if fs.is_array:
             var elems = _split_json_array(raw)
             for ei in range(len(elems)):
+                var eloc = floc + "," + String(ei) + "]"
                 var ec = _elem_check(fs.elem, elems[ei])
                 if not ec[0]:
-                    errs.append(err_obj(floc + "," + String(ei) + "]", ec[1], ec[2], _json_input_frag(elems[ei])))
+                    errs.append(err_obj(eloc, ec[1], ec[2], _json_input_frag(elems[ei])))
+                else:
+                    _apply_elem_constraints(fs.elem, elems[ei], fs, eloc, errs)
             _apply_constraints(fs, raw, len(elems), floc + "]", errs)
         elif fs.type_name == "obj" and fs.nested_spec != "":
             var sub = parse_body_json(raw)
@@ -274,19 +333,29 @@ def check_body_schemas(router: Router) raises:
 
 
 def _check_body_spec(spec: String) raises:
-    """递归校验 spec: parse + 决策-57 pat 约束仅 str 标量 (否则 raise)."""
+    """Recursive spec validation (decision-58 fail-fast): constraint key vs field type
+    mismatch -> raise at registration. pat/len: str scalar or str[] (elem-level, no enum);
+    gt/ge/lt/le: int/float scalar or int[]/float[] (elem-level); items: arrays only."""
     var s = parse_body_schema(spec)
     for i in range(field_count(s)):
         var fs = get_field(s, i)
-        var has_pat = False
         for c in _split_top(fs.constraints, 44):
-            if _trim(c).startswith("pat="):
-                has_pat = True
-        if has_pat and (fs.type_name != "str" or fs.is_array or fs.is_enum):
-            raise Error("body_schema: pat= 约束要求 str 标量字段 (field '" + fs.name + "')")
+            var ct = _trim(c)
+            if ct == "":
+                continue
+            var ck = _find_eq(ct)
+            var key = String(ct[byte=0:ck])
+            if key == "pat" or key == "len":
+                if fs.is_enum or not ((fs.type_name == "str" and not fs.is_array) or (fs.is_array and fs.elem == "str")):
+                    raise Error("body_schema: " + key + "= constraint requires a str field (field '" + fs.name + "')")
+            elif key == "gt" or key == "ge" or key == "lt" or key == "le":
+                if not (fs.type_name == "int" or fs.type_name == "float" or (fs.is_array and (fs.elem == "int" or fs.elem == "float"))):
+                    raise Error("body_schema: " + key + "= constraint requires an int/float field (field '" + fs.name + "')")
+            elif key == "items":
+                if not fs.is_array:
+                    raise Error("body_schema: items= constraint requires an array field (field '" + fs.name + "')")
         if fs.type_name == "obj" and fs.nested_spec != "":
             _check_body_spec(fs.nested_spec)
-
 
 # ---------- 自测 ----------
 
@@ -373,4 +442,26 @@ def main() raises:
     except:
         bad_pat = True
     check(bad_pat, "pat on int -> registration fail")
+    # Decision-58: elem-level constraints - registration fail-fast + elem len/ge (FFI-free; pat match via e2e).
+    _ = _check_body_spec("t:str[]|items=0-3,len=1-3,pat=^[a-z]+$")  # str[] + len/pat -> elem-level, registration ok
+    var bad_gt_arr = False
+    try:
+        _ = _check_body_spec("t:str[]|gt=0")
+    except:
+        bad_gt_arr = True
+    check(bad_gt_arr, "gt on str[] -> registration fail")
+    var bad_len_arr = False
+    try:
+        _ = _check_body_spec("t:int[]|len=1")
+    except:
+        bad_len_arr = True
+    check(bad_len_arr, "len on int[] -> registration fail")
+    var he = Handler(0, "validate_elems")
+    he.set_data("_body_schema", "items:str[]|items=0-3,len=1-2;nums:int[]|items=0-3,ge=0")
+    var q1 = validate_body_schema(he, "POST", parse_body_json('{"items":["a","bb"],"nums":[0,1]}'), "")
+    check(q1[0] and q1[2]["items"] == '["a","bb"]' and q1[2]["nums"] == "[0,1]", "elems valid + raw inject")
+    var q2 = validate_body_schema(he, "POST", parse_body_json('{"items":["abc"],"nums":[0]}'), "")
+    check(not q2[0] and _has(q2[1][0], "string_too_long") and _has(q2[1][0], '["body","items",0]'), "elem len fail (idx loc)")
+    var q3 = validate_body_schema(he, "POST", parse_body_json('{"items":["a"],"nums":[-1]}'), "")
+    check(not q3[0] and _has(q3[1][0], "greater_than_equal") and _has(q3[1][0], '["body","nums",0]'), "elem ge fail (idx loc)")
     print("Mojo body_schema (决策-38) test completed!")

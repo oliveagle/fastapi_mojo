@@ -1080,6 +1080,19 @@ expect_body_contains "BP-1e openapi body pattern" '"pattern":"^[a-z0-9]+$"' "$BA
 expect_code "PATCH-B1a PATCH + body -> 200" 200 "$BASE/bs/patch" PATCH '{"note":"hello"}'
 expect_body_contains "PATCH-B1b PATCH body echo note" '"body_note": "hello"' "$BASE/bs/patch" PATCH '{"note":"hello"}'
 
+# Decision-58: array elem-level constraints (pat/len per str elem; ge per int elem; OpenAPI into items)
+expect_code "BP-2a elem constraints valid -> 200" 200 "$BASE/validate/elems" POST '{"items":["abc"],"nums":[1,2]}'
+expect_body_contains "BP-2b elem valid echo items" '"body_items": "[\"abc\"]"' "$BASE/validate/elems" POST '{"items":["abc"],"nums":[1,2]}'
+expect_code "BP-2c elem pat fail (upper) -> 422" 422 "$BASE/validate/elems" POST '{"items":["ABC"],"nums":[0]}'
+expect_body_contains "BP-2d elem pat 422 type" "string_pattern_mismatch" "$BASE/validate/elems" POST '{"items":["ABC"],"nums":[0]}'
+expect_body_contains "BP-2e elem 422 loc index" '["body","items",0]' "$BASE/validate/elems" POST '{"items":["ABC"],"nums":[0]}'
+expect_code "BP-2f elem len fail (too long) -> 422" 422 "$BASE/validate/elems" POST '{"items":["abcd"],"nums":[0]}'
+expect_body_contains "BP-2g elem len 422 type" "string_too_long" "$BASE/validate/elems" POST '{"items":["abcd"],"nums":[0]}'
+expect_code "BP-2h elem ge fail (negative) -> 422" 422 "$BASE/validate/elems" POST '{"items":["a"],"nums":[-1]}'
+expect_body_contains "BP-2i elem ge 422 type" "greater_than_equal" "$BASE/validate/elems" POST '{"items":["a"],"nums":[-1]}'
+expect_body_contains "BP-2j openapi items minLength+pattern" '"items":{"type":"string","minLength":1,"maxLength":3,"pattern":"^[a-z0-9]+$"}' "$BASE/openapi.json"
+expect_body_contains "BP-2k openapi items minimum" '"minimum":0' "$BASE/openapi.json"
+
 # --- GZip 中间件 (决策-40, ADR-0015, Goal-0003 P2 矩阵 #24) -----------------------
 # FastAPI/Starlette GZipMiddleware 声明式 env 等价形态: FASTAPI_MOJO_GZIP=1 启用
 # (默认关 = FastAPI 默认) + MIN_SIZE (默认 500, 对齐 Starlette) + MAX_SIZE (1MiB).

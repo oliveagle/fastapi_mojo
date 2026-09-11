@@ -603,6 +603,12 @@ def register_routes(mut router: Router) raises:
     patch_h.set_data("_body_schema", "note:str")
     router.add_route("/bs/patch", "PATCH", patch_h)
 
+    # Decision-58 (Goal-0003): array elem-level constraints (pat/len per str elem; ge per int elem; OpenAPI into items).
+    var elem_h = Handler(KIND_ECHO(), "validate_elems")
+    elem_h.set_data("message", "elem constraints demo")
+    elem_h.set_data("_body_schema", "items:str[]|items=0-5,len=1-3,pat=^[a-z0-9]+$;nums:int[]|items=0-3,ge=0")
+    router.add_route("/validate/elems", "POST", elem_h)
+
     # Enum 参数 (T-P1e): query 参数声明 T[values] (+ 可选 =default).
     var enum_h = Handler(KIND_ECHO(), "enum_demo")
     enum_h.set_data("message", "enum demo")
