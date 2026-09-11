@@ -38,6 +38,7 @@ pub mod cors;
 pub mod ffi;
 pub mod conn;
 pub mod metrics;
+pub mod otel_traces;
 pub mod init_workers;
 pub mod io;
 pub mod parse;
@@ -120,3 +121,6 @@ mod regex_tests;
 
 #[cfg(test)]
 mod middleware_tests;
+
+#[cfg(test)]
+mod otel_traces_tests;

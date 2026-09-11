@@ -35,6 +35,9 @@ use super::io::{
 };
 use super::port::current_configured_port as port_current_configured_port;
 use super::metrics::{metrics_get_slice, metrics_init as bridge_metrics_init};
+use super::otel_traces::{
+    trace_record as otel_trace_record_inner, traces_get_slice as otel_traces_get_slice,
+};
 use super::request::{
     get_body_slice_inner, get_close_after_response as req_get_close_after_response,
     get_last_status_len as req_get_last_status_len, get_method_slice as req_get_method_slice,
@@ -288,6 +291,34 @@ pub extern "C" fn metrics_init() {
 #[no_mangle]
 pub extern "C" fn get_metrics_block() -> CSlice {
     let (len, ptr) = metrics_get_slice();
+    CSlice {
+        ptr: ptr as *const c_char,
+        len: len as c_long,
+    }
+}
+
+/// Decision-62: record one completed HTTP request into the bounded in-process
+/// OpenTelemetry trace ring. Recording is called by Mojo only when
+/// FASTAPI_MOJO_OTEL=1; this FFI remains allocation-light and cannot fail.
+#[no_mangle]
+pub extern "C" fn otel_trace_record(
+    method: *const c_char,
+    path: *const c_char,
+    query: *const c_char,
+    status: *const c_char,
+    duration_ms: c_long,
+) {
+    let m = unsafe { c_str_lossy(method) };
+    let p = unsafe { c_str_lossy(path) };
+    let q = unsafe { c_str_lossy(query) };
+    let s = unsafe { c_str_lossy(status) };
+    otel_trace_record_inner(&m, &p, &q, &s, duration_ms);
+}
+
+/// Decision-62: OTLP JSON-shaped in-memory trace export for GET /traces.
+#[no_mangle]
+pub extern "C" fn get_traces_block() -> CSlice {
+    let (len, ptr) = otel_traces_get_slice();
     CSlice {
         ptr: ptr as *const c_char,
         len: len as c_long,

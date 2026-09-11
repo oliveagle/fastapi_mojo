@@ -2511,6 +2511,65 @@ else
     fail "TC-9 testclient http 404" "rc=$TC9_RC out=$TC9_OUT"
 fi
 
+# Decision-62: staged OpenTelemetry traces — bounded per-process buffer +
+# OTLP JSON-shaped /traces export. FASTAPI_MOJO_OTEL=1 is opt-in.
+echo "== OpenTelemetry in-memory traces (决策-62) =="
+OTEL_PORT=$((PORT + 103))
+OTEL_LOG="$TMP/otel.log"
+( env FASTAPI_MOJO_WORKERS=1 FASTAPI_MOJO_OTEL=1 \
+    "$BIN" --port "$OTEL_PORT" > "$OTEL_LOG" 2>&1 ) &
+OTEL_PID=$!
+OTEL_READY=0
+for i in $(seq 1 50); do
+    if curl -fsS -m 1 "http://127.0.0.1:$OTEL_PORT/health" 2>/dev/null | grep -q healthy; then
+        OTEL_READY=1; break
+    fi
+    sleep 0.1
+done
+if [[ "$OTEL_READY" != "1" ]]; then
+    fail "OT-0 subserver ready" "log: $(tail -5 "$OTEL_LOG")"
+else
+    pass "OT-0 subserver ready"
+    curl -fsS -m 5 "http://127.0.0.1:$OTEL_PORT/items/42" >/dev/null
+    OTEL_TRACE_HEADERS=$(curl -sS -m 5 -D - -o "$TMP/traces.json" "http://127.0.0.1:$OTEL_PORT/traces")
+    OTEL_JSON=$(cat "$TMP/traces.json")
+    if [[ "$OTEL_TRACE_HEADERS" == *"Content-Type: application/json"* ]]; then
+        pass "OT-1 /traces returns JSON"
+    else
+        fail "OT-1 /traces returns JSON" "headers: $OTEL_TRACE_HEADERS"
+    fi
+    if [[ "$OTEL_JSON" == *'"resourceSpans"'* && "$OTEL_JSON" == *'"service.name"'* && "$OTEL_JSON" == *'"fastapi_mojo.bridge"'* ]]; then
+        pass "OT-2 OTLP resource/scope shape"
+    else
+        fail "OT-2 OTLP resource/scope shape" "body: ${OTEL_JSON:0:240}"
+    fi
+    if grep -Eq '"traceId":"[0-9a-f]{32}"' "$TMP/traces.json" && grep -Eq '"spanId":"[0-9a-f]{16}"' "$TMP/traces.json"; then
+        pass "OT-3 valid traceId/spanId widths"
+    else
+        fail "OT-3 valid traceId/spanId widths" "body: ${OTEL_JSON:0:240}"
+    fi
+    if [[ "$OTEL_JSON" == *'"key":"http.request.method","value":{"stringValue":"GET"}'* && "$OTEL_JSON" == *'"key":"url.path","value":{"stringValue":"/health"}'* ]]; then
+        pass "OT-4 health server span attributes"
+    else
+        fail "OT-4 health server span attributes" "body: ${OTEL_JSON:0:300}"
+    fi
+    OT4=$(grep -bo '"name":"GET /health"' <<<"$OTEL_JSON" | head -1 | cut -d: -f1)
+    OT5=$(grep -bo '"name":"GET /items/42"' <<<"$OTEL_JSON" | head -1 | cut -d: -f1)
+    if [[ -n "$OT4" && -n "$OT5" ]] && (( OT4 < OT5 )); then
+        pass "OT-5 span order + route path"
+    else
+        fail "OT-5 span order + route path" "offsets=${OT4:-?},${OT5:-?}; body: ${OTEL_JSON:0:300}"
+    fi
+fi
+kill -TERM "$OTEL_PID" 2>/dev/null || true
+wait "$OTEL_PID" 2>/dev/null || true
+OTEL_DISABLED=$(curl -sS -m 5 "$BASE/traces")
+if [[ "$OTEL_DISABLED" == *'"spans":[]'* ]]; then
+    pass "OT-6 disabled by default (empty export)"
+else
+    fail "OT-6 disabled by default" "body: ${OTEL_DISABLED:0:200}"
+fi
+
 # --- summary ---------------------------------------------------------------------
 
 

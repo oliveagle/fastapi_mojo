@@ -157,6 +157,32 @@ def _run_background(handler: Handler, req_id: String, method: String,
         i += 1
 
 
+def _finish_request(mw_chain: MiddlewareChain, req_id: String, method: String,
+                    path: String, query: String, status: String, duration_ms: Int):
+    """Single post-response telemetry hook: access log + optional OTel span.
+
+    Decision-62 keeps tracing at the server boundary so static, OpenAPI, WS
+    upgrade, middleware, route, and error paths share one completion semantic.
+    FASTAPI_MOJO_OTEL=1 turns on the bounded in-process trace ring.
+    """
+    mw_logging(mw_chain, req_id, method, path, query, status, duration_ms)
+    if getenv("FASTAPI_MOJO_OTEL") == "1":
+        var full_path = path
+        if query.byte_length() > 0:
+            full_path += "?" + query
+        var trace_method = method
+        var trace_path = full_path
+        var trace_query = query
+        var trace_status = status
+        _ = external_call["otel_trace_record", Int](
+            trace_method.as_c_string_slice(),
+            trace_path.as_c_string_slice(),
+            trace_query.as_c_string_slice(),
+            trace_status.as_c_string_slice(),
+            duration_ms,
+        )
+
+
 def inject_request_headers(mut params: Dict[String, String], header_names_csv: String):
     """F3a: 把 _reads_headers 声明的 header 名按名从 C 桥读出, 注入 params.
     key 前缀 header_<name>; 缺失 -> 空串. 保持 String-only (与现有 handler 兼容).
@@ -1119,7 +1145,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
             var mw_body = mw_r.block_body
             var mw_dur = mw_timing(mw_chain, start_ms)
             _ = external_call["send_text_response_status", Int](cfd, mw_sl.as_c_string_slice(), mw_body.as_c_string_slice())
-            mw_logging(mw_chain, req_id, method, mw_r.path, query, mw_sl, mw_dur)
+            _finish_request(mw_chain, req_id, method, mw_r.path, query, mw_sl, mw_dur)
             external_call["conn_done", NoneType](cfd, False)
             continue
 
@@ -1127,7 +1153,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
         if method == "OPTIONS":
             var duration_ms = mw_timing(mw_chain, start_ms)
             _ = external_call["send_preflight_response", Int](cfd)
-            mw_logging(mw_chain, req_id, method, path, query, "204 No Content", duration_ms)
+            _finish_request(mw_chain, req_id, method, path, query, "204 No Content", duration_ms)
             external_call["conn_done", NoneType](cfd, False)  # preflight response announces Connection: close
         elif external_call["is_ws_upgrade", Int]() == 1:
             # WebSocket upgrade (RFC 6455, ADR-0006/0007/0008): WS route lookup +
@@ -1141,14 +1167,14 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                 var duration_ms = mw_timing(mw_chain, start_ms)
                 if ws_status == 101:
                     ws_state[cfd] = 0  # 移交成功: 连接现为 WS 会话 (不 conn_done)
-                    mw_logging(mw_chain, req_id, method, path, query, "101 Switching Protocols", duration_ms)
+                    _finish_request(mw_chain, req_id, method, path, query, "101 Switching Protocols", duration_ms)
                     continue
                 var ws_sl = "400 Bad Request"
                 if ws_status == 403:
                     ws_sl = "403 Forbidden"
                 elif ws_status == 500:
                     ws_sl = "500 Internal Server Error"
-                mw_logging(mw_chain, req_id, method, path, query, ws_sl, duration_ms)
+                _finish_request(mw_chain, req_id, method, path, query, ws_sl, duration_ms)
                 external_call["conn_done", NoneType](cfd, False)
             else:
                 var ws_resp = build_error_response("404", "Route not found")
@@ -1156,7 +1182,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                 _ = external_call["send_simple_response", Int](
                     cfd, "404 Not Found".as_c_string_slice(), ws_body.as_c_string_slice())
                 var duration_ms = mw_timing(mw_chain, start_ms)
-                mw_logging(mw_chain, req_id, method, path, query, "404 Not Found", duration_ms)
+                _finish_request(mw_chain, req_id, method, path, query, "404 Not Found", duration_ms)
                 external_call["conn_done", NoneType](cfd, False)
         else:
             # Handle HEAD method (same as GET but no body)
@@ -1197,7 +1223,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                     extra_empty.as_c_string_slice(),  # empty extra (F4 openapi 无自定义头)
                 )
                 var duration_ms = mw_timing(mw_chain, start_ms)
-                mw_logging(mw_chain, req_id, method, path, query, "200 OK (openapi)", duration_ms)
+                _finish_request(mw_chain, req_id, method, path, query, "200 OK (openapi)", duration_ms)
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
                 else:
@@ -1216,7 +1242,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                     html.as_c_string_slice(),
                 )
                 var duration_ms_d = mw_timing(mw_chain, start_ms)
-                mw_logging(mw_chain, req_id, method, path, query, "200 OK (docs)", duration_ms_d)
+                _finish_request(mw_chain, req_id, method, path, query, "200 OK (docs)", duration_ms_d)
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
                 else:
@@ -1230,7 +1256,23 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                 _ = external_call["send_text_response", Int](
                     cfd, m_body.as_c_string_slice())
                 var duration_ms_m = mw_timing(mw_chain, start_ms)
-                mw_logging(mw_chain, req_id, method, path, query, "200 OK (metrics)", duration_ms_m)
+                _finish_request(mw_chain, req_id, method, path, query, "200 OK (metrics)", duration_ms_m)
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
+                continue
+
+            elif effective_method == "GET" and path == "/traces":
+                # Decision-62: bounded in-process OTLP JSON trace export. This
+                # response snapshots prior spans; the /traces request itself is
+                # recorded by the shared _finish_request hook after rendering.
+                var t_slice = external_call["get_traces_block", CStringSlice[origin_of(String(""))]]()
+                var t_body = span_to_str(t_slice.as_bytes())
+                _ = external_call["send_simple_response", Int](
+                    cfd, "200 OK".as_c_string_slice(), t_body.as_c_string_slice())
+                var duration_ms_t = mw_timing(mw_chain, start_ms)
+                _finish_request(mw_chain, req_id, method, path, query, "200 OK (traces)", duration_ms_t)
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
                 else:
@@ -1260,7 +1302,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         sl += chr(sb)
 
                 var duration_ms = mw_timing(mw_chain, start_ms)
-                mw_logging(mw_chain, req_id, method, path, query, sl + " (static)", duration_ms)
+                _finish_request(mw_chain, req_id, method, path, query, sl + " (static)", duration_ms)
 
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
@@ -1540,7 +1582,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                             cfd, gres.status_line.as_c_string_slice(),
                                             gres.body.as_c_string_slice())
                                     var exc_dur = mw_timing(mw_chain, start_ms)
-                                    mw_logging(mw_chain, req_id, method, path, query,
+                                    _finish_request(mw_chain, req_id, method, path, query,
                                                gres.status_line + " (exc)", exc_dur)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
@@ -1585,7 +1627,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                             st_media.as_c_string_slice(),
                                             st_extra.as_c_string_slice())
                                         var st_dur = mw_timing(mw_chain, start_ms)
-                                        mw_logging(mw_chain, req_id, method, path, query,
+                                        _finish_request(mw_chain, req_id, method, path, query,
                                                    st_status + " (stream)", st_dur)
                                         if external_call["get_close_after_response", Int]() != 0:
                                             external_call["conn_done", NoneType](cfd, False)
@@ -1611,7 +1653,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                         cfd, sse_status.as_c_string_slice(),
                                         sse_body.as_c_string_slice(), sse_extra.as_c_string_slice())
                                     var sse_dur = mw_timing(mw_chain, start_ms)
-                                    mw_logging(mw_chain, req_id, method, path, query, sse_status + " (sse)", sse_dur)
+                                    _finish_request(mw_chain, req_id, method, path, query, sse_status + " (sse)", sse_dur)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
                                     else:
@@ -1651,7 +1693,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                         fstatus.as_c_string_slice(),
                                         fextra.as_c_string_slice())
                                     var fdur = mw_timing(mw_chain, start_ms)
-                                    mw_logging(mw_chain, req_id, method, path, query,
+                                    _finish_request(mw_chain, req_id, method, path, query,
                                                fstatus + " (file)", fdur)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
@@ -1683,7 +1725,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                     else:
                         _ = external_call["send_html_response", Int](
                             cfd, status_line.as_c_string_slice(), html_body.as_c_string_slice())
-                    mw_logging(mw_chain, req_id, method, path, query, status_line, duration_ms)
+                    _finish_request(mw_chain, req_id, method, path, query, status_line, duration_ms)
                     if external_call["get_close_after_response", Int]() != 0:
                         external_call["conn_done", NoneType](cfd, False)
                     else:
@@ -1752,7 +1794,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         )
 
 
-                mw_logging(mw_chain, req_id, method, path, query, status_line, duration_ms)
+                _finish_request(mw_chain, req_id, method, path, query, status_line, duration_ms)
 
                 # F11: BackgroundTasks 在响应已 flush 后同步执行声明的命令
                 # (对齐 Starlette BackgroundTask 语义, 客户端已收到响应).
