@@ -14,6 +14,7 @@ from params_json import parse_body_json
 from json import json_escape
 from std.ffi import external_call, CStringSlice
 from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
+from numlit import parse_typed_value
 
 def _body_rgx_match(pattern: String, s: String) -> Int:
     """决策-57 FFI: regex_match(pattern, s) -> 1=match / 0=no / -1=编译失败 (bridge/regex.rs)."""
@@ -264,11 +265,12 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
         elif fs.type_name == "str":
             ok_t = t == "string"
         elif fs.type_name == "int":
-            ok_t = t == "int"
+            # 决策-81 (ADR-0056): pydantic lax — JSON string 也可 ("007" -> 7)
+            ok_t = t == "int" or t == "string"
         elif fs.type_name == "float":
-            ok_t = t == "int" or t == "float"
+            ok_t = t == "int" or t == "float" or t == "string"
         elif fs.type_name == "bool":
-            ok_t = t == "bool"
+            ok_t = t == "bool" or t == "string"
         elif fs.type_name == "obj":
             ok_t = t == "object"
         elif fs.type_name == "arr":
@@ -289,6 +291,18 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
                 errs.append(scalar_error_object(floc + "]", sv, sp))
                 continue
             out[key] = raw
+            continue
+        if (fs.type_name == "int" or fs.type_name == "float" or fs.type_name == "bool") and not fs.is_array:
+            # 决策-81 (ADR-0056): 标量规范化 (pydantic lax) — 值 = parse_typed_value
+            # 结果 (JSON string "007" -> 7 / JSON 数字 1.50 -> 1.5); 解析失败 ->
+            # 与上游同款 parse 错误 (int/float/bool_parsing).
+            var spr = parse_typed_value(fs.type_name, raw)
+            if not spr[0]:
+                var ste = _type_err(fs)
+                errs.append(err_obj(floc + "]", ste[0], ste[1], _json_input_frag(raw)))
+                continue
+            out[key] = spr[1]
+            _apply_constraints(fs, raw, -1, floc + "]", errs)
             continue
         out[key] = raw
         if fs.is_array:
@@ -320,6 +334,18 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
                 else:
                     _apply_elem_constraints(fs.elem, elems[ei], fs, eloc, errs)
             _apply_constraints(fs, raw, len(elems), floc + "]", errs)
+            if fs.elem == "int" or fs.elem == "float" or fs.elem == "bool":
+                # 决策-81: int/float/bool 数组元素规范化 (JSON 文本重建)
+                var rebuilt = "["
+                for er in range(len(elems)):
+                    var ce = elems[er]
+                    var epr = parse_typed_value(fs.elem, ce)
+                    if epr[0]:
+                        ce = epr[1]
+                    if er > 0:
+                        rebuilt += ","
+                    rebuilt += ce
+                out[key] = rebuilt + "]"
         elif fs.type_name == "obj" and fs.nested_spec != "":
             var sub = parse_body_json(raw)
             if sub.has_error:

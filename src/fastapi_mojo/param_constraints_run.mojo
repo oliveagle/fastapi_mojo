@@ -17,7 +17,31 @@ from numlit import (parse_type_spec, parse_base, parse_typed_value,
 from json import json_escape
 from param_constraints import (_pe, _pe_ctx, _rgx_match, parse_constraint_entry,
                                check_num_constraints, check_str_constraints)
+from params_query_extra import split_csv, join_values
 from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
+
+def _canon_hdr(type_name: String, v: String) -> String:
+    """决策-81 (ADR-0056): int/float/bool header 值规范化 (失败 -> 原样)."""
+    if type_name == "int" or type_name == "float" or type_name == "bool":
+        var pr = parse_typed_value(type_name, v)
+        if pr[0]:
+            return pr[1]
+    return v
+
+
+def _canon_hdr_csv(type_name: String, csv: String) raises -> String:
+    """决策-81: int/float/bool list header CSV 逐元素规范化 (空串原样)."""
+    if csv == "":
+        return csv
+    var out = List[String]()
+    for part in split_csv(csv):
+        var pr = parse_typed_value(type_name, part)
+        if pr[0]:
+            out.append(pr[1])
+        else:
+            out.append(part)
+    return join_values(out^)
+
 
 def _hdr_parse_err(loc: String, type_name: String, raw: String) -> String:
     """parse 失败 422 (完整上游消息 §3.4; bool = 三面对齐完整串, 决策-54 §3.4)."""
@@ -85,7 +109,7 @@ def validate_headers_collect(header_types: Dict[String, String],
             if not parse_typed_value(pb.type_name, raw)[0]:
                 errs.append(_hdr_parse_err(loc, pb.type_name, raw))
                 continue
-            vals[name] = raw
+            vals[name] = _canon_hdr_csv(pb.type_name, raw)
             continue
         if pb.is_enum:
             if not enum_in(raw, pb.values_csv):
@@ -114,7 +138,7 @@ def validate_headers_collect(header_types: Dict[String, String],
                 if not cr2[0]:
                     errs.append(_pe_ctx(loc, cr2[1], cr2[2], "\"" + json_escape(raw) + "\"", cr2[3]))
         if cont:
-            vals[name] = raw
+            vals[name] = _canon_hdr(pb.type_name, raw)
     return (len(errs) == 0, errs^, vals^)
 
 

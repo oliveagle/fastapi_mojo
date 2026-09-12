@@ -77,13 +77,170 @@ def is_float_literal(s: String) -> Bool:
     return seen_dot or seen_exp
 
 
+def _lower_ascii(s: String) -> String:
+    """ASCII lowercase (only A-Z folded; other bytes copied verbatim)."""
+    var out = String("")
+    for i in range(s.byte_length()):
+        var c = ord(s[byte=i])
+        if c >= 65 and c <= 90:
+            out += chr(c + 32)
+        else:
+            out += chr(c)
+    return out^
+
+
 def parse_bool_literal(s: String) -> Tuple[Bool, Bool]:
-    """Parse bool literal -> (ok, value). Accepts true/false/True/False/1/0."""
-    if s == "true" or s == "True" or s == "1":
+    """Parse bool literal -> (ok, value). pydantic lax set (大小写不敏感):
+    true/t/yes/y/on/1 -> True; false/f/no/n/off/0 -> False (决策-81)."""
+    var l = _lower_ascii(s)
+    if l == "true" or l == "t" or l == "yes" or l == "y" or l == "on" or l == "1":
         return (True, True)
-    if s == "false" or s == "False" or s == "0":
+    if l == "false" or l == "f" or l == "no" or l == "n" or l == "off" or l == "0":
         return (True, False)
     return (False, False)
+
+
+def parse_int_lax(s: String) -> Tuple[Bool, String]:
+    """pydantic 宽松 int 字符串解析 -> (ok, 规范化十进制) (决策-81).
+
+    接受 [+-]? 数字 (允许 Python 式 '_' 数字分隔, 必须夹在数字之间);
+    另接**整值小数** [+-]? 数字 '.' 0+ (上游 pydantic v2: "2.0"->2, "12.00"->12,
+    但 "2."/"2.5"/"1e2" -> int_parsing; 见 ADR-0056 §4). 规范化: 去 '+'/前导零 /
+    '-0'->'0' / 丢弃全零小数部分."""
+    var n = s.byte_length()
+    if n == 0:
+        return (False, "")
+    var i = 0
+    var neg = False
+    var c0 = ord(s[byte=0])
+    if c0 == 43 or c0 == 45:  # '+' '-'
+        neg = (c0 == 45)
+        i = 1
+    if i >= n:
+        return (False, "")
+    var digits = List[Int]()
+    var prev_digit = False
+    var seen_dot = False
+    var frac_any = False
+    var frac_all_zero = True
+    while i < n:
+        var c = ord(s[byte=i])
+        if c == 95:  # '_'
+            if not prev_digit or seen_dot:
+                return (False, "")
+            prev_digit = False
+        elif c >= 48 and c <= 57:
+            if seen_dot:
+                frac_any = True
+                if c != 48:
+                    frac_all_zero = False
+            else:
+                digits.append(c - 48)
+            prev_digit = True
+        elif c == 46 and not seen_dot and prev_digit:  # '.'
+            seen_dot = True
+            prev_digit = False
+        else:
+            return (False, "")
+        i += 1
+    if not prev_digit or len(digits) == 0:
+        return (False, "")
+    if seen_dot and (not frac_any or not frac_all_zero):
+        return (False, "")
+    var k = 0
+    while k < len(digits) - 1 and digits[k] == 0:
+        k += 1
+    var body = String("")
+    for j in range(k, len(digits)):
+        body += chr(48 + digits[j])
+    if neg and body != "0":
+        return (True, "-" + body)
+    return (True, body)
+
+
+def parse_float_lax(s: String) -> Tuple[Bool, String]:
+    """pydantic 宽松 float 字符串解析 -> (ok, Python repr 等价规范化) (决策-81).
+
+    接受 [+-]? (数字[_]* ['.' 数字[_]*]? | '.' 数字[_]+) [eE[+-]?数字[_]+]?;
+    另接 inf/infinity/nan (大小写不敏感, 带符号); 也接纯 int 字面量 (上游
+    float("42") -> 42.0). 规范化 = Float64 -> String (与 CPython repr 一致:
+    1.0->"1.0", 1.50->"1.5", 1e3->"1000.0", -0.0->"-0.0")."""
+    var n = s.byte_length()
+    if n == 0:
+        return (False, "")
+    var i = 0
+    var sign = ""
+    var c0 = ord(s[byte=0])
+    if c0 == 43 or c0 == 45:
+        if c0 == 45:
+            sign = "-"
+        i = 1
+    # inf / infinity / nan 家族
+    var rest = _lower_ascii(String(s[byte=i:n]))
+    if rest == "inf" or rest == "infinity":
+        return (True, sign + "inf")
+    if rest == "nan":
+        return (True, "nan")
+    # 数值文法校验 (记录是否为合法十进制)
+    var seen_digit = False
+    var seen_dot = False
+    var seen_exp = False
+    var last_us = False
+    var j = i
+    while j < n:
+        var c = ord(s[byte=j])
+        if c == 95:  # '_'
+            if not seen_digit or last_us:
+                return (False, "")
+            last_us = True
+        elif c >= 48 and c <= 57:
+            seen_digit = True
+            last_us = False
+        elif c == 46:  # '.'
+            if seen_dot or seen_exp:
+                return (False, "")
+            seen_dot = True
+            last_us = False
+        elif c == 101 or c == 69:  # 'e' 'E'
+            if seen_exp or not seen_digit or last_us:
+                return (False, "")
+            var k = j + 1
+            if k < n and (ord(s[byte=k]) == 43 or ord(s[byte=k]) == 45):
+                k += 1
+            if k >= n:
+                return (False, "")
+            var eprev = False
+            var eus = False
+            while k < n:
+                var e2 = ord(s[byte=k])
+                if e2 == 95:
+                    if not eprev or eus:
+                        return (False, "")
+                    eus = True
+                elif e2 >= 48 and e2 <= 57:
+                    eprev = True
+                    eus = False
+                else:
+                    return (False, "")
+                k += 1
+            if not eprev:
+                return (False, "")
+            break
+        else:
+            return (False, "")
+        j += 1
+    if not seen_digit or last_us:
+        return (False, "")
+    # 去掉 '_' 后交给 Float64 (Mojo 不认 '_')
+    var cleaned = String("")
+    for t in range(i, n):
+        if ord(s[byte=t]) != 95:
+            cleaned += chr(ord(s[byte=t]))
+    try:
+        var v = Float64(cleaned)
+        return (True, String(v))
+    except:
+        return (False, "")
 
 
 def parse_f64(s: String) raises -> Tuple[Bool, Float64]:
@@ -271,15 +428,12 @@ def parse_typed_value(type_name: String, raw: String) -> Tuple[Bool, String]:
     "true"/"false"; string -> 原样. 失败 -> (False, "")."""
     if type_name == "string" or type_name == "str":
         return (True, raw)
-    if type_name == "int" or type_name == "float":
-        var ok = is_int_literal(raw)
-        if type_name == "float":
-            # 决策-45: float 接受 int 字面量 (上游 pydantic v2 parity:
-            # "1" -> 1.0); 小数点/指数仍由 is_float_literal 判定.
-            ok = is_float_literal(raw) or is_int_literal(raw)
-        if not ok:
-            return (False, "")
-        return (True, raw)
+    if type_name == "int":
+        # 决策-81 (ADR-0056): 宽松解析 + 规范化 (007 -> 7, +5 -> 5, 1_0 -> 10)
+        return parse_int_lax(raw)
+    if type_name == "float":
+        # 决策-45/81: float 接受 int 字面量 ("1" -> "1.0"); 规范化 = repr 等价
+        return parse_float_lax(raw)
     if type_name == "bool":
         var pr = parse_bool_literal(raw)
         if not pr[0]:

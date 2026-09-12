@@ -11,7 +11,7 @@ from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET, KIND_OAUTH2_TOKEN
 from params_query import parse_path_params, parse_query_params, url_decode, url_decode_path, ParsedParams
 from params_json import parse_body_json
-from params_typed import validate_params_collect, get_param_types
+from params_typed import validate_params_collect, get_param_types, canonicalize_typed_values
 from params_query_extra import apply_query_extras, get_param_aliases
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
@@ -1807,6 +1807,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                             # 决策-43 (Goal-0003 P2 #3): 成功路径 list 多值/alias 归一化 —
                             # values[key] = list CSV / alias 绑定值 (原始 name 覆写: 无绑定效力).
                             apply_query_extras(query_params, type_spec, aliases, route_result.params)
+                            # 决策-81 (ADR-0056): int/float/bool 规范化回写 — handler /
+                            # 响应注入 (query_*) 看到 pydantic 等价值 (007 -> 7).
+                            canonicalize_typed_values(type_spec, aliases,
+                                                      route_result.params, query_params.values)
                             # F2: 声明式异常映射 (Goal-0002). 命中 -> 直接返回错误响应,
                             # 不进 run_handler. 这是 dispatch 唯一一处"认识 _error_map"的代码.
                             var exc = match_error_map(route_result.handler,

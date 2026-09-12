@@ -419,6 +419,51 @@ expect_body_contains "PD-7 lone % stays literal" '"item_id": "%"' "$BASE/items/%
 expect_body_contains "PD-8 %25 single decode -> %" '"item_id": "%"' "$BASE/items/%25"
 expect_code "PD-9 encoded ../ traversal -> 404 (no route)" 404 "$BASE/items/%2e%2e%2fsecret"
 
+echo "== lax coercion + canonical echo (决策-81, ADR-0056) =="
+# pydantic v2 lax: path/query/header/form/body 的 int/float/bool 字符串 -> 规范化值回显.
+# 上游实测 (/tmp/coerce_probe*.py, pydantic 2.13.x):
+#   int  007->7, +5->5, -0->0, 1_0->10; 1e2/0x10/"7.5" -> int_parsing
+#   float 1.50->1.5, 1e3->1000.0, 1.->1.0, .5->0.5, 1_0.5->10.5
+#   bool yes/y/t/on/1/TRUE -> true; no/n/f/off/0/OFF -> false; "2" -> bool_parsing
+#   JSON string "9.50" -> float 9.5; JSON string "007" -> int 7 (model 字段 lax)
+# 偏差 (ADR-0056 §3.5): int 不接小数点字面量 ("2.0"/"7.5" -> int_parsing);
+# 非有限 float (inf/nan) 解析成功但 JSON 渲染为字符串 (上游 500).
+expect_code "CX-1 path int 007 -> 200" 200 "$BASE/calc/007/4"
+expect_body_contains "CX-1 path int 007 -> 7" '"a": "7"' "$BASE/calc/007/4"
+expect_body_contains "CX-2 path int +5 -> 5" '"a": "5"' "$BASE/calc/+5/4"
+expect_body_contains "CX-3 path int -0 -> 0" '"a": "0"' "$BASE/calc/-0/4"
+expect_body_contains "CX-4 path int 1_0 -> 10" '"a": "10"' "$BASE/calc/1_0/4"
+expect_code "CX-5 path int 1e2 -> 422" 422 "$BASE/calc/1e2/4"
+expect_body_contains "CX-5 int_parsing" '"type":"int_parsing"' "$BASE/calc/1e2/4"
+expect_code "CX-6 path int 0x10 -> 422" 422 "$BASE/calc/0x10/4"
+expect_body_contains "CX-6 int_parsing" '"type":"int_parsing"' "$BASE/calc/0x10/4"
+expect_body_contains "CX-6b path int 2.0 -> 2 (integral decimal)" '"a": "2"' "$BASE/calc/2.0/4"
+expect_code "CX-6c path int 7.5 -> 422" 422 "$BASE/calc/7.5/4"
+expect_body_contains "CX-6c int_parsing" '"type":"int_parsing"' "$BASE/calc/7.5/4"
+expect_body_contains "CX-7 query int 007 -> 7" '"query_count": "7"' "$BASE/typed?count=007&verbose=yes"
+expect_body_contains "CX-7 query bool yes -> true" '"query_verbose": "true"' "$BASE/typed?count=007&verbose=yes"
+expect_body_contains "CX-8 query int %2B5 -> 5" '"query_count": "5"' "$BASE/typed?count=%2B5&verbose=OFF"
+expect_body_contains "CX-8 query bool OFF -> false" '"query_verbose": "false"' "$BASE/typed?count=%2B5&verbose=OFF"
+expect_body_contains "CX-9 query int 1_0 -> 10" '"query_count": "10"' "$BASE/typed?count=1_0&verbose=on"
+expect_body_contains "CX-9 query bool on -> true" '"query_verbose": "true"' "$BASE/typed?count=1_0&verbose=on"
+expect_body_contains "CX-10 query int -0 -> 0" '"query_count": "0"' "$BASE/typed?count=-0&verbose=t"
+expect_body_contains "CX-11 int list elem 01 -> 1" '"query_nums": "1,2"' "$BASE/query-extra?nums=01&nums=2"
+expect_body_contains "CX-12 int list single 007 -> 7" '"query_nums": "7"' "$BASE/query-extra?nums=007"
+expect_code "CX-13 int list bad elem -> 422 (regression)" 422 "$BASE/query-extra?nums=1&nums=zz"
+expect_body_contains "CX-13 int_parsing" '"type":"int_parsing"' "$BASE/query-extra?nums=1&nums=zz"
+expect_body_contains "CX-14 form int list 007 -> 7" '"form_items": "7"' "$BASE/form-multi" POST 'items=007&tags=a'
+expect_body_contains "CX-15 form float list 1.50 -> 1.5" '"form_fx": "1.5"' "$BASE/form-multi" POST 'items=1&tags=a&fx=1.50'
+expect_body_contains "CX-16 form bool list yes -> true" '"form_fb": "true"' "$BASE/form-multi" POST 'items=1&tags=a&fb=yes'
+expect_body_contains "CX-17 body float string 9.50 -> 9.5" '"body_price": "9.5"' "$BASE/validate" POST '{"name":"w","price":"9.50","tags":[],"meta":{"city":"sh"}}'
+expect_body_contains "CX-18 body float number 1.50 -> 1.5" '"body_price": "1.5"' "$BASE/validate" POST '{"name":"w","price":1.50,"tags":[],"meta":{"city":"sh"}}'
+expect_body_contains "CX-19 nested int string 007 -> 7" '"body_models_0_id": "7"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"007","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+CX_HDR=$(curl -sS -m 5 -H "x-token: 007" "$BASE/con/hdr")
+if [[ "$CX_HDR" == *'"header_x_token": "7"'* ]]; then pass "CX-20 header int 007 -> 7"
+else fail "CX-20 header int coercion" "got: ${CX_HDR:0:160}"; fi
+CX_HDR2=$(curl -sS -m 5 -H "x-token: 5" -H "x-app: OFF" "$BASE/con/hdr")
+if [[ "$CX_HDR2" == *'"header_x-app": "false"'* ]]; then pass "CX-21 header bool OFF -> false"
+else fail "CX-21 header bool coercion" "got: ${CX_HDR2:0:160}"; fi
+
 echo "== unified error body + error_map (Goal-0002 F2) =="
 # 声明式异常映射: _error_map = "item_id=99:404:Item not found;item_id=*:422:Invalid ID"
 expect_code "error_map item_id=99 -> 404" "404" "$BASE/errors/99"
@@ -1437,8 +1482,12 @@ expect_body_contains "JS-1c deep nested object value" '"body_profile_address_cit
 expect_code "JS-2a nested array missing field -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
 expect_body_contains "JS-2b nested array field loc" '["body","models",0,"id"]' "$BASE/validate/nested" POST '{"root":"nest","models":[{"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
 expect_body_contains "JS-2c nested array input is element" '"input":{"tag":"ab"}' "$BASE/validate/nested" POST '{"root":"nest","models":[{"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
-expect_code "JS-3a nested array wrong type -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"7","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
-expect_body_contains "JS-3b nested array int_parsing" '"type":"int_parsing"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"7","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+# 决策-81 (ADR-0056): JSON string "7" 对 int model 字段 = pydantic lax 接受 (7);
+# 非数字串 "abc" 才是 int_parsing.
+expect_code "JS-3a nested array int from string coerced -> 200" 200 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"7","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-3b nested array int coerced value" '"body_models_0_id": "7"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"7","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_code "JS-3c nested array non-numeric string -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"abc","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
+expect_body_contains "JS-3d nested array int_parsing" '"type":"int_parsing"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":"abc","tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
 expect_code "JS-4a nested array constraint -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":0,"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
 expect_body_contains "JS-4b nested array greater_than_equal" '"type":"greater_than_equal"' "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":0,"tag":"ab"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'
 expect_code "JS-5a object-array max items -> 422" 422 "$BASE/validate/nested" POST '{"root":"nest","models":[{"id":1,"tag":"ab"},{"id":2,"tag":"cd"},{"id":3,"tag":"ef"}],"profile":{"email":"a@b.co","address":{"city":"Shanghai"}}}'

@@ -25,7 +25,7 @@
 # string, 使用点按需解析, ADR-0029 §7).
 
 from handler import Handler
-from params_query_extra import validate_list_values, split_csv, parse_table
+from params_query_extra import validate_list_values, split_csv, join_values, parse_table
 from numlit import (TypeSpec, parse_type_spec, ParsedBase, parse_base,
                    parse_typed_value, parse_f64, enum_in, enum_msg)
 from param_constraints import (_pe_ctx, parse_constraint_entry,
@@ -183,6 +183,61 @@ def validate_params_collect(type_spec: Dict[String, String],
     return (len(errs) == 0, errs^)
 
 
+def _canon_csv_elements(type_name: String, csv: String) raises -> String:
+    """决策-81 (ADR-0056): int/float/bool list CSV 逐元素规范化 (空串 -> 空串)."""
+    if csv == "":
+        return csv
+    var out = List[String]()
+    for part in split_csv(csv):
+        var pr = parse_typed_value(type_name, part)
+        if pr[0]:
+            out.append(pr[1])
+        else:
+            out.append(part)
+    return join_values(out^)
+
+
+def canonicalize_typed_values(type_spec: Dict[String, String],
+                              aliases: Dict[String, String],
+                              mut path_params: Dict[String, String],
+                              mut query_values: Dict[String, String]) raises:
+    """决策-81 (ADR-0056): 成功校验后把 int/float/bool 参数的规范化值回写,
+    使 handler / 响应注入 (query_* 同族) 看到 pydantic 等价值 (007 -> 7,
+    1.50 -> 1.5, yes -> true). str / enum / 标量类型 (uuid/date/...) 保持
+    raw — 决策-79 标量 echo 契约不变 (SC-26 大写 UUID 原样). list 逐元素
+    规范化 (CSV). 依赖调用序: 必须在 apply_query_extras 之后 (默认值/alias
+    已落 values)."""
+    for k in type_spec:
+        var ts = parse_type_spec(type_spec[k])
+        var pb = parse_base(ts.base_type)
+        if not pb.ok:
+            continue
+        var tn = pb.type_name
+        if tn != "int" and tn != "float" and tn != "bool":
+            continue
+        if k in path_params:
+            var p = parse_typed_value(tn, path_params[k])
+            if p[0]:
+                path_params[k] = p[1]
+            continue
+        var key = k
+        if k in aliases:
+            key = aliases[k]
+        var keys = List[String]()
+        keys.append(key)
+        if key != k:
+            keys.append(k)
+        for kk in keys:
+            if kk not in query_values:
+                continue
+            if ts.is_list:
+                query_values[kk] = _canon_csv_elements(tn, query_values[kk])
+            else:
+                var pr = parse_typed_value(tn, query_values[kk])
+                if pr[0]:
+                    query_values[kk] = pr[1]
+
+
 def validate_params(type_spec: Dict[String, String],
                     path_params: Dict[String, String],
                     query_params: Dict[String, String]) raises -> TypedError:
@@ -319,5 +374,36 @@ def main() raises:
     check(vrun("item_id:int", "item_id=42", "item_id=99", "", "")[0], "path priority")
     r = vrun("level:str[low,high]=high", "", "level=mid", "", "")
     check(not r[0] and _has(r[1][0], "enum"), "enum reject")
+
+    # 决策-81 (ADR-0056): lax int/float/bool coercion + canonical echo
+    check(parse_typed_value("int", "007")[1] == "7", "lax int 007 -> 7")
+    check(parse_typed_value("int", "+5")[1] == "5", "lax int +5 -> 5")
+    check(parse_typed_value("int", "-0")[1] == "0", "lax int -0 -> 0")
+    check(parse_typed_value("int", "1_0")[1] == "10", "lax int 1_0 -> 10")
+    check(not parse_typed_value("int", "0x10")[0], "lax int hex rejected")
+    check(parse_typed_value("int", "2.0")[1] == "2", "lax int 2.0 -> 2 (integral decimal)")
+    check(parse_typed_value("int", "12.00")[1] == "12", "lax int 12.00 -> 12")
+    check(not parse_typed_value("int", "2.")[0], "lax int 2. rejected")
+    check(not parse_typed_value("int", "2.5")[0], "lax int 2.5 rejected")
+    check(parse_typed_value("float", "1.50")[1] == "1.5", "lax float 1.50 -> 1.5")
+    check(parse_typed_value("float", "1e3")[1] == "1000.0", "lax float 1e3 -> 1000.0")
+    check(parse_typed_value("float", "42")[1] == "42.0", "lax float 42 -> 42.0")
+    check(parse_typed_value("bool", "yes")[1] == "true", "lax bool yes -> true")
+    check(parse_typed_value("bool", "OFF")[1] == "false", "lax bool OFF -> false")
+    check(not parse_typed_value("bool", "2")[0], "lax bool 2 rejected")
+    check(not parse_typed_value("float", "abc")[0], "lax float abc rejected")
+    var cpp = _t("a=007")
+    var cqs = _t("count=007;nums=01;flag=on")
+    var cspec = parse_table("a:int;count:int;nums:int[];flag:bool", 59, 58, True)
+    canonicalize_typed_values(cspec, Dict[String, String](), cpp, cqs)
+    check(cpp["a"] == "7", "canon path int")
+    check(cqs["count"] == "7", "canon query int")
+    check(cqs["nums"] == "1", "canon query int list elem")
+    check(cqs["flag"] == "true", "canon query bool")
+    # str / 标量类型保持 raw (决策-79 echo 契约)
+    var cqs2 = _t("s=Hello")
+    var cpp2 = _t("")
+    canonicalize_typed_values(parse_table("s:str", 59, 58, True), Dict[String, String](), cpp2, cqs2)
+    check(cqs2["s"] == "Hello", "canon skips str")
 
     print("typed params test completed!")

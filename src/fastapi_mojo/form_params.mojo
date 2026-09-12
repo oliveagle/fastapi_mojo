@@ -204,6 +204,20 @@ def validate_form_collect(type_spec: Dict[String, String],
 
 # ---------- 成功路径归一化 ----------
 
+def _canon_form_csv(type_name: String, csv: String) raises -> String:
+    """决策-81 (ADR-0056): int/float/bool list CSV 逐元素规范化 (空串原样)."""
+    if csv == "":
+        return csv
+    var out = List[String]()
+    for part in split_csv(csv):
+        var pr = parse_typed_value(type_name, part)
+        if pr[0]:
+            out.append(pr[1])
+        else:
+            out.append(part)
+    return join_values(out^)
+
+
 def apply_form_extras(mut params: Dict[String, String],
                       type_spec: Dict[String, String],
                       aliases: Dict[String, String],
@@ -218,25 +232,37 @@ def apply_form_extras(mut params: Dict[String, String],
     """
     for k in type_spec:
         var spec = type_spec[k]
+        # 决策-81 (ADR-0056): int/float/bool form 值规范化 (007 -> 7).
+        var canon = ""
+        var ts2 = parse_type_spec(spec)
+        var pb2 = parse_base(ts2.base_type)
+        if pb2.ok and (pb2.type_name == "int" or pb2.type_name == "float" or pb2.type_name == "bool"):
+            canon = pb2.type_name
         var lookup = k
         if k in aliases:
             lookup = aliases[k]
         var has_wire = lookup in multi
         if is_list_spec(spec):
+            var lv = ""
             if has_wire:
-                params["form_" + k] = join_values(multi[lookup].copy())
+                lv = join_values(multi[lookup].copy())
             elif has_eq(spec):
-                params["form_" + k] = list_default_csv(spec)
-            else:
-                params["form_" + k] = ""
+                lv = list_default_csv(spec)
+            if canon != "":
+                lv = _canon_form_csv(canon, lv)
+            params["form_" + k] = lv
         else:
+            var sv = ""
             if has_wire:
                 var lst = multi[lookup].copy()
-                params["form_" + k] = lst[len(lst) - 1]
+                sv = lst[len(lst) - 1]
             elif has_eq(spec):
-                params["form_" + k] = default_part(spec)
-            else:
-                params["form_" + k] = ""
+                sv = default_part(spec)
+            if canon != "":
+                var pr = parse_typed_value(canon, sv)
+                if pr[0]:
+                    sv = pr[1]
+            params["form_" + k] = sv
     var fields = split_csv(fields_csv)
     for i in range(len(fields)):
         var name = fields[i]

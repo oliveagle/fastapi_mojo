@@ -213,7 +213,7 @@ journalctl -u fastapi_mojo -f
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，676 项检查含 path 百分号解码（PD-1..PD-11，ADR-0055：%XX 单字节/+ 非空格/U+FFFD/%2F 分段）、标量类型（SC-1..SC-37，ADR-0054：uuid/date/datetime/time/timedelta/decimal 的 path/query/header/body/form/list 转换 + 422/OpenAPI 对齐）、HEAD 无体（HD-1..4）、GZip 中间件 Starlette 1.6.0 全量对齐（GZ-1..GZ-10：Vary 恒加/大小写敏感判定/13 项排除表/streaming+FileResponse 可压）、内置文档路由（/redoc + /docs/oauth2-redirect）、Depends(yield) teardown、异常响应自定义头、Rust JSON serializer、OAuth2 scopes、RedirectResponse/redirect_slashes、SSE ServerSentEvent 字段、CORS 全量等价、HTTPDigest/securitySchemes、OpenIdConnect/AuthorizationCode、TLS/HTTPS、
+# 集成测试（单一 binary 端到端，709 项检查含 path 百分号解码（PD-1..PD-11，ADR-0055：%XX 单字节/+ 非空格/U+FFFD/%2F 分段）、lax 标量强制转换（CX-1..CX-21，ADR-0056：int/float/bool 字符串 lax + 规范化回显 007→7/1.50→1.5/yes→true/整值小数 2.0→2）、标量类型（SC-1..SC-37，ADR-0054：uuid/date/datetime/time/timedelta/decimal 的 path/query/header/body/form/list 转换 + 422/OpenAPI 对齐）、HEAD 无体（HD-1..4）、GZip 中间件 Starlette 1.6.0 全量对齐（GZ-1..GZ-10：Vary 恒加/大小写敏感判定/13 项排除表/streaming+FileResponse 可压）、内置文档路由（/redoc + /docs/oauth2-redirect）、Depends(yield) teardown、异常响应自定义头、Rust JSON serializer、OAuth2 scopes、RedirectResponse/redirect_slashes、SSE ServerSentEvent 字段、CORS 全量等价、HTTPDigest/securitySchemes、OpenIdConnect/AuthorizationCode、TLS/HTTPS、
 # HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；工具链 fmtool = Rust, 零 Python）
 ./scripts/e2e_test.sh
 ```

@@ -21,8 +21,8 @@
 
 from handler import Handler
 from router import Router
-from numlit import (is_int_literal, is_float_literal, parse_f64, fmt_num,
-                   parse_type_spec, parse_base, parse_typed_value,
+from numlit import (is_int_literal, is_float_literal, parse_int_lax, parse_float_lax,
+                   parse_f64, fmt_num, parse_type_spec, parse_base, parse_typed_value,
                    enum_in, enum_msg, _csv_parts)
 from params_query_extra import parse_table
 from header_params import parse_header_entry
@@ -123,7 +123,8 @@ def parse_constraint_entry(entry: String, ctx: String) raises -> ConstraintSpec:
                 var key = String(part[byte=0:pe])
                 var val = String(part[byte=pe + 1:part.byte_length()])
                 if key == "gt" or key == "ge" or key == "lt" or key == "le" or key == "mo":
-                    if not (is_int_literal(val) or is_float_literal(val)):
+                    # 决策-81: 约束数值用宽松字面量解析 (parse_int_lax/parse_float_lax)
+                    if not (parse_int_lax(val)[0] or parse_float_lax(val)[0]):
                         raise Error("constraints: bad numeric value for '" + key + "': " + val + ctx)
                     if key == "gt":
                         spec.gt = val

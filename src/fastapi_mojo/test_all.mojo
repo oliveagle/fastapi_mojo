@@ -406,6 +406,24 @@ def test_params_typed() raises:
     assert not i3[0], "int bad rejected"
     var i4 = parse_typed_value("int", "3.5")
     assert not i4[0], "int float rejected"
+    # 决策-81 (ADR-0056): 宽松 int + 规范化
+    var i5 = parse_typed_value("int", "007")
+    assert i5[0] and i5[1] == "7", "int leading zeros -> 7"
+    var i6 = parse_typed_value("int", "+5")
+    assert i6[0] and i6[1] == "5", "int +5 -> 5"
+    var i7 = parse_typed_value("int", "-0")
+    assert i7[0] and i7[1] == "0", "int -0 -> 0"
+    var i8 = parse_typed_value("int", "1_0")
+    assert i8[0] and i8[1] == "10", "int 1_0 -> 10"
+    var i9 = parse_typed_value("int", "0x10")
+    assert not i9[0], "int hex rejected"
+    # 决策-81: 整值小数 (上游 pydantic: "2.0"->2 / "12.00"->12; "2."/"2.5"/"1e2" -> 拒绝)
+    var i10 = parse_typed_value("int", "2.0")
+    assert i10[0] and i10[1] == "2", "int 2.0 -> 2"
+    var i11 = parse_typed_value("int", "12.00")
+    assert i11[0] and i11[1] == "12", "int 12.00 -> 12"
+    assert not parse_typed_value("int", "2.")[0], "int 2. rejected"
+    assert not parse_typed_value("int", "1e2")[0], "int 1e2 rejected"
 
     # parse_typed_value: float
     var f1 = parse_typed_value("float", "3.14")
@@ -415,7 +433,18 @@ def test_params_typed() raises:
     var f3 = parse_typed_value("float", "abc")
     assert not f3[0], "float bad rejected"
     var f4 = parse_typed_value("float", "42")
-    assert not f4[0], "float int rejected (no dot/exp)"
+    assert f4[0] and f4[1] == "42.0", "float int literal -> 42.0"
+    # 决策-81: 宽松 float + repr 规范化
+    var f5 = parse_typed_value("float", "1.50")
+    assert f5[0] and f5[1] == "1.5", "float 1.50 -> 1.5"
+    var f6 = parse_typed_value("float", "1e3")
+    assert f6[0] and f6[1] == "1000.0", "float 1e3 -> 1000.0"
+    var f7 = parse_typed_value("float", ".5")
+    assert f7[0] and f7[1] == "0.5", "float .5 -> 0.5"
+    var f8 = parse_typed_value("float", "1.")
+    assert f8[0] and f8[1] == "1.0", "float 1. -> 1.0"
+    var f9 = parse_typed_value("float", "1_0.5")
+    assert f9[0] and f9[1] == "10.5", "float 1_0.5 -> 10.5"
 
     # parse_typed_value: bool
     var b1 = parse_typed_value("bool", "true")
@@ -423,7 +452,15 @@ def test_params_typed() raises:
     var b2 = parse_typed_value("bool", "False")
     assert b2[0] and b2[1] == "false", "bool False normalized"
     var b3 = parse_typed_value("bool", "yes")
-    assert not b3[0], "bool bad rejected"
+    assert b3[0] and b3[1] == "true", "bool yes -> true (决策-81 lax)"
+    var b4 = parse_typed_value("bool", "OFF")
+    assert b4[0] and b4[1] == "false", "bool OFF -> false (case-insensitive)"
+    var b5 = parse_typed_value("bool", "on")
+    assert b5[0] and b5[1] == "true", "bool on -> true"
+    var b6 = parse_typed_value("bool", "t")
+    assert b6[0] and b6[1] == "true", "bool t -> true"
+    var b7 = parse_typed_value("bool", "2")
+    assert not b7[0], "bool 2 rejected"
 
     # parse_typed_value: string (passthrough)
     var s1 = parse_typed_value("string", "hello world")
