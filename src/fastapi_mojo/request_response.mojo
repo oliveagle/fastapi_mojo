@@ -35,6 +35,8 @@ from string_builder import StringBuilder
 from json import json_serialize_dict, json_serialize_list, json_escape
 from json_rust import serialize_dict_opt_in
 from params_query import url_decode  # _parse_form_body (决策-44 从 http_server_final 移入)
+# 决策-89 (ADR-0064): response_model 类型/默认值来自 _body_schema (单一 spec 源).
+from body_schema import parse_body_schema, field_count, get_field, FieldSpec, canonical_default_value
 
 
 def _bof(s: String, i: Int) -> Int:
@@ -279,17 +281,56 @@ def _is_null_value(v: String) -> Bool:
     return v.startswith("__nested__:null")
 
 
-def response_model_body(handler: Handler, resp_data: Dict[String, String]) raises -> String:
-    """决策-41: response_model 过滤 (FastAPI/Pydantic 语义) — 单一 dispatch 调用点.
+def _parse_alias_table(s: String) raises -> Dict[String, String]:
+    """决策-89 (ADR-0064): 解析 "name=alias;name2=alias2" 重命名表 (_response_aliases)."""
+    var out = Dict[String, String]()
+    for part in _split_csv(s, 59):  # 59 = ';'
+        var eq = -1
+        for i in range(part.byte_length()):
+            if _bof(part, i) == 61:  # '='
+                eq = i
+                break
+        if eq > 0 and eq < part.byte_length() - 1:
+            out[String(part[byte=0:eq])] = String(part[byte=eq + 1:part.byte_length()])
+    return out^
+
+
+def _rm_render(f: String, v: String, specs: Dict[String, FieldSpec]) raises -> String:
+    """决策-89 (ADR-0064): 按模型字段类型渲染响应值.
+
+    数字/布尔/数组/对象 -> raw JSON (`__nested__:` 直通, 与 pydantic 一致:
+    float 字段输出 JSON number 而非字符串); 字符串/其它标量/未知类型 -> JSON
+    字符串 (既有行为不变, 无 _body_schema 时全部走此分支). 值须为规范 JSON
+    文本 (body_<f> 注入 = 校验后规范值; handler 自设 = 自行保证)."""
+    if f not in specs:
+        return v
+    var t = specs[f].type_name
+    if specs[f].is_array or t == "obj" or t == "arr" or t == "int" or t == "float" or t == "bool":
+        return "__nested__:" + v
+    return v
+
+
+def _rm_canon(v: String, spec: FieldSpec) raises -> String:
+    """决策-89: 字段值/默认值的规范化文本 (exclude_defaults 比较用)."""
+    return canonical_default_value(spec.type_name, spec.is_array, v)
+
+
+def response_model_body(handler: Handler, resp_data: Dict[String, String],
+                        provided_csv: String = "") raises -> String:
+    """决策-41/89: response_model 过滤 (FastAPI/Pydantic 语义) — 单一 dispatch 调用点.
 
     声明式 (handler.data):
-      - _response_model      = "f1,f2,..."  include: 只返回模型字段 (决策-35 既有)
-      - _response_exclude    = "a,b"        exclude: 从模型字段中剔除 (FastAPI
-        response_model_exclude 语义: 作用于模型字段, 无模型时 no-op — 上游对齐)
-      - _response_exclude_none = "true"     exclude_none: 剔除 null 值字段
-        (扁平 string dict 等价: 空串 / __nested__:null)
-    应用序: include -> exclude -> exclude_none. 未声明 _response_model 时
-    整体 no-op (FastAPI: 无 response_model 时 include/exclude 不影响响应).
+      - _response_model        = "f1,f2,..."  include: 模型字段序 (决策-35 既有)
+      - _response_exclude      = "a,b"        exclude: 从模型字段中剔除 (决策-41)
+      - _response_exclude_none = "true"       exclude_none: 剔除 null 值字段 (决策-41)
+      - _response_exclude_unset    = "true"   exclude_unset: 剔除**请求未提供**字段
+        (决策-89, ADR-0064; provided_csv = body 校验回传的显式提供字段集)
+      - _response_exclude_defaults = "true"   exclude_defaults: 剔除**值等于声明默认**
+        的字段 (决策-89; 默认值/类型取自 _body_schema, 与请求校验同源)
+      - _response_aliases      = "name=alias;..."  输出重命名表 (决策-89)
+      - _response_by_alias     = "false"      关闭 alias 重命名 (默认 true, 上游同款)
+    应用序: include -> exclude -> (unset/defaults) -> exclude_none; 未声明
+    _response_model 时整体 no-op (FastAPI: 无 response_model 时参数不影响响应).
     """
     if "_response_model" not in handler.data:
         return serialize_dict_opt_in(resp_data)
@@ -298,10 +339,50 @@ def response_model_body(handler: Handler, resp_data: Dict[String, String]) raise
     if "_response_exclude" in handler.data:
         exclude = _split_csv(handler.data["_response_exclude"])
     var exclude_none = "_response_exclude_none" in handler.data and handler.data["_response_exclude_none"] == "true"
+    var exclude_unset = "_response_exclude_unset" in handler.data and handler.data["_response_exclude_unset"] == "true"
+    var exclude_defaults = "_response_exclude_defaults" in handler.data and handler.data["_response_exclude_defaults"] == "true"
+    var by_alias = not ("_response_by_alias" in handler.data and handler.data["_response_by_alias"] == "false")
+    var alias_map = Dict[String, String]()
+    if "_response_aliases" in handler.data:
+        alias_map = _parse_alias_table(handler.data["_response_aliases"])
+    # 声明模型 = _body_schema (字段类型 + 默认值, 与请求校验同源; 缺失时无声明元数据).
+    var specs = Dict[String, FieldSpec]()
+    if "_body_schema" in handler.data:
+        var fs = parse_body_schema(handler.data["_body_schema"])
+        for i in range(field_count(fs)):
+            var fld = get_field(fs, i)
+            specs[fld.name] = fld^
+    var provided = List[String]()
+    if provided_csv.byte_length() > 0:
+        provided = _split_csv(provided_csv)
     var filtered = Dict[String, String]()
     for f in model_fields:
-        if f in resp_data and not _csv_contains(exclude, f):
-            var v = resp_data[f]
-            if not (exclude_none and _is_null_value(v)):
-                filtered[f] = v
+        if _csv_contains(exclude, f):
+            continue
+        var present = _csv_contains(provided, f) or (f in resp_data)
+        var resolved = ""
+        var has_val = False
+        if ("body_" + f) in resp_data:
+            resolved = resp_data["body_" + f]
+            has_val = True
+        elif f in resp_data:
+            resolved = resp_data[f]
+            has_val = True
+        if exclude_unset and not present:
+            continue
+        if not has_val:
+            if f in specs and specs[f].has_default():
+                resolved = canonical_default_value(specs[f].type_name, specs[f].is_array, specs[f].default_value)
+            else:
+                # 必填字段缺失 (上游 ResponseValidationError -> 500); 本实现跳过.
+                continue
+        if exclude_defaults and f in specs and specs[f].has_default():
+            if _rm_canon(resolved, specs[f]) == canonical_default_value(specs[f].type_name, specs[f].is_array, specs[f].default_value):
+                continue
+        if exclude_none and _is_null_value(resolved):
+            continue
+        var out_key = f
+        if by_alias and (f in alias_map):
+            out_key = alias_map[f]
+        filtered[out_key] = _rm_render(f, resolved, specs)
     return serialize_dict_opt_in(filtered)

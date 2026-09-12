@@ -153,6 +153,28 @@ def _is_num_lit(s: String) raises -> Bool:
     return _parse_f64(s)[0]
 
 
+def canonical_default_value(type_name: String, is_array: Bool, default_value: String) raises -> String:
+    """决策-89 (ADR-0064): 字段默认值的 *规范化* 文本 (供 exclude_defaults 比较).
+
+    未提供字段时 `_validate_fields` 注入 `fs.default_value` (spec 原文); 已提供且
+    恰等于默认值的字段注入**规范化**文本 (如 float `10` -> `10.0`)。exclude_defaults
+    需两者都能识别 -> 同时比对 raw 与 canonical。"""
+    if is_array or default_value == "":
+        return default_value
+    if type_name == "float":
+        var p = _parse_f64(default_value)
+        if p[0]:
+            return fmt_f64_repr(p[1])
+    elif type_name == "int":
+        var pi = _parse_int(default_value)
+        if pi[0]:
+            return String(pi[1])
+    elif type_name == "bool":
+        if default_value == "true" or default_value == "false":
+            return default_value
+    return default_value
+
+
 def fmt_num(v: Float64) -> String:
     """约束消息数字格式: 0.0 -> "0", 9.99 -> "9.99" (对齐 FastAPI 消息).
     决策-87: 非整值走 fmt_f64_repr (CPython repr 等价)."""

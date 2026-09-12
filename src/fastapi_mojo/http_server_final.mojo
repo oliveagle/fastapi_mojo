@@ -1613,6 +1613,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                 # 每连接迭代重置; resolve_depends 实际派发的依赖按解析完成序追加;
                 # 响应 flush 后 _run_dep_teardowns 逆序执行 (上游 ExitStack LIFO).
                 var dep_teardowns = List[String]()
+                # 决策-89 (ADR-0064): body 校验回传的"显式提供顶层字段"集 (exclude_unset 用);
+                # 未命中 body 校验的路径保持空串 = 无 unset 信息 (静态路由回退到 resp_data 判定).
+                var body_set_csv: String = ""
 
                 if not route_result.matched:
                     # Path exists but method not registered -> 405 + Allow (RFC 7231).
@@ -1740,6 +1743,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         # (仅 JSON CT 才按 JSON 解析; 上游 strict_content_type 默认).
                         var ct_hdr = _get_header("Content-Type")
                         var sres = validate_body_schema(route_result.handler, effective_method, body_params, body_str, ct_hdr)
+                        body_set_csv = sres[3]
                         # 决策-45 (ADR-0020): Form 多值/422 parity —
                         # CT 为 form 时 parse_form_multi 收全部 occurrence;
                         # 非 form CT 传空 multi (上游同款: 缺失->默认/422).
@@ -2133,7 +2137,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
 
                 # 决策-35/41 (Goal-0003): response_model (include) + exclude + exclude_none
                 # (FastAPI/Pydantic 语义, 单一调用点 response_model_body; ADR-0016).
-                var body = response_model_body(route_result.handler, resp_data)
+                var body = response_model_body(route_result.handler, resp_data, body_set_csv)
 
                 # Use HEAD response for HEAD requests (headers only, no body);
                 # 405 carries the Allow header.

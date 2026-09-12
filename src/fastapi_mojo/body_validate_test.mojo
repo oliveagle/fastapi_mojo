@@ -3,7 +3,7 @@
 # Decision-38/57/58/61 executable body-validation tests (same-dir split keeps
 # both production and test modules below the 500-line God-file threshold).
 
-from body_schema import parse_body_schema, get_field, field_count, _is_num_lit
+from body_schema import parse_body_schema, get_field, field_count, _is_num_lit, canonical_default_value
 from body_validate import validate_body_schema, _check_body_spec
 from body_coerce import _coerce_body_scalar
 from float_repr import atof_f64, fmt_f64_repr, is_dec_f64_syntax
@@ -382,4 +382,22 @@ def main() raises:
           and is_dec_f64_syntax("1.23456789012345678901e29"), "syntax accept")
     check(not _is_num_lit("zz") and not _is_num_lit("1.2.3")
           and _is_num_lit("5") and _is_num_lit("5.5"), "_is_num_lit syntax gate")
+    # 决策-89 (ADR-0064): 第 4 元组 = 显式提供顶层字段名 CSV (exclude_unset 用),
+    # 成功与 422 路径都返回; 保持 body schema 字段序。
+    var rs = Handler(0, "rm_set")
+    rs.set_data("_body_schema", "name:str;price:float=10.0;tax:float=0.0")
+    var rs1 = validate_body_schema(rs, "POST", parse_body_json('{"name":"a"}'), '{"name":"a"}')
+    check(rs1[0] and rs1[3] == "name", "set_csv = provided only (defaults excluded)")
+    var rs2 = validate_body_schema(rs, "POST",
+                                   parse_body_json('{"name":"a","price":5}'), '{"name":"a","price":5}')
+    check(rs2[0] and rs2[3] == "name,price", "set_csv preserves field order")
+    var rs3 = validate_body_schema(rs, "POST", parse_body_json('{"price":5}'), '{"price":5}')
+    check(not rs3[0] and rs3[3] == "price", "set_csv present on 422 path")
+    # canonical_default_value: 声明默认文本 -> 规范化 (exclude_defaults 比较用)
+    check(canonical_default_value("float", False, "10.0") == "10.0"
+          and canonical_default_value("float", False, "10") == "10.0"
+          and canonical_default_value("int", False, "10") == "10"
+          and canonical_default_value("str", False, "x") == "x"
+          and canonical_default_value("float", True, "1.5") == "1.5",
+          "canonical_default_value float/int/str")
     print("Mojo body_schema (决策-38) test completed!")

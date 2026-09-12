@@ -279,7 +279,8 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
 
 def _validate_body_embed(handler: Handler, embed_key: String, body_params: ParsedParams,
                          body_str: String, content_type: String,
-                         mut out: Dict[String, String], mut errs: List[String]) raises -> Bool:
+                         mut out: Dict[String, String], mut set_names: List[String],
+                         mut errs: List[String]) raises -> Bool:
     """决策-86 (ADR-0061): Body(embed=True) 语义 — 单 body 模型包裹在 <embed_key> 下.
 
     上游 (fastapi 0.141.1) `Body(embed=True)` 把单一 body 参数包成单字段模型
@@ -337,12 +338,17 @@ def _validate_body_embed(handler: Handler, embed_key: String, body_params: Parse
         return False
     var fields = parse_body_schema(handler.data["_body_schema"])
     _validate_fields(fields, inner, "", loc_base, raw, out, errs)
+    # 决策-89: 记录**显式提供**的顶层字段名 (exclude_unset 用).
+    for i in range(field_count(fields)):
+        var nm = get_field(fields, i).name
+        if nm in inner.values:
+            set_names.append(nm)
     return len(errs) == 0
 
 
 def validate_body_schema(handler: Handler, method: String,
                          body_params: ParsedParams, body_str: String,
-                         content_type: String = "application/json") raises -> Tuple[Bool, List[String], Dict[String, String]]:
+                         content_type: String = "application/json") raises -> Tuple[Bool, List[String], Dict[String, String], String]:
     """`validate_body_schema` (决策-38, 决策-85): 按 _body_schema 校验请求 body.
 
     返回 (ok, errors, values): ok=False -> errors = FastAPI detail 对象 (loc/msg/type);
@@ -359,14 +365,15 @@ def validate_body_schema(handler: Handler, method: String,
     `<embed_key>` 下; 内层字段 loc `["body", <embed_key>, ...]`)."""
     var ok_vals = Dict[String, String]()
     if "_body_schema" not in handler.data:
-        return (True, List[String](), ok_vals^)
+        return (True, List[String](), ok_vals^, "")
     if method != "POST" and method != "PUT" and method != "PATCH":
-        return (True, List[String](), ok_vals^)
+        return (True, List[String](), ok_vals^, "")
     if "_body_embed" in handler.data and handler.data["_body_embed"] != "":
         var embed_errs = List[String]()
+        var embed_set = List[String]()
         var embed_ok = _validate_body_embed(handler, handler.data["_body_embed"], body_params,
-                                            body_str, content_type, ok_vals, embed_errs)
-        return (embed_ok, embed_errs^, ok_vals^)
+                                            body_str, content_type, ok_vals, embed_set, embed_errs)
+        return (embed_ok, embed_errs^, ok_vals^, ",".join(embed_set))
     var errs = List[String]()
     # 无 wire body 判定: dispatch 传 body_str="" + 空 ParsedParams(); 单元测试可能只传
     # body_params (body_str="") -> 以 param_count/has_error 补偿识别"确实有 body".
@@ -374,23 +381,23 @@ def validate_body_schema(handler: Handler, method: String,
         or body_params.param_count > 0
     if not has_body:
         errs.append(err_obj("[\"body\"]", "Field required", "missing", "null"))
-        return (False, errs^, ok_vals^)
+        return (False, errs^, ok_vals^, "")
     if not content_type_is_json(content_type):
         # 非 JSON CT: 上游 body = body_bytes (原始字符串) -> 模型无法提取字段.
         errs.append(err_obj("[\"body\"]",
                             "Input should be a valid dictionary or object to extract fields from",
                             "model_attributes_type",
                             json_string_literal(body_str)))
-        return (False, errs^, ok_vals^)
+        return (False, errs^, ok_vals^, "")
     var scan = validate_body_json(body_str)
     if not scan.ok:
         errs.append(err_obj_ctx("[\"body\"," + String(scan.err_pos) + "]",
                                 "JSON decode error", "json_invalid", "{}",
                                 "{\"error\":\"" + json_escape(scan.err_msg) + "\"}"))
-        return (False, errs^, ok_vals^)
+        return (False, errs^, ok_vals^, "")
     if scan.top_kind == "null":
         errs.append(err_obj("[\"body\"]", "Field required", "missing", "null"))
-        return (False, errs^, ok_vals^)
+        return (False, errs^, ok_vals^, "")
     if scan.top_kind != "object":
         var raw = String(body_str[byte=scan.val_start:scan.val_end])
         # 保 detail 恒为合法 JSON: 非有限 number 常量 NaN/Infinity 非合法 JSON 字面量
@@ -402,17 +409,24 @@ def validate_body_schema(handler: Handler, method: String,
         errs.append(err_obj("[\"body\"]",
                             "Input should be a valid dictionary or object to extract fields from",
                             "model_attributes_type", inp))
-        return (False, errs^, ok_vals^)
+        return (False, errs^, ok_vals^, "")
     if body_params.has_error:
         # 严格校验已通过 -> object; 解析器理论不应报错 (防御).
         errs.append(err_obj_ctx("[\"body\",0]", "JSON decode error", "json_invalid",
                                 "{}", "{\"error\":\"invalid JSON\"}"))
-        return (False, errs^, ok_vals^)
+        return (False, errs^, ok_vals^, "")
     var fields = parse_body_schema(handler.data["_body_schema"])
     _validate_fields(fields, body_params, "", "[\"body\"", body_str, ok_vals, errs)
+    # 决策-89: 记录显式提供的顶层字段名 (exclude_unset).
+    var set_names = List[String]()
+    for i in range(field_count(fields)):
+        var nm2 = get_field(fields, i).name
+        if nm2 in body_params.values:
+            set_names.append(nm2)
+    var set_csv = ",".join(set_names)
     if len(errs) > 0:
-        return (False, errs^, ok_vals^)
-    return (True, List[String](), ok_vals^)
+        return (False, errs^, ok_vals^, set_csv)
+    return (True, List[String](), ok_vals^, set_csv)
 
 
 def check_body_schemas(router: Router) raises:

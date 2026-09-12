@@ -60,3 +60,37 @@ def register_body_schema_routes(mut router: Router) raises:
     embed_h.set_data("_body_schema", "name:str;price:float")
     embed_h.set_data("_body_embed", "item")
     router.add_route("/validate/embed", "POST", embed_h)
+
+    # 决策-89 (ADR-0064): response_model exclude_unset / exclude_defaults / by_alias.
+    # 声明模型 = _body_schema (字段类型 + 默认值同源); 响应值取 body_<f> (校验后规范值)。
+    # 上游 probe (fastapi 0.141.1): /rn plain 注入默认值; /ru exclude_unset 剔未提供字段;
+    # /rd exclude_defaults 剔等于默认值的字段; by_alias 默认 true 用 alias 输出键。
+    var rm_plain_h = Handler(KIND_ECHO(), "rm_plain")
+    rm_plain_h.set_data("_body_schema", "name:str;price:float=10.0;tax:float=0.0")
+    rm_plain_h.set_data("_response_model", "name,price,tax")
+    router.add_route("/rm/plain", "POST", rm_plain_h)
+
+    var rm_unset_h = Handler(KIND_ECHO(), "rm_unset")
+    rm_unset_h.set_data("_body_schema", "name:str;price:float=10.0;tax:float=0.0")
+    rm_unset_h.set_data("_response_model", "name,price,tax")
+    rm_unset_h.set_data("_response_exclude_unset", "true")
+    router.add_route("/rm/unset", "POST", rm_unset_h)
+
+    var rm_def_h = Handler(KIND_ECHO(), "rm_defaults")
+    rm_def_h.set_data("_body_schema", "name:str;price:float=10.0;tax:float=0.0")
+    rm_def_h.set_data("_response_model", "name,price,tax")
+    rm_def_h.set_data("_response_exclude_defaults", "true")
+    router.add_route("/rm/defaults", "POST", rm_def_h)
+
+    var rm_alias_h = Handler(KIND_ECHO(), "rm_alias")
+    rm_alias_h.set_data("_body_schema", "full_name:str=unknown;age:int=0")
+    rm_alias_h.set_data("_response_model", "full_name,age")
+    rm_alias_h.set_data("_response_aliases", "full_name=fullName")
+    router.add_route("/rm/alias", "POST", rm_alias_h)
+
+    var rm_noalias_h = Handler(KIND_ECHO(), "rm_noalias")
+    rm_noalias_h.set_data("_body_schema", "full_name:str=unknown;age:int=0")
+    rm_noalias_h.set_data("_response_model", "full_name,age")
+    rm_noalias_h.set_data("_response_aliases", "full_name=fullName")
+    rm_noalias_h.set_data("_response_by_alias", "false")
+    router.add_route("/rm/noalias", "POST", rm_noalias_h)

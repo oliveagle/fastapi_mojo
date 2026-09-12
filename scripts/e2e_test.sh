@@ -1747,6 +1747,45 @@ RNOOP=$(curl -sS -m 5 "$BASE/rm-noop")
 if [[ "$RNOOP" == *'"message": "noop"'* && "$RNOOP" == *'"method"'* ]]; then pass "RM-7 exclude without response_model is no-op (FastAPI parity)"
 else fail "RM-7 exclude without response_model is no-op" "body: ${RNOOP:0:200}"; fi
 
+# --- response_model exclude_unset/exclude_defaults/by_alias (决策-89, ADR-0064) -------
+# 上游 probe (fastapi 0.141.1, /tmp/rmapp.py): /rn plain 注入声明默认值; /ru
+# exclude_unset 剔请求未提供字段; /rd exclude_defaults 剔值等于声明的字段;
+# by_alias 默认 true 用 alias 输出键; float 字段输出 JSON number (非字符串).
+echo "== response_model exclude_unset/defaults/alias (决策-89) =="
+
+# RMP: plain (无 flag) — 注入声明默认值; float 渲染为 JSON number
+expect_code "RMP-1 plain 200" 200 "$BASE/rm/plain" POST '{"name":"a"}'
+expect_body_contains "RMP-2 plain injects declared defaults" '"name": "a", "price": 10.0, "tax": 0.0' "$BASE/rm/plain" POST '{"name":"a"}'
+expect_body_contains "RMP-3 plain provided price + default tax" '"price": 5.0, "tax": 0.0' "$BASE/rm/plain" POST '{"name":"a","price":5}'
+
+# RMU: exclude_unset — 剔除请求未提供的字段 (显式提供=默认值的字段保留)
+expect_body_contains "RMU-1 unset keeps provided name" '"name": "a"' "$BASE/rm/unset" POST '{"name":"a"}'
+RMU1=$(http_body "$BASE/rm/unset" POST '{"name":"a"}')
+if [[ "$RMU1" != *'"price"'* && "$RMU1" != *'"tax"'* ]]; then pass "RMU-2 unset drops absent price/tax"
+else fail "RMU-2 unset drops absent price/tax" "body: ${RMU1:0:200}"; fi
+expect_body_contains "RMU-3 unset keeps explicitly provided price" '"name": "a", "price": 5.0' "$BASE/rm/unset" POST '{"name":"a","price":5}'
+RMU3=$(http_body "$BASE/rm/unset" POST '{"name":"a","price":5}')
+if [[ "$RMU3" != *'"tax"'* ]]; then pass "RMU-4 unset still drops absent tax"
+else fail "RMU-4 unset still drops absent tax" "body: ${RMU3:0:200}"; fi
+expect_body_contains "RMU-5 unset keeps explicit default values" '"price": 10.0, "tax": 0.0' "$BASE/rm/unset" POST '{"name":"a","price":10.0,"tax":0.0}'
+
+# RMD: exclude_defaults — 剔除值等于声明默认值的字段
+RMD1=$(http_body "$BASE/rm/defaults" POST '{"name":"a"}')
+if [[ "$RMD1" == *'"name": "a"'* && "$RMD1" != *'"price"'* && "$RMD1" != *'"tax"'* ]]; then pass "RMD-1 defaults drops defaulted absent fields"
+else fail "RMD-1 defaults drops defaulted absent fields" "body: ${RMD1:0:200}"; fi
+expect_body_contains "RMD-2 defaults keeps non-default price" '"name": "a", "price": 5.0' "$BASE/rm/defaults" POST '{"name":"a","price":5}'
+RMD2=$(http_body "$BASE/rm/defaults" POST '{"name":"a","price":5}')
+if [[ "$RMD2" != *'"tax"'* ]]; then pass "RMD-3 defaults drops defaulted tax"
+else fail "RMD-3 defaults drops defaulted tax" "body: ${RMD2:0:200}"; fi
+RMD4=$(http_body "$BASE/rm/defaults" POST '{"name":"a","price":10.0,"tax":0.0}')
+if [[ "$RMD4" == *'"name": "a"'* && "$RMD4" != *'"price"'* && "$RMD4" != *'"tax"'* ]]; then pass "RMD-4 defaults drops explicit default values"
+else fail "RMD-4 defaults drops explicit default values" "body: ${RMD4:0:200}"; fi
+
+# RMB: by_alias 默认 true 用 _response_aliases 输出键; false 保留字段名
+expect_body_contains "RMB-1 by_alias true renames to alias" '"fullName": "y", "age": 0' "$BASE/rm/alias" POST '{"full_name":"y"}'
+expect_body_contains "RMB-2 by_alias false keeps field name" '"full_name": "y", "age": 0' "$BASE/rm/noalias" POST '{"full_name":"y"}'
+expect_body_contains "RMB-3 by_alias int field typed" '"fullName": "y", "age": 3' "$BASE/rm/alias" POST '{"full_name":"y","age":3}'
+
 # --- lifespan (决策-36, Goal-0003 P1) -------------------------------------------------
 # FastAPI `lifespan` 上下文管理器: yield 前 = startup, yield 后 = shutdown;
 # 每进程一次; startup 失败 -> 服务不启动 (进程退出).
