@@ -813,6 +813,14 @@ def register_routes(mut router: Router) raises:
     basic_h.set_data("message", "basic auth demo")
     router.add_route("/basic", "GET", basic_h)
 
+    # 决策-69 (ADR-0044): _auth_scheme_name 覆盖默认 securityScheme 名 (上游 scheme_name=).
+    var basic_alt_h = Handler(KIND_ECHO(), "secure_basic_alt")
+    basic_alt_h.set_data("_auth", "basic")
+    basic_alt_h.set_data("_auth_users", "admin:secret")
+    basic_alt_h.set_data("_auth_scheme_name", "MyBasicAuth")
+    basic_alt_h.set_data("message", "basic alt demo")
+    router.add_route("/basic-alt", "GET", basic_alt_h)
+
     # /secure: HTTPBearer. 正确 token (tok123) -> 200 + auth_token; 错/缺 -> 401 + WWW-Authenticate: Bearer.
     var bearer_h = Handler(KIND_ECHO(), "secure_bearer")
     bearer_h.set_data("_auth", "bearer")
@@ -834,6 +842,14 @@ def register_routes(mut router: Router) raises:
     apiq_h.set_data("_auth_tokens", "key_abc")
     apiq_h.set_data("message", "apikey query demo")
     router.add_route("/api-q", "GET", apiq_h)
+
+    # 决策-69 (ADR-0044): HTTPDigest stub parity demo.
+    # /digest: Authorization scheme=digest (大小写不敏感) + 非空 credentials -> 200,
+    # 注入 auth_scheme/auth_credentials (原样大小写); 缺/非 digest -> 401 + WWW-Authenticate: Digest.
+    var digest_h = Handler(KIND_ECHO(), "secure_digest")
+    digest_h.set_data("_auth", "digest")
+    digest_h.set_data("message", "digest auth demo")
+    router.add_route("/digest", "GET", digest_h)
 
     # 决策-44 (Goal-0003 P2 #17): OAuth2 password flow + JWT (HS256) — 对标矩阵最后一项.
     # /token (POST form): OAuth2PasswordRequestForm 等价 (grant_type 可选/username/password
@@ -1410,6 +1426,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                     var auth_user_in = ""
                     var auth_token_in = ""
                     var auth_apikey_in = ""
+                    var auth_scheme_in = ""
+                    var auth_credentials_in = ""
                     if "_auth" in route_result.handler.data:
                         # 决策-44: oauth2 分支走 security_jwt (JWT 校验); 其余走 check_auth.
                         # 不并入 check_auth 的原因: 其 import 会拖入 FFI 闭包, 破坏
@@ -1433,6 +1451,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                             auth_user_in = auth.auth_user
                             auth_token_in = auth.auth_token
                             auth_apikey_in = auth.auth_apikey
+                            auth_scheme_in = auth.auth_scheme
+                            auth_credentials_in = auth.auth_credentials
 
                     if do_handler:
                         # F1: 类型化参数校验 (Goal-0002 §1.1). 校验失败 -> 422 + detail.
@@ -1558,6 +1578,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                     req_params["auth_token"] = auth_token_in
                                 if auth_apikey_in != "":
                                     req_params["auth_apikey"] = auth_apikey_in
+                                if auth_scheme_in != "":
+                                    req_params["auth_scheme"] = auth_scheme_in
+                                if auth_credentials_in != "":
+                                    req_params["auth_credentials"] = auth_credentials_in
                                 if "_reads_headers" in route_result.handler.data:
                                     inject_request_headers(req_params, route_result.handler.data["_reads_headers"])
                                     # 决策-54: typed header 覆盖字符串注入 (在场 = raw 串; 缺失+默认 = 类型化字面量)

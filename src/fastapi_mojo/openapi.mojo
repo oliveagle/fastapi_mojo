@@ -26,6 +26,7 @@ from form_params import (form_has_declaration, form_openapi_schema,
                          get_form_aliases, _cap_name, _openapi_form_field_schema)
 from string_builder import StringBuilder
 from openapi_multipart import (multipart_openapi_schema, multipart_request_body_required, multipart_route)
+from openapi_security import operation_security_json, security_schemes_json
 from json import json_escape
 from openapi_custom import (default_summary, default_operation_id,
                              openapi_info_json, openapi_servers_json,
@@ -57,69 +58,6 @@ def _route_hidden(r: Route) raises -> Bool:
     → 路由可服务但不进 spec paths/components."""
     return ("_include_in_schema" in r.handler.data
             and r.handler.data["_include_in_schema"] == "0")
-
-
-def _split_semi(s: String) -> List[String]:
-    """按 `;` 切 + trim + 去空 (决策-67 scope 声明; 局部实现避免跨模块 import)."""
-    var out = List[String]()
-    var n = s.byte_length()
-    var start = 0
-    var i = 0
-    while i <= n:
-        if (i == n) or (ord(s[byte=i]) == 59):  # ';'
-            if i > start:
-                var b = start
-                var e = i
-                while b < e and (ord(s[byte=b]) == 32 or ord(s[byte=b]) == 9):
-                    b += 1
-                while e > b and (ord(s[byte=e - 1]) == 32 or ord(s[byte=e - 1]) == 9):
-                    e -= 1
-                if e > b:
-                    out.append(String(s[byte=b:e]))
-            start = i + 1
-        i += 1
-    return out^
-
-
-def _security_scopes_json(handler: Handler) raises -> String:
-    """`_auth_scopes` (决策-67, `;` 分隔) -> OpenAPI security scope 数组 JSON."""
-    var out = ""
-    if "_auth_scopes" in handler.data:
-        for sc in _split_semi(handler.data["_auth_scopes"]):
-            if out.byte_length() > 0:
-                out += ","
-            out += "\"" + json_escape(sc) + "\""
-    return out
-
-
-def _oauth2_scheme_scopes_json(router: Router) raises -> Tuple[String, String]:
-    """扫描路由表: token handler 声明的 `_oauth2_scopes` (`name=desc;...`) ->
-    (scopes 对象 JSON, tokenUrl). tokenUrl 默认 "token"; 无声明 -> 空对象."""
-    var scopes_json = ""
-    var token_url = "token"
-    var total = router.route_count()
-    for i in range(total):
-        if "_oauth2_token_url" in router.routes[i].handler.data:
-            var tu = router.routes[i].handler.data["_oauth2_token_url"]
-            if tu != "":
-                token_url = tu
-        if "_oauth2_scopes" in router.routes[i].handler.data:
-            var spec = router.routes[i].handler.data["_oauth2_scopes"]
-            for pair in _split_semi(spec):
-                # 首个 '=' 切 name / desc
-                var eq = -1
-                for k in range(pair.byte_length()):
-                    if ord(pair[byte=k]) == 61:  # '='
-                        eq = k
-                        break
-                if eq <= 0:
-                    continue
-                var nm = String(pair[byte=0:eq])
-                var desc = String(pair[byte=eq + 1:pair.byte_length()])
-                if scopes_json.byte_length() > 0:
-                    scopes_json += ","
-                scopes_json += "\"" + json_escape(nm) + "\":\"" + json_escape(desc) + "\""
-    return (scopes_json, token_url)
 
 
 def _generate_operation(route: Route) raises -> String:
@@ -365,10 +303,10 @@ def _generate_operation(route: Route) raises -> String:
     if started:
         sb.append(",")
     sb.append("\"responses\":{" + responses.take() + "}")
-    # 决策-44/67: _auth=oauth2 -> operation-level security (OpenAPI OAuth2 scheme 引用);
-    # 决策-67: `_auth_scopes` (`;` 分隔) -> security requirement scope 数组
-    if "_auth" in h.data and h.data["_auth"] == "oauth2":
-        sb.append(",\"security\":[{\"OAuth2PasswordBearer\":[" + _security_scopes_json(h) + "]}]")
+    # 决策-44/67/69: operation-level security (openapi_security.mojo 单一职责).
+    var sec = operation_security_json(h)
+    if sec != "":
+        sb.append(sec)
     # P24-4: deprecated (仅 true 时出现; check_openapi_specs 已注册期校验 ∈ {"","1"})
     if "_deprecated" in h.data and h.data["_deprecated"] == "1":
         sb.append(",\"deprecated\":true")
@@ -422,7 +360,9 @@ def generate_openapi(router: Router, title: String, version: String, description
             if not first_method:
                 sb.append(",")
             first_method = False
-            sb.append("\"" + router.routes[j].method + "\":{" + _generate_operation(router.routes[j]) + "}")
+            # OpenAPI 3.0 Path Item method 字段是固定小写关键字 (get/post/...);
+            # 上游 FastAPI/Starlette 输出小写 (本仓库路由表内部方法名为大写).
+            sb.append("\"" + lower_ascii(router.routes[j].method) + "\":{" + _generate_operation(router.routes[j]) + "}")
         sb.append("}")
     sb.append("}")
     # 决策-38: components/schemas (from _body_schema declaration, handler.name 去重)
@@ -469,23 +409,14 @@ def generate_openapi(router: Router, title: String, version: String, description
                 schemas.append("\"" + json_escape(fname) + "\":" + multipart_openapi_schema(router.routes[i].handler, m))
             else:
                 schemas.append("\"" + json_escape(fname) + "\":" + form_openapi_schema(router.routes[i].handler, m))
-    # 决策-44: components = schemas (决策-38) + securitySchemes (oauth2 路由存在时)
+    # 决策-44/69: components = schemas (决策-38) + securitySchemes (有 _auth 路由时)
     var comps = List[String]()
     if len(schemas) > 0:
         comps.append("\"schemas\":{" + ",".join(schemas) + "}")
-    var has_oauth2 = False
-    for i in range(total):
-        if _route_hidden(router.routes[i]):
-            continue
-        if "_auth" in router.routes[i].handler.data and router.routes[i].handler.data["_auth"] == "oauth2":
-            has_oauth2 = True
-            break
-    if has_oauth2:
-        # 决策-67: OAuth2PasswordBearer securityScheme = FastAPI `type:oauth2` +
-        # password flow (scopes 对象 + tokenUrl); 键序对齐上游探测
-        # (type, flows, password:{scopes, tokenUrl}).
-        var osj = _oauth2_scheme_scopes_json(router)
-        comps.append("\"securitySchemes\":{\"OAuth2PasswordBearer\":{\"type\":\"oauth2\",\"flows\":{\"password\":{\"scopes\":{" + osj[0] + "},\"tokenUrl\":\"" + json_escape(osj[1]) + "\"}}}}")
+    # 决策-44/67/69: securitySchemes (openapi_security.mojo) — 路由表所有 _auth 声明.
+    var ssj = security_schemes_json(router)
+    if ssj != "":
+        comps.append(ssj)
     if len(comps) > 0:
         sb.append(",\"components\":{" + ",".join(comps) + "}")
     # 根 tags (P24-2 / §3.5-9: openapi_tags 独立 — 路由级 tags **不**并入;

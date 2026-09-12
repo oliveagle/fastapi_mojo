@@ -63,6 +63,21 @@ def _starts_with(s: String, p: String) -> Bool:
 
 # ---------- base64 解码 (纯 Mojo, HTTPBasic 需要) ----------
 
+def _eq_ci(s: String, lower: String) -> Bool:
+    """s 与全小写字面量 lower 的大小写不敏感相等 (ASCII)."""
+    if s.byte_length() != lower.byte_length():
+        return False
+    var i = 0
+    while i < s.byte_length():
+        var a = ord(s[byte=i])
+        if a >= 65 and a <= 90:
+            a += 32
+        if a != ord(lower[byte=i]):
+            return False
+        i += 1
+    return True
+
+
 def _b64_val(c: Int) -> Int:
     """base64 字符 -> 6-bit 值; 非字母表 (含 padding '=') -> -1.
     兼容标准 (+/) 与 URL-safe (-_) 两种字母表 (RFC 4648)."""
@@ -121,6 +136,8 @@ struct AuthResult:
     var auth_user: String          # basic: 用户名
     var auth_token: String         # bearer: token
     var auth_apikey: String        # apikey: key
+    var auth_scheme: String        # digest: Authorization scheme (原样大小写)
+    var auth_credentials: String   # digest: credentials 部分
 
     def __init__(out self):
         self.ok = False
@@ -130,6 +147,8 @@ struct AuthResult:
         self.auth_user = ""
         self.auth_token = ""
         self.auth_apikey = ""
+        self.auth_scheme = ""
+        self.auth_credentials = ""
 
 
 def _realm_part(realm: String) -> String:
@@ -350,6 +369,32 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
         s3.ok = True
         s3.auth_apikey = key
         return s3^
+
+    # ---- HTTPDigest (上游 stub parity: 只校验 scheme, 不实现完整 digest) ----
+    elif auth_spec == "digest":
+        var authz3 = _get_header("Authorization")
+        var scheme3 = ""
+        var creds3 = ""
+        var sp = -1
+        for k in range(authz3.byte_length()):
+            if ord(authz3[byte=k]) == 32:  # ' '
+                sp = k
+                break
+        if sp > 0:
+            scheme3 = _bstr(authz3, 0, sp)
+        if sp >= 0:
+            creds3 = _trim(_bstr(authz3, sp + 1, authz3.byte_length()))
+        if authz3 == "" or scheme3 == "" or creds3 == "" or not _eq_ci(scheme3, "digest"):
+            var f9 = AuthResult()
+            f9.ok = False
+            f9.detail = "Not authenticated"
+            f9.www_authenticate = "Digest"
+            return f9^
+        var s4 = AuthResult()
+        s4.ok = True
+        s4.auth_scheme = scheme3
+        s4.auth_credentials = creds3
+        return s4^
 
     # ---- 未知 spec ----
     else:

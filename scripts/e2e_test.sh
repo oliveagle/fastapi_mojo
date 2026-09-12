@@ -29,6 +29,7 @@
 #   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
 #   - Rust JSON serializer opt-in: FASTAPI_MOJO_JSON_SERIALIZER=rust (决策-66, JR-1..JR-6)
 #   - OAuth2 scopes: _auth_scopes gate + oauth2 flows OpenAPI (决策-67, OT-24..OT-33)
+#   - HTTPDigest runtime + OpenAPI securitySchemes (basic/bearer/digest/apiKey) (决策-69, DG-1..6 / SO-1..5)
 #   - RedirectResponse: _redirect_url + _redirect_status 307/303/301/308 + URL quote (决策-68, RD-1..RD-10)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
@@ -927,6 +928,42 @@ APIQ_BAD=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" "$BASE/api-q?key=bad")
 if [[ "$APIQ_BAD" == "401" ]]; then pass "SEC-Q2 apikey query wrong -> 401"
 else fail "SEC-Q2 apikey query wrong -> 401" "got $APIQ_BAD"; fi
 
+# --- 决策-69 (ADR-0044): HTTPDigest runtime + OpenAPI securitySchemes ----------------
+echo "== HTTPDigest + securitySchemes (决策-69) =="
+DG_NO=$(curl -sS -m 5 -D - -o "$TMP/dg_no.json" "$BASE/digest")
+if [[ "$DG_NO" == *'HTTP/1.1 401'* && "$DG_NO" == *'WWW-Authenticate: Digest'* ]]; then pass "DG-1 digest no auth -> 401 + WWW-Authenticate: Digest"
+else fail "DG-1 digest no auth -> 401 + WWW-Authenticate: Digest" "hdr: ${DG_NO:0:200}"; fi
+if "$FMTOOL" jsoncheck "$TMP/dg_no.json" >/dev/null && [[ "$(cat "$TMP/dg_no.json")" == *'"detail": "Not authenticated"'* ]]; then pass "DG-2 digest 401 detail Not authenticated"
+else fail "DG-2 digest 401 detail" "body: $(head -c 120 "$TMP/dg_no.json")"; fi
+DG_OK=$(curl -sS -m 5 -H "Authorization: Digest abc123" "$BASE/digest")
+if [[ "$DG_OK" == *'"auth_scheme": "Digest"'* && "$DG_OK" == *'"auth_credentials": "abc123"'* ]]; then pass "DG-3 digest ok -> 200 + auth_scheme/auth_credentials"
+else fail "DG-3 digest ok" "body: ${DG_OK:0:200}"; fi
+DG_LC=$(curl -sS -m 5 -H "Authorization: digest xyz" "$BASE/digest")
+if [[ "$DG_LC" == *'"auth_scheme": "digest"'* && "$DG_LC" == *'"auth_credentials": "xyz"'* ]]; then pass "DG-4 digest scheme case-insensitive (lowercase ok)"
+else fail "DG-4 digest lowercase" "body: ${DG_LC:0:200}"; fi
+DG_B=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer tok" "$BASE/digest")
+if [[ "$DG_B" == "401" ]]; then pass "DG-5 wrong scheme (Bearer) -> 401"
+else fail "DG-5 wrong scheme (Bearer) -> 401" "got $DG_B"; fi
+EB2_HEX=$(printf 'GET /digest HTTP/1.1\r\nAuthorization: Digest \r\nConnection: close\r\n\r\n' | od -An -tx1 -v | tr -d ' \n')
+expect_raw_status "DG-6 empty credentials -> 401" "401 Unauthorized" "$EB2_HEX"
+
+SO_API=$(http_body "$BASE/openapi.json")
+if [[ "$SO_API" == *'"HTTPBasic":{"type":"http","scheme":"basic"}'* && "$SO_API" == *'"HTTPBearer":{"type":"http","scheme":"bearer"}'* && "$SO_API" == *'"HTTPDigest":{"type":"http","scheme":"digest"}'* ]]; then
+    pass "SO-1 securitySchemes http basic/bearer/digest"
+else fail "SO-1 securitySchemes http basic/bearer/digest" "missing in: ${SO_API:0:200}"; fi
+if [[ "$SO_API" == *'"APIKeyHeader":{"type":"apiKey","in":"header","name":"X-Api-Key"}'* && "$SO_API" == *'"APIKeyQuery":{"type":"apiKey","in":"query","name":"key"}'* ]]; then
+    pass "SO-2 securitySchemes apiKey header/query (in,name)"
+else fail "SO-2 securitySchemes apiKey" "missing in: ${SO_API:0:200}"; fi
+if [[ "$SO_API" == *'"/basic":{"get":{"summary":"Secure Basic"'* && "$SO_API" == *'"security":[{"HTTPBasic":[]}]'* ]]; then
+    pass "SO-3 operation security HTTPBasic + lowercase method key"
+else fail "SO-3 operation security HTTPBasic" "missing in: ${SO_API:0:400}"; fi
+if [[ "$SO_API" == *'"MyBasicAuth":{"type":"http","scheme":"basic"}'* && "$SO_API" == *'"security":[{"MyBasicAuth":[]}]'* ]]; then
+    pass "SO-4 _auth_scheme_name override (MyBasicAuth)"
+else fail "SO-4 _auth_scheme_name override" "missing in: ${SO_API:0:400}"; fi
+if [[ "$SO_API" != *'{"GET":'* && "$SO_API" != *'{"POST":'* && "$SO_API" != *'{"DELETE":'* && "$SO_API" != *'{"PATCH":'* ]]; then
+    pass "SO-5 OpenAPI method keys lowercase (no uppercase method keys)"
+else fail "SO-5 method keys lowercase" "found uppercase method key"; fi
+
 # --- response_model (决策-35, Goal-0003 P1): 响应字段过滤 ---------------------------------
 # /profile 返回 name/age/email/secret, 但 _response_model="name;age" 只返回 name/age.
 echo "== response_model (决策-35) =="
@@ -1484,7 +1521,7 @@ ot_probe "OT-23 issued-expired token 401" 401 "$OT23_TOK"
 
 # OT-24/25: OpenAPI securitySchemes + operation-level security
 OT_API=$(http_body "$BASE/openapi.json")
-if [[ "$OT_API" == *'"securitySchemes":{"OAuth2PasswordBearer":{"type":"oauth2","flows":{"password":{"scopes":{"items:read":"Read items","items:write":"Write items","admin":"Admin only"},"tokenUrl":"token"}}}}'* ]]; then
+if [[ "$OT_API" == *'"OAuth2PasswordBearer":{"type":"oauth2","flows":{"password":{"scopes":{"items:read":"Read items","items:write":"Write items","admin":"Admin only"},"tokenUrl":"token"}}}}'* ]]; then
     pass "OT-24 openapi securitySchemes OAuth2 oauth2 (scopes+tokenUrl)"
 else
     fail "OT-24 openapi securitySchemes OAuth2 oauth2 (scopes+tokenUrl)" "missing in: ${OT_API:0:200}"
