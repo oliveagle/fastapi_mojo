@@ -4,7 +4,7 @@
 //   raw      → raw_status()  (发 hex 原始字节, 打印状态行)
 //   cont100  → CC_RESULT     (100-continue: interim 100 然后 200, dt<0.9s)
 //   keepalive→ KA_RESULT     (单连接多请求 + Connection:close + idle 清理)
-//   headbody → HEAD_BODY_BYTES (HEAD / 的 body 字节数)
+//   headbody → HEAD_BODY_BYTES (HEAD [path] 的 body 字节数)
 //   ws1..ws4 → WS_OUT / WS2_OUT / WS3_OUT / WS4_OUT (markers M1..M21)
 //   slowloris→ 半发送 + 探针后台客户端
 //
@@ -211,12 +211,14 @@ fn read_some(s: &mut TcpStream) -> Vec<u8> {
 
 // ---------- headbody ----------
 
-pub fn headbody(port: u16) -> i32 {
+pub fn headbody(port: u16, path: &str) -> i32 {
     let mut s = match tcp_connect(&format!("127.0.0.1:{port}"), DEFAULT_TIMEOUT) {
         Ok(s) => s,
         Err(e) => { println!("FAIL connect: {e}"); return 1; }
     };
-    let _ = send_exact(&mut s, b"HEAD / HTTP/1.1\r\nHost: x\r\n\r\n");
+    // Connection: close -> server 关连后立即 EOF, 无需等超时即可判 HEAD body.
+    let req = format!("HEAD {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let _ = send_exact(&mut s, req.as_bytes());
     let resp = read_response(&mut s).unwrap_or_default();
     // body 字节数 = 读到 content-length 之后的部分
     let head_end = resp

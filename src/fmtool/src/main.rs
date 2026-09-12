@@ -7,7 +7,7 @@
 //   jsoncheck [FILE|-]             validate JSON (exit 0/1)
 //   cont100  <port>                  100-continue probe (print OK/FAIL dt=...)
 //   keepalive <port>                 keep-alive + Connection:close + idle
-//   headbody  <port>                 HEAD / body byte count
+//   headbody  <port> [path]          HEAD [path] body byte count
 //   ws1      <port>                  WS markers M1..M6
 //   ws2      <port>                  WS markers M7..M13
 //   ws3      <port>                  WS markers M14..M16 (concurrent)
@@ -44,7 +44,7 @@ USAGE:
   fmtool f64repr  <decimal>        f64 shortest round-trip Display
   fmtool cont100  <port>
   fmtool keepalive <port>
-  fmtool headbody  <port>
+  fmtool headbody  <port> [path]
   fmtool http2   <port>          prior-knowledge h2c checks H2-1..H2-7
   fmtool ws1      <port>
   fmtool ws2      <port>
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
         "f64repr" => run_f64repr(&rest),
         "cont100" => run_e2e_port("cont100", &rest, e2e::cont100),
         "keepalive" => run_e2e_port("keepalive", &rest, e2e::keepalive),
-        "headbody" => run_e2e_port("headbody", &rest, e2e::headbody),
+        "headbody" => run_headbody(&rest),
         "http2" => run_e2e_port("http2", &rest, http2::e2e),
         "ws1" => run_e2e_port("ws1", &rest, e2e::ws1),
         "ws2" => run_e2e_port("ws2", &rest, e2e::ws2),
@@ -144,6 +144,18 @@ fn run_jsoncheck(args: &[&str]) -> i32 {
         Ok(_) => { println!("OK"); 0 }
         Err(e) => { eprintln!("INVALID: {e}"); 1 }
     }
+}
+
+fn run_headbody(args: &[&str]) -> i32 {
+    if args.is_empty() || args.len() > 2 {
+        eprintln!("usage: fmtool headbody <port> [path]");
+        return 2;
+    }
+    let port = match args[0].parse::<u16>() {
+        Ok(n) => n,
+        Err(_) => { eprintln!("bad port"); return 2; }
+    };
+    e2e::headbody(port, args.get(1).copied().unwrap_or("/"))
 }
 
 fn run_e2e_port<F: FnOnce(u16) -> i32>(name: &str, args: &[&str], f: F) -> i32 {

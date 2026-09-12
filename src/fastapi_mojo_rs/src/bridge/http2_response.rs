@@ -59,24 +59,28 @@ pub fn send_streaming(fd: c_int, status: &str, body: &str, media_type: &str, ext
     } else {
         Some(apply_charset_rule(media_type))
     };
+    // 决策-77 (ADR-0052): HEAD → 仅头无体（HEADERS 带 END_STREAM, 无 DATA）。
+    let is_head = super::request::current_method_is_head();
     let Some(mut frames) = header_frames(
         stream,
         status,
         media_type.as_deref(),
         None,
-        chunks.is_empty(),
+        chunks.is_empty() || is_head,
         &extra,
     ) else {
         return -1;
     };
-    for (i, chunk) in chunks.iter().enumerate() {
-        let last = i + 1 == chunks.len();
-        frames.push(frame(
-            DATA,
-            if last { END_STREAM } else { 0 },
-            stream,
-            chunk.as_bytes(),
-        ));
+    if !is_head {
+        for (i, chunk) in chunks.iter().enumerate() {
+            let last = i + 1 == chunks.len();
+            frames.push(frame(
+                DATA,
+                if last { END_STREAM } else { 0 },
+                stream,
+                chunk.as_bytes(),
+            ));
+        }
     }
     send_frames(fd, status, &frames)
 }

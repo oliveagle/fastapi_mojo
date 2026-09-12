@@ -589,6 +589,27 @@ else
 fi
 expect_code "OPTIONS / -> 204" 204 "$BASE/" OPTIONS
 
+# 决策-77 (ADR-0052): HEAD 请求统一仅头无体。上游 FastAPI 对 HEAD 返回与 GET
+# 相同的响应头 (Content-Length = 完整体长度) 但不发体; 此前内置 doc 路由 /
+# KIND_HTML / streaming 在 HEAD 下仍发 body -> keep-alive 连接脱轨 bug。
+# 判定: fmtool headbody <port> <path> (读 body 字节数) + curl -I 取 Content-Length.
+head_check() {  # name path
+    local name="$1" path="$2"
+    local body_bytes glen cl
+    body_bytes=$("$FMTOOL" headbody "$PORT" "$path")
+    glen=$(curl -s --max-time 10 "$BASE$path" | wc -c | tr -d ' ')
+    cl=$(curl -s -I --max-time 10 "$BASE$path" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}')
+    if [[ "$body_bytes" == "0" && -n "$cl" && "$cl" == "$glen" ]]; then
+        pass "$name HEAD $path -> no body, CL=$cl = GET len"
+    else
+        fail "$name HEAD $path -> no body, CL = GET len" "body=$body_bytes cl=$cl get=$glen"
+    fi
+}
+head_check "HD-1" "/docs"
+head_check "HD-2" "/redoc"
+head_check "HD-3" "/docs/oauth2-redirect"
+head_check "HD-4" "/openapi.json"
+
 # --- static files -------------------------------------------------------------
 
 echo "== static files =="

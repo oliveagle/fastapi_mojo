@@ -29,8 +29,8 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
 use super::request::{
-    current_accepts_gzip, current_cors_request, current_origin, current_pna,
-    get_close_after_response, set_last_status,
+    current_accepts_gzip, current_cors_request, current_method_is_head, current_origin,
+    current_pna, get_close_after_response, set_last_status,
 };
 use super::http2_response;
 use super::cors;
@@ -101,6 +101,13 @@ pub fn send_response(
     include_body: bool,
     extra: Option<&str>,
 ) -> c_int {
+    // 决策-77 (ADR-0052): HEAD 请求统一无 body。上游 FastAPI 对 HEAD 返回与 GET
+    // 相同的响应头（含 Content-Length = 完整体长度）但不发体（RFC 9110 §9.3.2）;
+    // 经 `send_response` 的所有响应（内置 doc 路由 / KIND_HTML / JSON / static /
+    // SSE / error / 404 / 405）在 HEAD 下统一抑制 body。判定复用 request 全局的
+    // 原始方法（与 `file_serve` 同一 helper），无新 FFI。这样 HEAD 响应不再把
+    // body 留在 keep-alive 连接上（此前的协议脱轨 bug）。
+    let include_body = include_body && !current_method_is_head();
     // 决策-55 (ADR-0030): 用户自定义中间件响应面 — GZip 判定前:
     // 用户 mw 位于固定 GZip/CORS env 层之内; BODY 替换重算 Content-Length
     // (修上游 stale-CL h11 悬机, P-MW-5); 未设 env = 零开销直通.
@@ -274,6 +281,11 @@ pub fn send_streaming_response(
     set_last_status(status.as_bytes());
     if send_all(fd, h.as_bytes()) != 0 {
         return -1;
+    }
+    // 决策-77 (ADR-0052): HEAD → 仅头无体（无 chunk 数据 / 无终止符; 头块即结束,
+    // 与上游 HEAD 语义一致）。
+    if current_method_is_head() {
+        return 0;
     }
     for part in body.split('|') {
         if part.is_empty() {

@@ -10,7 +10,7 @@
 use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::request::{current_accepts_gzip, get_last_status_len, read_last_status_byte, reset_request_fields, set_accepts_gzip};
+use super::request::{current_accepts_gzip, get_last_status_len, read_last_status_byte, reset_request_fields, set_accepts_gzip, set_http_fields};
 use super::send::*;
 use super::state::set_static_dir;
 
@@ -526,6 +526,46 @@ fn send_response_identity_when_client_no_gzip() {
     assert!(!text.contains("Content-Encoding"), "no gzip without client accept");
     let b = body_after_headers(&resp);
     assert_eq!(b, &body[..], "body must be untouched");
+    reset_request_fields();
+}
+
+// ---------- 决策-77 (ADR-0052): HEAD 仅头无体 ----------
+
+/// HEAD 请求 → 响应头 (含 Content-Length = 完整体长度) 但无 body; GET 对照有体。
+/// 上游 FastAPI: HEAD 返回与 GET 相同的头, 体为空。
+#[test]
+fn send_response_head_suppresses_body_keeps_content_length() {
+    let mut cp = ConnPair::new();
+    let body = vec![b'h'; 700];
+    // HEAD: 头齐 + Content-Length = 完整体 700, 无 body
+    set_http_fields(b"HEAD", b"/x", b"", true, false, cp.b);
+    assert_eq!(send_simple_response(cp.b, "200 OK", &body), 0);
+    let resp = recv_all(&mut cp);
+    let text = String::from_utf8_lossy(&resp);
+    assert!(
+        text.contains("Content-Length: 700"),
+        "HEAD CL must equal full length: {}",
+        &text[..text.len().min(220)]
+    );
+    assert!(body_after_headers(&resp).is_empty(), "HEAD must carry no body");
+    // GET 对照: 完整 body
+    set_http_fields(b"GET", b"/x", b"", true, false, cp.b);
+    assert_eq!(send_simple_response(cp.b, "200 OK", &body), 0);
+    let resp = recv_all(&mut cp);
+    assert_eq!(body_after_headers(&resp), &body[..], "GET keeps body");
+    reset_request_fields();
+}
+
+/// HEAD streaming → 头块 (Transfer-Encoding: chunked) 后无 chunk / 无终止符。
+#[test]
+fn send_streaming_head_suppresses_chunks() {
+    let mut cp = ConnPair::new();
+    set_http_fields(b"HEAD", b"/s", b"", true, false, cp.b);
+    assert_eq!(send_streaming_response(cp.b, "200 OK", "aa|bb", "text/plain", ""), 0);
+    let resp = recv_all(&mut cp);
+    let text = String::from_utf8_lossy(&resp);
+    assert!(text.contains("Transfer-Encoding: chunked"), "head frame intact");
+    assert!(body_after_headers(&resp).is_empty(), "HEAD streaming must have no chunks");
     reset_request_fields();
 }
 
