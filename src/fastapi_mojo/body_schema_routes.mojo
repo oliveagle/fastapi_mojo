@@ -47,3 +47,9 @@ def register_body_schema_routes(mut router: Router) raises:
     cross_arr_h.set_data("message", "cross-type array demo")
     cross_arr_h.set_data("_body_schema", "is:int[];fs:float[];bs:bool[]")
     router.add_route("/validate/cross-arr", "POST", cross_arr_h)
+
+    # Decision-83 (ADR-0058): 422 detail 对齐 demo (ctx / multiple_of / 字符计数 / plural).
+    var detail_h = Handler(KIND_ECHO(), "validate_detail")
+    detail_h.set_data("message", "detail parity demo")
+    detail_h.set_data("_body_schema", "s:str|len=2-4;n:int|ge=10,mo=3;f:float|mo=0.5;xs:int[]|items=1-2,mo=2;mode:str[fast,slow]")
+    router.add_route("/bs/detail", "POST", detail_h)

@@ -237,7 +237,8 @@ def parse_float_lax(s: String) -> Tuple[Bool, String]:
         if ord(s[byte=t]) != 95:
             cleaned += chr(ord(s[byte=t]))
     try:
-        var v = Float64(cleaned)
+        # 决策-83 修复: sign 必须拼回 (原实现 range(i, n) 跳过符号位 -> 负号丢失).
+        var v = Float64(sign + cleaned)
         return (True, String(v))
     except:
         return (False, "")

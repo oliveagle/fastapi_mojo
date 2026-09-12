@@ -37,6 +37,13 @@ from json_rust import serialize_dict_opt_in
 from params_query import url_decode  # _parse_form_body (决策-44 从 http_server_final 移入)
 
 
+def _bof(s: String, i: Int) -> Int:
+    """字节安全取值 (Mojo 1.0.0: String[byte=i] 在码点内部下标会 assert;
+    as_bytes() span 取原始字节, 避免多字节输入 (如 form/cookie 值含 UTF-8) 崩溃)。
+    仅用于 ASCII 分隔字节比较 — 多字节首字节 >= 0xC2, 永不等于 ASCII 分隔符。"""
+    return Int(s.as_bytes()[i])
+
+
 # ---------- 嵌套 JSON helpers ----------
 
 def nest_dict(d: Dict[String, String]) raises -> String:
@@ -66,16 +73,16 @@ def _split_csv(s: String, sep_byte: Int = 44) -> List[String]:
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(s[byte=i]) == sep_byte)  # 分隔字节 (默认 ,)
+        var is_sep = (i == n) or (_bof(s, i) == sep_byte)  # 分隔字节 (默认 ,)
         if is_sep:
             if i > start:
                 var piece = String(s[byte=start:i])
                 # trim
                 var b = 0
                 var e = piece.byte_length()
-                while b < e and (ord(piece[byte=b]) == 32 or ord(piece[byte=b]) == 9):
+                while b < e and (_bof(piece, b) == 32 or _bof(piece, b) == 9):
                     b += 1
-                while e > b and (ord(piece[byte=e - 1]) == 32 or ord(piece[byte=e - 1]) == 9):
+                while e > b and (_bof(piece, e - 1) == 32 or _bof(piece, e - 1) == 9):
                     e -= 1
                 if e > b:
                     out.append(String(piece[byte=b:e]))
@@ -107,13 +114,13 @@ def _parse_form_body(body: String) -> Dict[String, String]:
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(body[byte=i]) == 38)  # '&'
+        var is_sep = (i == n) or (_bof(body, i) == 38)  # '&'
         if is_sep:
             if i > start:
                 var pair = String(body[byte=start:i])
                 var eq = -1
                 for j in range(pair.byte_length()):
-                    if ord(pair[byte=j]) == 61:  # '='
+                    if _bof(pair, j) == 61:  # '='
                         eq = j
                         break
                 if eq > 0:
@@ -141,13 +148,13 @@ def parse_form_multi(body: String) raises -> Dict[String, List[String]]:
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(body[byte=i]) == 38)  # '&'
+        var is_sep = (i == n) or (_bof(body, i) == 38)  # '&'
         if is_sep:
             if i > start:
                 var pair = String(body[byte=start:i])
                 var eq = -1
                 for j in range(pair.byte_length()):
-                    if ord(pair[byte=j]) == 61:  # '='
+                    if _bof(pair, j) == 61:  # '='
                         eq = j
                         break
                 var k = String("")
@@ -179,17 +186,17 @@ def _parse_cookies(cookie_header: String) -> Dict[String, String]:
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(cookie_header[byte=i]) == 59)  # ';'
+        var is_sep = (i == n) or (_bof(cookie_header, i) == 59)  # ';'
         if is_sep:
             if i > start:
                 var piece = String(cookie_header[byte=start:i])
                 # trim leading space
                 var b = 0
-                while b < piece.byte_length() and ord(piece[byte=b]) == 32:
+                while b < piece.byte_length() and _bof(piece, b) == 32:
                     b += 1
                 var eq = -1
                 for j in range(b, piece.byte_length()):
-                    if ord(piece[byte=j]) == 61:  # '='
+                    if _bof(piece, j) == 61:  # '='
                         eq = j
                         break
                 if eq > b:
@@ -217,13 +224,13 @@ def parse_response_headers(handler: Handler) raises -> List[String]:
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(raw[byte=i]) == 59)  # ';'
+        var is_sep = (i == n) or (_bof(raw, i) == 59)  # ';'
         if is_sep:
             if i > start:
                 var piece = String(raw[byte=start:i])
                 var colon = -1
                 for j in range(piece.byte_length()):
-                    if ord(piece[byte=j]) == 58:  # ':'
+                    if _bof(piece, j) == 58:  # ':'
                         colon = j
                         break
                 if colon < 0:
@@ -238,10 +245,10 @@ def parse_response_headers(handler: Handler) raises -> List[String]:
 
 def is_nested_marker(v: String) -> Bool:
     """True if v starts with __nested__: (raw JSON 透传标记)."""
-    return v.byte_length() > 10 and ord(v[byte=0]) == 95 and ord(v[byte=1]) == 95 and \
-           ord(v[byte=2]) == 110 and ord(v[byte=3]) == 101 and ord(v[byte=4]) == 115 and \
-           ord(v[byte=5]) == 116 and ord(v[byte=6]) == 101 and ord(v[byte=7]) == 100 and \
-           ord(v[byte=8]) == 95 and ord(v[byte=9]) == 95 and ord(v[byte=10]) == 58
+    return v.byte_length() > 10 and _bof(v, 0) == 95 and _bof(v, 1) == 95 and \
+           _bof(v, 2) == 110 and _bof(v, 3) == 101 and _bof(v, 4) == 115 and \
+           _bof(v, 5) == 116 and _bof(v, 6) == 101 and _bof(v, 7) == 100 and \
+           _bof(v, 8) == 95 and _bof(v, 9) == 95 and _bof(v, 10) == 58
 
 
 # ---------- 决策-41: response_model exclude/include/exclude_none (ADR-0016) ----------
@@ -251,9 +258,9 @@ def _csv_contains(csv: List[String], v: String) -> Bool:
     for it in csv:
         var b = 0
         var e = it.byte_length()
-        while b < e and (ord(it[byte=b]) == 32 or ord(it[byte=b]) == 9):
+        while b < e and (_bof(it, b) == 32 or _bof(it, b) == 9):
             b += 1
-        while e > b and (ord(it[byte=e - 1]) == 32 or ord(it[byte=e - 1]) == 9):
+        while e > b and (_bof(it, e - 1) == 32 or _bof(it, e - 1) == 9):
             e -= 1
         if e > b:
             if String(it[byte=b:e]) == v:

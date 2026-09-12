@@ -480,6 +480,10 @@ expect_body_contains "BY-2b float<-bool true -> 1.0" '"body_f": "1.0"' "$BASE/va
 expect_body_contains "BY-2c bool<-0.0 -> false" '"body_b": "false"' "$BASE/validate/cross" POST '{"i":1e2,"f":true,"b":0.0}'
 expect_body_contains "BY-3a int<-string 7" '"body_i": "7"' "$BASE/validate/cross" POST '{"i":"7","f":"1.0","b":"1"}'
 expect_body_contains "BY-3b bool<-string 1 -> true" '"body_b": "true"' "$BASE/validate/cross" POST '{"i":"7","f":"1.0","b":"1"}'
+# 决策-83 附带: parse_float_lax/int 负号修复 (原实现丢符号 -> -1.5 变 1.5).
+expect_body_contains "BY-3c negative string int -7" '"body_i": "-7"' "$BASE/validate/cross" POST '{"i":"-7","f":"-1.5","b":1}'
+expect_body_contains "BY-3d negative string float -1.5" '"body_f": "-1.5"' "$BASE/validate/cross" POST '{"i":"-7","f":"-1.5","b":1}'
+expect_body_contains "BY-3e negative number float -0.5" '"body_f": "-0.5"' "$BASE/validate/cross" POST '{"i":-7,"f":-0.5,"b":0}'
 expect_code "BY-4a int<-7.5 -> 422" 422 "$BASE/validate/cross" POST '{"i":7.5,"f":1,"b":1}'
 expect_body_contains "BY-4b int_from_float type" '"type":"int_from_float"' "$BASE/validate/cross" POST '{"i":7.5,"f":1,"b":1}'
 expect_body_contains "BY-4c int_from_float msg" "got a number with a fractional part" "$BASE/validate/cross" POST '{"i":7.5,"f":1,"b":1}'
@@ -498,6 +502,53 @@ expect_code "BY-8a int[] 7.5 -> 422" 422 "$BASE/validate/cross-arr" POST '{"is":
 expect_body_contains "BY-8b int[] int_from_float idx loc" '["body","is",0]' "$BASE/validate/cross-arr" POST '{"is":[7.5],"fs":[],"bs":[]}'
 expect_code "BY-9a int[] null -> 422" 422 "$BASE/validate/cross-arr" POST '{"is":[null],"fs":[],"bs":[]}'
 expect_body_contains "BY-9b int[] null -> int_type" '"type":"int_type"' "$BASE/validate/cross-arr" POST '{"is":[null],"fs":[],"bs":[]}'
+
+echo "== body 422 detail parity (决策-83, ADR-0058) =="
+# pydantic v2 model: 422 detail 键序 loc,msg,type,input,ctx; msg 文案 + ctx 值逐字节对齐;
+# 数值约束首违序 multiple_of->le->lt->ge->gt; str len 按 codepoint 计数 (非字节);
+# 列表长度错 too_short/too_long 先于元素校验并短路; mo = multiple_of 约束.
+MX_VALID='{"s":"ab","n":12,"f":0.5,"xs":[2,4],"mode":"fast"}'
+expect_code "MX-1a detail demo valid -> 200" 200 "$BASE/bs/detail" POST "$MX_VALID"
+expect_body_contains "MX-1b valid n canonical" '"body_n": "12"' "$BASE/bs/detail" POST "$MX_VALID"
+expect_code "MX-2a str codepoint len too short -> 422" 422 "$BASE/bs/detail" POST '{"s":"é","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-2b str_too_short msg" "String should have at least 2 characters" "$BASE/bs/detail" POST '{"s":"é","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-2c str_too_short ctx" '"ctx":{"min_length":2}' "$BASE/bs/detail" POST '{"s":"é","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-2d codepoint input (é = 1 char, 2 bytes)" '"input":"é"' "$BASE/bs/detail" POST '{"s":"é","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-3a str_too_long msg" "String should have at most 4 characters" "$BASE/bs/detail" POST '{"s":"abcde","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-3b str_too_long ctx" '"ctx":{"max_length":4}' "$BASE/bs/detail" POST '{"s":"abcde","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_code "MX-4a multiple_of first (n=5: mo+ge) -> 422" 422 "$BASE/bs/detail" POST '{"s":"ab","n":5,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-4b multiple_of type" '"type":"multiple_of"' "$BASE/bs/detail" POST '{"s":"ab","n":5,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-4c multiple_of msg" "Input should be a multiple of 3" "$BASE/bs/detail" POST '{"s":"ab","n":5,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-4d multiple_of ctx" '"ctx":{"multiple_of":3}' "$BASE/bs/detail" POST '{"s":"ab","n":5,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-4e ge after mo (n=9)" '"type":"greater_than_equal"' "$BASE/bs/detail" POST '{"s":"ab","n":9,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-4f ge ctx" '"ctx":{"ge":10}' "$BASE/bs/detail" POST '{"s":"ab","n":9,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-5a float multiple_of msg" "Input should be a multiple of 0.5" "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.3,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-5b float multiple_of ctx" '"ctx":{"multiple_of":0.5}' "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.3,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-6a items too_short singular msg" "at least 1 item after validation, not 0" "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.5,"xs":[],"mode":"fast"}'
+expect_body_contains "MX-6b items too_short ctx" '"ctx":{"field_type":"List","min_length":1,"actual_length":0}' "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.5,"xs":[],"mode":"fast"}'
+expect_body_contains "MX-7a items too_long plural msg" "at most 2 items after validation, not 3" "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.5,"xs":[2,4,6],"mode":"fast"}'
+expect_body_contains "MX-7b items too_long ctx" '"ctx":{"field_type":"List","max_length":2,"actual_length":3}' "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.5,"xs":[2,4,6],"mode":"fast"}'
+expect_body_contains "MX-8a elem multiple_of idx loc" '["body","xs",1]' "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.5,"xs":[2,3],"mode":"fast"}'
+expect_body_contains "MX-8b elem multiple_of ctx" '"ctx":{"multiple_of":2}' "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.5,"xs":[2,3],"mode":"fast"}'
+expect_body_contains "MX-9a enum ctx.expected" "\"ctx\":{\"expected\":\"'fast' or 'slow'\"}" "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.5,"xs":[2],"mode":"turbo"}'
+
+# 决策-83 附带: input 片段按 JSON 类型渲染 — JSON 字符串 "1"/"1e1"/"0.3" 报错时
+# input 带引号 (上游 pydantic 保留原 JSON 类型); 数值字面量 input 不带引号.
+expect_body_contains "MX-10a string field numeric-look input quoted" '"input":"1"' "$BASE/bs/detail" POST '{"s":"1","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-10b string field '12345' input quoted" '"input":"12345"' "$BASE/bs/detail" POST '{"s":"12345","n":12,"f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-10c int-from-string '1e1' input quoted" '"type":"int_parsing","input":"1e1"' "$BASE/bs/detail" POST '{"s":"ab","n":"1e1","f":0.5,"xs":[2],"mode":"fast"}'
+expect_body_contains "MX-10d float-from-string '0.3' input quoted" '"type":"multiple_of","input":"0.3"' "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":"0.3","xs":[2],"mode":"fast"}'
+expect_body_contains "MX-10e numeric literal input unquoted" '"type":"int_from_float","input":7.5' "$BASE/bs/detail" POST '{"s":"ab","n":7.5,"f":0.5,"xs":[2],"mode":"fast"}'
+# 决策-83 附带: 多字节数组元素不再崩溃 (_split_json_array 字节安全扫描);
+# 上游: 元素 1 的 pat 违规 (loc items,1) + input 保留 JSON 字符串.
+expect_body_contains "MX-11a multibyte array elem no crash + elem loc" '["body","items",1]' "$BASE/validate/elems" POST '{"items":["a","é"],"nums":[1]}'
+expect_body_contains "MX-11b multibyte array elem pattern mismatch input" '"type":"string_pattern_mismatch","input":"é"' "$BASE/validate/elems" POST '{"items":["a","é"],"nums":[1]}'
+expect_code "MX-12 server alive after multibyte form/array paths" 200 "$BASE/health"
+# 决策-83 附带: 多字节 Cookie 值不再崩溃 (_parse_cookies 字节安全扫描).
+MX13=$(curl -sS -m 5 -H "Cookie: session_id=café; user_id=7" "$BASE/cookies")
+if [[ "$MX13" == *'"cookie_session_id": "café"'* && "$MX13" == *'"cookie_user_id": "7"'* ]]; then
+    pass "MX-13 multibyte cookie value no crash"
+else fail "MX-13 multibyte cookie value no crash" "body: ${MX13:0:200}"; fi
 
 echo "== unified error body + error_map (Goal-0002 F2) =="
 # 声明式异常映射: _error_map = "item_id=99:404:Item not found;item_id=*:422:Invalid ID"

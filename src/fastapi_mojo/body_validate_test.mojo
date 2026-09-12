@@ -5,6 +5,7 @@
 
 from body_schema import parse_body_schema, get_field, field_count
 from body_validate import validate_body_schema, _check_body_spec
+from body_coerce import _coerce_body_scalar
 from handler import Handler
 from params_json import parse_body_json
 
@@ -21,14 +22,24 @@ def check(cond: Bool, msg: String) raises:
 
 
 def _has(s: String, sub: String) -> Bool:
-    """子串检查 (自测用; Mojo 1.0.0 String 无 contains)."""
-    var sn = sub.byte_length()
-    if sn == 0 or sn > s.byte_length():
+    """子串检查 (自测用; Mojo 1.0.0 String 无 contains).
+
+    字节级比较 (s.bytes() 迭代) — `s[byte=k]` 在 Mojo 1.0.0 要求 k 落在
+    codepoint 边界, 逐字节 `s[byte=i+j]` 遇到多字节字符会 panic (决策-83 自测
+    需检查含 "é" 的 422 JSON)."""
+    var sl = List[UInt8]()
+    for bb in s.bytes():
+        sl.append(bb)
+    var sub2 = List[UInt8]()
+    for bb in sub.bytes():
+        sub2.append(bb)
+    var sn = len(sub2)
+    if sn == 0 or sn > len(sl):
         return False
-    for i in range(s.byte_length() - sn + 1):
+    for i in range(len(sl) - sn + 1):
         var ok = True
         for j in range(sn):
-            if s[byte=i + j] != sub[byte=j]:
+            if sl[i + j] != sub2[j]:
                 ok = False
                 break
         if ok:
@@ -98,10 +109,16 @@ def main() raises:
     check(not na2[0] and len(na2[1]) == 2 and _has(na2[1][0], "[\"body\",\"models\",0,\"id\"]")
           and _has(na2[1][0], "greater_than_equal"), "nested array element constraints")
     var na3 = validate_body_schema(
-        nah, "POST", parse_body_json('{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"},'
-                                     + '{"id":10,"tag":"abcd"}]}'), "")
+        nah, "POST", parse_body_json('{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"}]}'), "")
     check(not na3[0] and _has(na3[1][0], "[\"body\",\"models\",0,\"id\"]")
           and _has(na3[1][0], "\"input\":{\"tag\":\"ab\"}"), "nested array missing input")
+    # 决策-83: 数组长度错短路元素校验 (上游 pydantic 列表长度优先)
+    var na4 = validate_body_schema(
+        nah, "POST", parse_body_json('{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"},'
+                                     + '{"id":10,"tag":"abcd"}]}'), "")
+    check(not na4[0] and len(na4[1]) == 1 and _has(na4[1][0], "\"type\":\"too_long\"")
+          and _has(na4[1][0], "at most 2 items after validation, not 3"),
+          "array length short-circuits element validation")
     var r10 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"tags":[],"meta":{"city":"ab"}}'), "")
     check(r10[0] and r10[2]["quantity"] == "10" and r10[2]["mode"] == "fast" and r10[2]["meta_zip"] == "0", "defaults applied (quantity/mode/meta_zip)")
     var r11 = validate_body_schema(h, "POST", parse_body_json("{not json"), "")
@@ -172,4 +189,52 @@ def main() raises:
           "array int_from_float + idx loc")
     var a3 = validate_body_schema(ae, "POST", parse_body_json('{"is":[null],"fs":[],"bs":[]}'), "")
     check(not a3[0] and _has(a3[1][0], '\"type\":\"int_type\"'), "array null -> int_type")
+    # 决策-83 (ADR-0058): body 422 detail 逐字节对齐 (ctx/msg/multiple_of/字符计数/首违).
+    var mo = Handler(0, "mo")
+    mo.set_data("_body_schema", "n:int|mo=3;f:float|mo=0.5")
+    check(validate_body_schema(mo, "POST", parse_body_json('{"n":9,"f":1.5}'), "")[0], "multiple_of pass")
+    var m2 = validate_body_schema(mo, "POST", parse_body_json('{"n":10,"f":1.5}'), "")
+    check(not m2[0] and _has(m2[1][0], '"type":"multiple_of"')
+          and _has(m2[1][0], '"ctx":{"multiple_of":3}') and _has(m2[1][0], "Input should be a multiple of 3"),
+          "multiple_of ctx+msg")
+    var g = Handler(0, "g")
+    g.set_data("_body_schema", "n:int|ge=10")
+    var g1 = validate_body_schema(g, "POST", parse_body_json('{"n":5}'), "")
+    check(not g1[0] and _has(g1[1][0], '"ctx":{"ge":10}') and _has(g1[1][0], '"input":5'), "ge ctx + input raw")
+    var fo = Handler(0, "fo")
+    fo.set_data("_body_schema", "n:int|ge=10,mo=3")
+    var fo1 = validate_body_schema(fo, "POST", parse_body_json('{"n":5}'), "")
+    check(not fo1[0] and len(fo1[1]) == 1 and _has(fo1[1][0], '"type":"multiple_of"'), "first-only mo>ge")
+    var cl = Handler(0, "cl")
+    cl.set_data("_body_schema", "s:str|len=3-5")
+    var cl1 = validate_body_schema(cl, "POST", parse_body_json('{"s":"éé"}'), "")
+    check(not cl1[0] and _has(cl1[1][0], "at least 3 characters")
+          and _has(cl1[1][0], '"ctx":{"min_length":3}'), "char-based len + ctx")
+    var ar = Handler(0, "ar")
+    ar.set_data("_body_schema", "xs:int[]|items=1-2")
+    var ar1 = validate_body_schema(ar, "POST", parse_body_json('{"xs":[]}'), "")
+    check(not ar1[0] and _has(ar1[1][0], "at least 1 item after validation, not 0")
+          and _has(ar1[1][0], '"ctx":{"field_type":"List","min_length":1,"actual_length":0}'),
+          "too_short singular + ctx")
+    var ar2 = validate_body_schema(ar, "POST", parse_body_json('{"xs":[1,2,3]}'), "")
+    check(not ar2[0] and _has(ar2[1][0], "at most 2 items after validation, not 3"), "too_long plural")
+    var em = Handler(0, "em")
+    em.set_data("_body_schema", "xs:int[]|mo=3")
+    var em1 = validate_body_schema(em, "POST", parse_body_json('{"xs":[3,4]}'), "")
+    check(not em1[0] and _has(em1[1][0], '"loc":["body","xs",1]')
+          and _has(em1[1][0], '"type":"multiple_of"'), "elem multiple_of idx")
+    var en = Handler(0, "en")
+    en.set_data("_body_schema", "mode:str[fast,slow]")
+    var en1 = validate_body_schema(en, "POST", parse_body_json('{"mode":"turbo"}'), "")
+    check(not en1[0] and _has(en1[1][0], "\"ctx\":{\"expected\":\"'fast' or 'slow'\"}"), "enum ctx.expected")
+    # 决策-83: input 片段按 JSON 类型渲染 (JSON 字符串值恒带引号, 不按字面猜测).
+    var ip = Handler(0, "ip")
+    ip.set_data("_body_schema", "s:str|len=3-5;n:int")
+    var ip1 = validate_body_schema(ip, "POST", parse_body_json('{"s":"12","n":1}'), "")
+    check(not ip1[0] and _has(ip1[1][0], '"input":"12"'), "string field numeric-look input quoted")
+    var ip2 = validate_body_schema(ip, "POST", parse_body_json('{"s":"abcd","n":"1e1"}'), "")
+    check(not ip2[0] and _has(ip2[1][0], '"type":"int_parsing","input":"1e1"'), "int_parsing input quoted")
+    # 决策-83 附带: parse_float_lax 负号修复 (原实现 range(i,n) 跳过符号位 -> 丢负号).
+    check(_coerce_body_scalar("float", "string", "-1.5")[1] == "-1.5", "negative float coercion keeps sign")
+    check(_coerce_body_scalar("float", "string", "-0.5")[1] == "-0.5", "negative float -0.5 preserved")
     print("Mojo body_schema (决策-38) test completed!")

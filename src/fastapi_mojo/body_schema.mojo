@@ -162,6 +162,17 @@ def err_obj(loc_json: String, msg: String, type_name: String, input_json: String
            "\",\"type\":\"" + json_escape(type_name) + "\",\"input\":" + input_json + "}"
 
 
+def err_obj_ctx(loc_json: String, msg: String, type_name: String, input_json: String,
+                ctx_json: String) -> String:
+    """带 ctx 的 FastAPI 422 detail 对象 (决策-83: loc,msg,type,input,ctx 键序, 上游 0.141.1).
+
+    ctx 仅约束类错误携带 (gt/ge/lt/le/multiple_of/min_length/max_length/pattern/
+    List items/expected); 类型错/missing/json_invalid 用无 ctx 的 err_obj."""
+    return "{\"loc\":" + loc_json + ",\"msg\":\"" + json_escape(msg) + \
+           "\",\"type\":\"" + json_escape(type_name) + "\",\"input\":" + input_json + \
+           ",\"ctx\":" + ctx_json + "}"
+
+
 def _in_enum_csv(v: String, csv: String) -> Bool:
     var items = _split_top(csv, 44)
     for it in items:
@@ -286,7 +297,7 @@ def _parse_field(raw: String) raises -> FieldSpec:
             raise Error("body_schema: bad constraint '" + ct + "' (field '" + fs.name + "')")
         var key = String(ct[byte=0:ck])
         var val = String(ct[byte=ck + 1:ct.byte_length()])
-        if key == "gt" or key == "ge" or key == "lt" or key == "le":
+        if key == "gt" or key == "ge" or key == "lt" or key == "le" or key == "mo":
             if not _parse_f64(val)[0]:
                 raise Error("body_schema: bad number '" + val + "' for " + key)
         elif key == "len" or key == "items":
