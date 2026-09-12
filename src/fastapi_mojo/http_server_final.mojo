@@ -26,7 +26,7 @@ from openapi import generate_openapi, swagger_ui_html
 from openapi_custom import check_openapi_specs  # 决策-52 (ADR-0027)
 from header_params import parse_header_entry, check_header_specs  # 决策-53 (ADR-0028)
 from std.os import getenv  # 决策-52: app 级 OPENAPI env (请求期读, 空 = 默认)
-from streaming import build_sse_body, sse_event_count
+from streaming import build_sse_body, build_sse_body_fields, sse_event_count
 from handler import KIND_SSE, KIND_FILE, KIND_REDIRECT
 from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
@@ -668,6 +668,21 @@ def register_routes(mut router: Router) raises:
     sse_created_h.set_data("_stream_status", "201 Created")
     sse_created_h.set_data("_response_headers", "Cache-Control: no-cache;X-Accel-Buffering: no")
     router.add_route("/sse/created", "POST", sse_created_h)
+
+    # 决策-72 (ADR-0047): SSE ServerSentEvent 字段 demo (event/id/retry/comment).
+    # wire: ": ping\nevent: msg\ndata: alpha\nid: 42\nretry: 3000\n\n" x2.
+    var ssef_h = Handler(KIND_SSE(), "sse_fields_demo")
+    ssef_h.set_data("_stream_events", "alpha|beta")
+    ssef_h.set_data("_sse_event", "msg")
+    ssef_h.set_data("_sse_id", "42")
+    ssef_h.set_data("_sse_retry", "3000")
+    ssef_h.set_data("_sse_comment", "ping")
+    router.add_route("/sse/fields", "GET", ssef_h)
+
+    # 决策-72: 尾空行保留 demo (上游 _split_sse_lines 保留尾空 -> "data: t\ndata: \n\n").
+    var ssetail_h = Handler(KIND_SSE(), "sse_tail_demo")
+    ssetail_h.set_data("_stream_events", "t\n")
+    router.add_route("/sse/tail", "GET", ssetail_h)
 
     # 决策-48: FileResponse / StreamingResponse demo (Rust bridge file_serve/file_protocol).
     var file_h = Handler(KIND_FILE(), "file_demo")
@@ -1771,7 +1786,21 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                     var events_csv = ""
                                     if "_stream_events" in route_result.handler.data:
                                         events_csv = route_result.handler.data["_stream_events"]
-                                    var sse_body = build_sse_body(events_csv)
+                                    # 决策-72 (ADR-0047): 路由级 SSE 字段 (上游 ServerSentEvent).
+                                    var sse_ev = ""
+                                    if "_sse_event" in route_result.handler.data:
+                                        sse_ev = route_result.handler.data["_sse_event"]
+                                    var sse_idv = ""
+                                    if "_sse_id" in route_result.handler.data:
+                                        sse_idv = route_result.handler.data["_sse_id"]
+                                    var sse_retry = ""
+                                    if "_sse_retry" in route_result.handler.data:
+                                        sse_retry = route_result.handler.data["_sse_retry"]
+                                    var sse_comment = ""
+                                    if "_sse_comment" in route_result.handler.data:
+                                        sse_comment = route_result.handler.data["_sse_comment"]
+                                    var sse_body = build_sse_body_fields(events_csv, sse_ev,
+                                                                        sse_idv, sse_retry, sse_comment)
                                     # 默认 200 OK; handler 可声明 _stream_status = "201 Created".
                                     var sse_status = "200 OK"
                                     if "_stream_status" in route_result.handler.data:

@@ -11,6 +11,7 @@
 #   - F3 Request/Response + 嵌套 JSON (__nested__: 前缀直通, 修复 405 body hang)
 #   - F4 OpenAPI 3.0 (/openapi.json + /docs Swagger UI)
 #   - F5 Streaming/SSE (KIND_SSE 一次性推送 + format_sse_event 行切分合规)
+#   - SSE ServerSentEvent 字段 event/id/retry/comment (决策-72, SF-1..SF-5)
 #   - F6 /metrics 端点 (Prometheus 文本, requests_total/active_conns/uptime)
 #   - 错误路径: 404 / 400 (畸形行/非法 UTF-8 path/body) / 413 / 431 / 408 (Slowloris)
 #   - HTTP/2: prior-knowledge h2c H2-1..H2-7（HPACK/CONTINUATION/DATA/PING/HEAD/
@@ -449,6 +450,41 @@ else fail "F9 SSE 201 body intact" "body: ${SSE201_BODY:0:200}"; fi
 # 回归: 未声明 _stream_status 的路由仍默认 200.
 if [[ "$SSE_HDRS" == *"HTTP/1.1 200 OK"* ]]; then pass "F9 SSE default remains 200"
 else fail "F9 SSE default remains 200" "headers: ${SSE_HDRS:0:200}"; fi
+
+# --- SF-1..SF-5: SSE ServerSentEvent 字段 (决策-72, ADR-0047) -------------------------
+# 上游 fastapi.sse.format_sse_event: 字段序 comment(`: `) -> event -> data(逐行) -> id ->
+# retry, 末尾 `\n\n`; 行切分保留尾空串; data = raw_data(原样, 不 JSON 编码).
+echo "== SSE ServerSentEvent fields (决策-72) =="
+SF_HDRS=$(curl -sS -D - -o /dev/null -m 5 "$BASE/sse/fields")
+if [[ "$SF_HDRS" == *"Content-Type: text/event-stream"* ]]; then pass "SF-1 /sse/fields content-type event-stream"
+else fail "SF-1 /sse/fields content-type" "headers: ${SF_HDRS:0:200}"; fi
+SF_EXPECT=$(printf ': ping
+event: msg
+data: alpha
+id: 42
+retry: 3000
+
+: ping
+event: msg
+data: beta
+id: 42
+retry: 3000
+
+')
+SF_BODY=$(curl -sS -m 5 "$BASE/sse/fields")
+if [[ "$SF_BODY" == "$SF_EXPECT" ]]; then pass "SF-2 field order comment/event/data/id/retry + terminator (2 events)"
+else fail "SF-2 SSE field wire" "body=[$(printf '%s' "$SF_BODY" | od -c | head -8)]"; fi
+SF_PING=$(printf '%s' "$SF_BODY" | grep -c '^: ping$')
+if [[ "$SF_PING" == "2" ]]; then pass "SF-3 comment line per event (: ping x2)"
+else fail "SF-3 comment per event" "count=$SF_PING"; fi
+SF_TAIL=$(curl -sS -m 5 "$BASE/sse/tail")
+if [[ "$SF_TAIL" == "$(printf 'data: t
+data: 
+
+')" ]]; then pass "SF-4 trailing newline keeps empty data line (upstream _split_sse_lines)"
+else fail "SF-4 trailing newline" "body=[$(printf '%s' "$SF_TAIL" | od -c)]"; fi
+if [[ "$SF_BODY" != *'"alpha"'* && "$SF_BODY" == *'data: alpha'* ]]; then pass "SF-5 data raw (no JSON quoting; raw_data semantics)"
+else fail "SF-5 data raw" "body: ${SF_BODY:0:200}"; fi
 
 echo "== metrics (Goal-0002 F6) =="
 # /metrics: Prometheus 文本, 关键 metric 存在, requests_total 非负.
