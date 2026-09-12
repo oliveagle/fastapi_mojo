@@ -102,10 +102,14 @@ fi
 
 # --- helpers ------------------------------------------------------------------
 
+# 决策-85 (ADR-0060): JSON-ish body 需显式 JSON Content-Type (上游 strict_content_type
+# 默认只对 application/json / application/*+json 解析 JSON; 裸 --data 默认 form CT)。
 http_code() { # url [method] [data]
     local url=$1 method=${2:-GET} data=${3:-}
     if [[ -n "$data" ]]; then
-        curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X "$method" --data "$data" "$url"
+        local ct=()
+        [[ "$data" == \{* || "$data" == \[* ]] && ct=(-H 'Content-Type: application/json')
+        curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X "$method" ${ct[@]+"${ct[@]}"} --data "$data" "$url"
     else
         curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X "$method" "$url"
     fi
@@ -114,7 +118,9 @@ http_code() { # url [method] [data]
 http_body() { # url [method] [data]
     local url=$1 method=${2:-GET} data=${3:-}
     if [[ -n "$data" ]]; then
-        curl -s --max-time 10 -X "$method" --data "$data" "$url"
+        local ct=()
+        [[ "$data" == \{* || "$data" == \[* ]] && ct=(-H 'Content-Type: application/json')
+        curl -s --max-time 10 -X "$method" ${ct[@]+"${ct[@]}"} --data "$data" "$url"
     else
         curl -s --max-time 10 -X "$method" "$url"
     fi
@@ -843,6 +849,109 @@ MB_BODY_HEX=$(printf_to_hex $'POST /bs/detail HTTP/1.1\r\nHost: x\r\nContent-Typ
 expect_raw_status "MB-14 unquoted multibyte JSON scalar -> 422" "422 Unprocessable Entity" "$MB_BODY_HEX"
 
 expect_code "MB-15 server alive after multibyte sweep -> 200" 200 "$BASE/health"
+
+
+# --- body 解析 Content-Type 分派 + 顶层值语义 (决策-85/ADR-0060) --------------
+# 上游 strict_content_type 默认: 仅 application/json 或 application/*+json 触发
+# JSON 解析; 否则 body 作为原始字符串 -> model_attributes_type (loc ["body"]);
+# 顶层 null -> missing; 顶层非 object -> model_attributes_type (input 原值);
+# 非法 JSON -> json_invalid (loc ["body", pos] + ctx.error + input {}).
+echo "== body Content-Type dispatch + top-level value semantics (CT) =="
+CT_JSON='{"name":"a","price":1,"tags":[],"meta":{"city":"ab"}}'
+
+ct_post() { # ct url body  (裸 Content-Type; 空 ct 表示不带 Content-Type 头)
+    local ct=$1 url=$2 body=$3
+    if [[ -z "$ct" ]]; then
+        curl -s --max-time 10 -X POST -H 'Content-Type:' --data "$body" "$url"
+    else
+        curl -s --max-time 10 -X POST -H "Content-Type: $ct" --data "$body" "$url"
+    fi
+}
+
+CT1=$(ct_post 'text/plain' "$BASE/validate" "$CT_JSON")
+if [[ "$CT1" == *'"type":"model_attributes_type"'* && "$CT1" == *'"loc":["body"]'* \
+      && "$CT1" == *'"input":"{\"name\":\"a\"'* ]]; then
+    pass "CT-1 text/plain + JSON body -> model_attributes_type (string input)"
+else fail "CT-1 text/plain + JSON body" "got ${CT1:0:220}"; fi
+
+CT2=$(ct_post '' "$BASE/validate" "$CT_JSON")
+if [[ "$CT2" == *'"type":"model_attributes_type"'* ]]; then
+    pass "CT-2 no Content-Type + JSON body -> model_attributes_type"
+else fail "CT-2 no Content-Type + JSON body" "got ${CT2:0:220}"; fi
+
+CT3=$(ct_post 'application/x-www-form-urlencoded' "$BASE/validate" "$CT_JSON")
+if [[ "$CT3" == *'"type":"model_attributes_type"'* ]]; then
+    pass "CT-3 form CT + JSON body -> model_attributes_type"
+else fail "CT-3 form CT + JSON body" "got ${CT3:0:220}"; fi
+
+CT4=$(ct_post 'application/json; charset=utf-8' "$BASE/validate" "$CT_JSON")
+if [[ "$CT4" == *'"body_name": "a"'* ]]; then
+    pass "CT-4 application/json; charset -> parses JSON (200)"
+else fail "CT-4 application/json; charset" "got ${CT4:0:220}"; fi
+
+CT5=$(ct_post 'APPLICATION/JSON' "$BASE/validate" "$CT_JSON")
+if [[ "$CT5" == *'"body_name": "a"'* ]]; then
+    pass "CT-5 APPLICATION/JSON (case) -> parses JSON"
+else fail "CT-5 APPLICATION/JSON case" "got ${CT5:0:220}"; fi
+
+CT6=$(ct_post 'application/vnd.api+json' "$BASE/validate" "$CT_JSON")
+if [[ "$CT6" == *'"body_name": "a"'* ]]; then
+    pass "CT-6 application/*+json -> parses JSON"
+else fail "CT-6 application/*+json" "got ${CT6:0:220}"; fi
+
+CT7=$(ct_post 'text/json' "$BASE/validate" "$CT_JSON")
+if [[ "$CT7" == *'"type":"model_attributes_type"'* ]]; then
+    pass "CT-7 text/json (non-application) -> raw string"
+else fail "CT-7 text/json" "got ${CT7:0:220}"; fi
+
+CT8=$(ct_post 'application/json' "$BASE/validate" 'null')
+if [[ "$CT8" == *'"type":"missing"'* && "$CT8" == *'"loc":["body"]'* && "$CT8" == *'"input":null'* ]]; then
+    pass "CT-8 JSON null body -> missing [body] input null"
+else fail "CT-8 JSON null body" "got ${CT8:0:220}"; fi
+
+CT9=$(ct_post 'application/json' "$BASE/validate" '[1,2]')
+if [[ "$CT9" == *'"type":"model_attributes_type"'* && "$CT9" == *'"input":[1,2]'* ]]; then
+    pass "CT-9 JSON array body -> model_attributes_type input [1,2]"
+else fail "CT-9 JSON array body" "got ${CT9:0:220}"; fi
+
+CT10=$(ct_post 'application/json' "$BASE/validate" '"hi"')
+if [[ "$CT10" == *'"type":"model_attributes_type"'* && "$CT10" == *'"input":"hi"'* ]]; then
+    pass "CT-10 JSON string body -> model_attributes_type input \"hi\""
+else fail "CT-10 JSON string body" "got ${CT10:0:220}"; fi
+
+CT11=$(ct_post 'application/json' "$BASE/validate" '5')
+if [[ "$CT11" == *'"type":"model_attributes_type"'* && "$CT11" == *'"input":5'* ]]; then
+    pass "CT-11 JSON number body -> model_attributes_type input 5"
+else fail "CT-11 JSON number body" "got ${CT11:0:220}"; fi
+
+CT12=$(ct_post 'application/json' "$BASE/validate" '{bad')
+if [[ "$CT12" == *'"type":"json_invalid"'* && "$CT12" == *'"loc":["body",1]'* \
+      && "$CT12" == *'"input":{}'* && "$CT12" == *'"ctx":{"error":"Expecting property name enclosed in double quotes"}'* ]]; then
+    pass "CT-12 invalid JSON -> json_invalid pos/ctx/input {}"
+else fail "CT-12 invalid JSON" "got ${CT12:0:24}"; fi
+
+CT13=$(ct_post 'application/json' "$BASE/validate" '{"name":"a"}trailing')
+if [[ "$CT13" == *'"loc":["body",12]'* && "$CT13" == *'"error":"Extra data"'* ]]; then
+    pass "CT-13 trailing data -> json_invalid pos 12 Extra data"
+else fail "CT-13 trailing data" "got ${CT13:0:220}"; fi
+
+ct_post 'application/json' "$BASE/validate" '{bad' > "$TMP/ct12.json"
+if "$FMTOOL" jsoncheck "$TMP/ct12.json" >/dev/null; then
+    pass "CT-14 json_invalid detail is valid JSON (fmtool jsoncheck)"
+else fail "CT-14 json_invalid detail valid JSON" "$(head -c 200 "$TMP/ct12.json")"; fi
+
+CT_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' "$BASE/validate")
+if [[ "$CT_CODE" == "422" ]]; then pass "CT-15 empty body (JSON CT) -> 422 missing"
+else fail "CT-15 empty body" "got $CT_CODE"; fi
+
+expect_code "CT-16 JSON CT valid body still 200" 200 "$BASE/validate" POST "$CT_JSON"
+
+# CT-17: 非有限 number 常量 (CPython allow_nan) 顶层 -> detail 仍为合法 JSON.
+ct_post 'application/json' "$BASE/validate" 'NaN' > "$TMP/ct17.json"
+CT17=$(cat "$TMP/ct17.json")
+if [[ "$CT17" == *'"input":"NaN"'* ]] && "$FMTOOL" jsoncheck "$TMP/ct17.json" >/dev/null; then
+    pass "CT-17 NaN body -> quoted input, detail valid JSON (jsoncheck)"
+else fail "CT-17 NaN body detail valid JSON" "$(head -c 200 "$TMP/ct17.json")"; fi
 
 
 # --- HEAD / OPTIONS ----------------------------------------------------------

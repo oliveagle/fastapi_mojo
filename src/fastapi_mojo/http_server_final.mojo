@@ -1736,7 +1736,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                 herr_list.append(he)
                             for hv in hres[2]:
                                 hvals[hv] = hres[2][hv]
-                        var sres = validate_body_schema(route_result.handler, effective_method, body_params, body_str)
+                        # 决策-85 (ADR-0060): Content-Type 决定 body 解析方式
+                        # (仅 JSON CT 才按 JSON 解析; 上游 strict_content_type 默认).
+                        var ct_hdr = _get_header("Content-Type")
+                        var sres = validate_body_schema(route_result.handler, effective_method, body_params, body_str, ct_hdr)
                         # 决策-45 (ADR-0020): Form 多值/422 parity —
                         # CT 为 form 时 parse_form_multi 收全部 occurrence;
                         # 非 form CT 传空 multi (上游同款: 缺失->默认/422).
@@ -1744,7 +1747,6 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         # (单一快照点); 文本 part 供给 form 字段 (U8,
                         # 已声明 file 名不进 map) + file 校验 (U2/U4/U5)
                         # + file->form 422 (U3 string_type).
-                        var ct_hdr = _get_header("Content-Type")
                         var is_mp_ct = _ct_is_multipart(ct_hdr)
                         var mp_parts = MpParts()
                         var fmulti = Dict[String, List[String]]()

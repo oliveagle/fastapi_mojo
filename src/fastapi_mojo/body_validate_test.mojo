@@ -8,6 +8,7 @@ from body_validate import validate_body_schema, _check_body_spec
 from body_coerce import _coerce_body_scalar
 from handler import Handler
 from params_json import parse_body_json
+from params_query import ParsedParams
 
 # ---------- 自测 ----------
 
@@ -71,24 +72,24 @@ def main() raises:
     var h = Handler(0, "validate_item")
     h.set_data("_body_schema", spec)
 
-    var r1 = validate_body_schema(h, "POST", parse_body_json('{"name":"widget","price":9.99,"tags":["a","b"],"meta":{"city":"sh"}}'), "")
+    var r1 = validate_body_schema(h, "POST", parse_body_json('{"name":"widget","price":9.99,"tags":["a","b"],"meta":{"city":"sh"}}'), '{"name":"widget","price":9.99,"tags":["a","b"],"meta":{"city":"sh"}}')
     check(r1[0] and r1[2]["name"] == "widget" and r1[2]["quantity"] == "10" and r1[2]["mode"] == "fast", "values+defaults")
     check(r1[2]["meta_city"] == "sh" and r1[2]["meta_zip"] == "0" and r1[2]["meta"] == '{"city":"sh"}', "nested")
     check(r1[2]["tags"] == '["a","b"]', "array raw")
-    var r2 = validate_body_schema(h, "POST", parse_body_json('{"price":1}'), "")
-    var r3 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":"abc"}'), "")
+    var r2 = validate_body_schema(h, "POST", parse_body_json('{"price":1}'), '{"price":1}')
+    var r3 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":"abc"}'), '{"name":"x","price":"abc"}')
     check(not r3[0] and _has(r3[1][0], "float_parsing"), "wrong type")
-    var r4 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":-5}'), "")
+    var r4 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":-5}'), '{"name":"x","price":-5}')
     check(not r4[0] and _has(r4[1][0], "Input should be greater than 0"), "gt")
-    var r5 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"mode":"turbo"}'), "")
+    var r5 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"mode":"turbo"}'), '{"name":"x","price":1,"mode":"turbo"}')
     check(not r5[0] and _has(r5[1][0], "\"type\":\"enum\"") and _has(r5[1][0], "'fast' or 'slow'"), "enum")
-    var r6 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"meta":{"city":"s"}}'), "")
+    var r6 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"meta":{"city":"s"}}'), '{"name":"x","price":1,"meta":{"city":"s"}}')
     check(not r6[0] and len(r6[1]) == 2 and _has(r6[1][1], "[\"body\",\"meta\",\"city\"]") and _has(r6[1][1], "at least 2 character"), "nested len (err[1])")
-    var r7 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"tags":["a","b","c","d","e","f"]}'), "")
+    var r7 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"tags":["a","b","c","d","e","f"]}'), '{"name":"x","price":1,"tags":["a","b","c","d","e","f"]}')
     check(not r7[0] and _has(r7[1][0], "at most 5 item"), "items max")
-    var r8 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"tags":[1,2]}'), "")
+    var r8 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"tags":[1,2]}'), '{"name":"x","price":1,"tags":[1,2]}')
     check(not r8[0] and _has(r8[1][0], "[\"body\",\"tags\",0]"), "elem loc")
-    var r9 = validate_body_schema(h, "POST", parse_body_json('{"price":-1,"mode":"turbo"}'), "")
+    var r9 = validate_body_schema(h, "POST", parse_body_json('{"price":-1,"mode":"turbo"}'), '{"price":-1,"mode":"turbo"}')
     check(not r9[0] and len(r9[1]) == 5, "multi errors x5 (missing name + gt + enum + missing tags + missing meta)")
 
     # Decision-61: recursive validation inside arrays of nested objects.
@@ -101,29 +102,30 @@ def main() raises:
     var nah = Handler(0, "validate_nested_models")
     nah.set_data("_body_schema", nested_array_spec)
     var na1 = validate_body_schema(
-        nah, "POST", parse_body_json('{"models":[{"id":7,"tag":"ab"},{"id":9,"tag":"xyz"}]}'), "")
+        nah, "POST", parse_body_json('{"models":[{"id":7,"tag":"ab"},{"id":9,"tag":"xyz"}]}'), '{"models":[{"id":7,"tag":"ab"},{"id":9,"tag":"xyz"}]}')
     check(na1[0] and na1[2]["models_0_id"] == "7" and na1[2]["models_1_tag"] == "xyz",
           "nested array valid + flattened values")
     var na2 = validate_body_schema(
-        nah, "POST", parse_body_json('{"models":[{"id":0,"tag":"ab"},{"id":9,"tag":"x"}]}'), "")
+        nah, "POST", parse_body_json('{"models":[{"id":0,"tag":"ab"},{"id":9,"tag":"x"}]}'), '{"models":[{"id":0,"tag":"ab"},{"id":9,"tag":"x"}]}')
     check(not na2[0] and len(na2[1]) == 2 and _has(na2[1][0], "[\"body\",\"models\",0,\"id\"]")
           and _has(na2[1][0], "greater_than_equal"), "nested array element constraints")
     var na3 = validate_body_schema(
-        nah, "POST", parse_body_json('{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"}]}'), "")
+        nah, "POST", parse_body_json('{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"}]}'), '{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"}]}')
     check(not na3[0] and _has(na3[1][0], "[\"body\",\"models\",0,\"id\"]")
           and _has(na3[1][0], "\"input\":{\"tag\":\"ab\"}"), "nested array missing input")
     # 决策-83: 数组长度错短路元素校验 (上游 pydantic 列表长度优先)
     var na4 = validate_body_schema(
         nah, "POST", parse_body_json('{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"},'
-                                     + '{"id":10,"tag":"abcd"}]}'), "")
+                                     + '{"id":10,"tag":"abcd"}]}'), '{"models":[{"tag":"ab"},{"id":9,"tag":"xyz"},'
+                                     + '{"id":10,"tag":"abcd"}]}')
     check(not na4[0] and len(na4[1]) == 1 and _has(na4[1][0], "\"type\":\"too_long\"")
           and _has(na4[1][0], "at most 2 items after validation, not 3"),
           "array length short-circuits element validation")
-    var r10 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"tags":[],"meta":{"city":"ab"}}'), "")
+    var r10 = validate_body_schema(h, "POST", parse_body_json('{"name":"x","price":1,"tags":[],"meta":{"city":"ab"}}'), '{"name":"x","price":1,"tags":[],"meta":{"city":"ab"}}')
     check(r10[0] and r10[2]["quantity"] == "10" and r10[2]["mode"] == "fast" and r10[2]["meta_zip"] == "0", "defaults applied (quantity/mode/meta_zip)")
-    var r11 = validate_body_schema(h, "POST", parse_body_json("{not json"), "")
+    var r11 = validate_body_schema(h, "POST", parse_body_json("{not json"), "{not json")
     check(not r11[0] and _has(r11[1][0], "json_invalid"), "json_invalid")
-    check(validate_body_schema(h, "GET", parse_body_json("x"), "")[0], "GET skip")
+    check(validate_body_schema(h, "GET", parse_body_json("x"), "x")[0], "GET skip")
     # 决策-57: pat 约束 — 注册期解析 + 类型 fail-fast (FFI-free; 正则匹配行为走 e2e 真服务器).
     _ = _check_body_spec("code:str|pat=^[a-z0-9]+$")  # str 标量 + pat -> 注册通过
     check(get_field(parse_body_schema("code:str|pat=^[a-z0-9]+$"), 0).constraints == "pat=^[a-z0-9]+$", "pat parsed into constraints")
@@ -149,30 +151,30 @@ def main() raises:
     check(bad_len_arr, "len on int[] -> registration fail")
     var he = Handler(0, "validate_elems")
     he.set_data("_body_schema", "items:str[]|items=0-3,len=1-2;nums:int[]|items=0-3,ge=0")
-    var q1 = validate_body_schema(he, "POST", parse_body_json('{"items":["a","bb"],"nums":[0,1]}'), "")
+    var q1 = validate_body_schema(he, "POST", parse_body_json('{"items":["a","bb"],"nums":[0,1]}'), '{"items":["a","bb"],"nums":[0,1]}')
     check(q1[0] and q1[2]["items"] == '["a","bb"]' and q1[2]["nums"] == "[0,1]", "elems valid + raw inject")
-    var q2 = validate_body_schema(he, "POST", parse_body_json('{"items":["abc"],"nums":[0]}'), "")
+    var q2 = validate_body_schema(he, "POST", parse_body_json('{"items":["abc"],"nums":[0]}'), '{"items":["abc"],"nums":[0]}')
     check(not q2[0] and _has(q2[1][0], "string_too_long") and _has(q2[1][0], '["body","items",0]'), "elem len fail (idx loc)")
-    var q3 = validate_body_schema(he, "POST", parse_body_json('{"items":["a"],"nums":[-1]}'), "")
+    var q3 = validate_body_schema(he, "POST", parse_body_json('{"items":["a"],"nums":[-1]}'), '{"items":["a"],"nums":[-1]}')
     check(not q3[0] and _has(q3[1][0], "greater_than_equal") and _has(q3[1][0], '["body","nums",0]'), "elem ge fail (idx loc)")
     # 决策-82 (ADR-0057): model 标量**跨 JSON 类型**强制 (pydantic lax model).
     var cx = Handler(0, "validate_cross")
     cx.set_data("_body_schema", "i:int;f:float;b:bool")
-    var c1 = validate_body_schema(cx, "POST", parse_body_json('{"i":7.0,"f":1,"b":1}'), "")
+    var c1 = validate_body_schema(cx, "POST", parse_body_json('{"i":7.0,"f":1,"b":1}'), '{"i":7.0,"f":1,"b":1}')
     check(c1[0] and c1[2]["i"] == "7" and c1[2]["f"] == "1.0" and c1[2]["b"] == "true",
           "cross int<-float / float<-int / bool<-int")
-    var c2 = validate_body_schema(cx, "POST", parse_body_json('{"i":1e2,"f":true,"b":0.0}'), "")
+    var c2 = validate_body_schema(cx, "POST", parse_body_json('{"i":1e2,"f":true,"b":0.0}'), '{"i":1e2,"f":true,"b":0.0}')
     check(c2[0] and c2[2]["i"] == "100" and c2[2]["f"] == "1.0" and c2[2]["b"] == "false",
           "cross exponent / float<-bool / bool<-0.0")
-    var c3 = validate_body_schema(cx, "POST", parse_body_json('{"i":"7","f":"1.0","b":"1"}'), "")
+    var c3 = validate_body_schema(cx, "POST", parse_body_json('{"i":"7","f":"1.0","b":"1"}'), '{"i":"7","f":"1.0","b":"1"}')
     check(c3[0] and c3[2]["i"] == "7" and c3[2]["f"] == "1.0" and c3[2]["b"] == "true",
           "cross from JSON string")
-    var c4 = validate_body_schema(cx, "POST", parse_body_json('{"i":7.5,"f":1,"b":1}'), "")
+    var c4 = validate_body_schema(cx, "POST", parse_body_json('{"i":7.5,"f":1,"b":1}'), '{"i":7.5,"f":1,"b":1}')
     check(not c4[0] and _has(c4[1][0], "int_from_float") and _has(c4[1][0], "fractional part"),
           "int_from_float (7.5)")
-    var c5 = validate_body_schema(cx, "POST", parse_body_json('{"i":1,"f":1,"b":2}'), "")
+    var c5 = validate_body_schema(cx, "POST", parse_body_json('{"i":1,"f":1,"b":2}'), '{"i":1,"f":1,"b":2}')
     check(not c5[0] and _has(c5[1][0], "bool_parsing"), "bool_parsing (2)")
-    var c6 = validate_body_schema(cx, "POST", parse_body_json('{"i":null,"f":null,"b":null}'), "")
+    var c6 = validate_body_schema(cx, "POST", parse_body_json('{"i":null,"f":null,"b":null}'), '{"i":null,"f":null,"b":null}')
     check(not c6[0] and len(c6[1]) == 3 and _has(c6[1][0], '\"type\":\"int_type\"')
           and _has(c6[1][1], '\"type\":\"float_type\"') and _has(c6[1][2], '\"type\":\"bool_type\"'),
           "null -> bare *_type")
@@ -180,61 +182,112 @@ def main() raises:
     var ae = Handler(0, "validate_arr")
     ae.set_data("_body_schema", "is:int[];fs:float[];bs:bool[]")
     var a1 = validate_body_schema(ae, "POST", parse_body_json(
-        '{"is":[7.0,1e2,true,"7"],"fs":[1,true,"1.0"],"bs":[1,0,1.0,-0.0,"1"]}'), "")
+        '{"is":[7.0,1e2,true,"7"],"fs":[1,true,"1.0"],"bs":[1,0,1.0,-0.0,"1"]}'), 
+        '{"is":[7.0,1e2,true,"7"],"fs":[1,true,"1.0"],"bs":[1,0,1.0,-0.0,"1"]}')
     check(a1[0] and a1[2]["is"] == "[7,100,1,7]" and a1[2]["fs"] == "[1.0,1.0,1.0]"
           and a1[2]["bs"] == "[true,false,true,false,true]",
           "array cross coercion + canonical rebuild")
-    var a2 = validate_body_schema(ae, "POST", parse_body_json('{"is":[7.5],"fs":[],"bs":[]}'), "")
+    var a2 = validate_body_schema(ae, "POST", parse_body_json('{"is":[7.5],"fs":[],"bs":[]}'), '{"is":[7.5],"fs":[],"bs":[]}')
     check(not a2[0] and _has(a2[1][0], "int_from_float") and _has(a2[1][0], '["body","is",0]'),
           "array int_from_float + idx loc")
-    var a3 = validate_body_schema(ae, "POST", parse_body_json('{"is":[null],"fs":[],"bs":[]}'), "")
+    var a3 = validate_body_schema(ae, "POST", parse_body_json('{"is":[null],"fs":[],"bs":[]}'), '{"is":[null],"fs":[],"bs":[]}')
     check(not a3[0] and _has(a3[1][0], '\"type\":\"int_type\"'), "array null -> int_type")
     # 决策-83 (ADR-0058): body 422 detail 逐字节对齐 (ctx/msg/multiple_of/字符计数/首违).
     var mo = Handler(0, "mo")
     mo.set_data("_body_schema", "n:int|mo=3;f:float|mo=0.5")
-    check(validate_body_schema(mo, "POST", parse_body_json('{"n":9,"f":1.5}'), "")[0], "multiple_of pass")
-    var m2 = validate_body_schema(mo, "POST", parse_body_json('{"n":10,"f":1.5}'), "")
+    check(validate_body_schema(mo, "POST", parse_body_json('{"n":9,"f":1.5}'), '{"n":9,"f":1.5}')[0], "multiple_of pass")
+    var m2 = validate_body_schema(mo, "POST", parse_body_json('{"n":10,"f":1.5}'), '{"n":10,"f":1.5}')
     check(not m2[0] and _has(m2[1][0], '"type":"multiple_of"')
           and _has(m2[1][0], '"ctx":{"multiple_of":3}') and _has(m2[1][0], "Input should be a multiple of 3"),
           "multiple_of ctx+msg")
     var g = Handler(0, "g")
     g.set_data("_body_schema", "n:int|ge=10")
-    var g1 = validate_body_schema(g, "POST", parse_body_json('{"n":5}'), "")
+    var g1 = validate_body_schema(g, "POST", parse_body_json('{"n":5}'), '{"n":5}')
     check(not g1[0] and _has(g1[1][0], '"ctx":{"ge":10}') and _has(g1[1][0], '"input":5'), "ge ctx + input raw")
     var fo = Handler(0, "fo")
     fo.set_data("_body_schema", "n:int|ge=10,mo=3")
-    var fo1 = validate_body_schema(fo, "POST", parse_body_json('{"n":5}'), "")
+    var fo1 = validate_body_schema(fo, "POST", parse_body_json('{"n":5}'), '{"n":5}')
     check(not fo1[0] and len(fo1[1]) == 1 and _has(fo1[1][0], '"type":"multiple_of"'), "first-only mo>ge")
     var cl = Handler(0, "cl")
     cl.set_data("_body_schema", "s:str|len=3-5")
-    var cl1 = validate_body_schema(cl, "POST", parse_body_json('{"s":"éé"}'), "")
+    var cl1 = validate_body_schema(cl, "POST", parse_body_json('{"s":"éé"}'), '{"s":"éé"}')
     check(not cl1[0] and _has(cl1[1][0], "at least 3 characters")
           and _has(cl1[1][0], '"ctx":{"min_length":3}'), "char-based len + ctx")
     var ar = Handler(0, "ar")
     ar.set_data("_body_schema", "xs:int[]|items=1-2")
-    var ar1 = validate_body_schema(ar, "POST", parse_body_json('{"xs":[]}'), "")
+    var ar1 = validate_body_schema(ar, "POST", parse_body_json('{"xs":[]}'), '{"xs":[]}')
     check(not ar1[0] and _has(ar1[1][0], "at least 1 item after validation, not 0")
           and _has(ar1[1][0], '"ctx":{"field_type":"List","min_length":1,"actual_length":0}'),
           "too_short singular + ctx")
-    var ar2 = validate_body_schema(ar, "POST", parse_body_json('{"xs":[1,2,3]}'), "")
+    var ar2 = validate_body_schema(ar, "POST", parse_body_json('{"xs":[1,2,3]}'), '{"xs":[1,2,3]}')
     check(not ar2[0] and _has(ar2[1][0], "at most 2 items after validation, not 3"), "too_long plural")
     var em = Handler(0, "em")
     em.set_data("_body_schema", "xs:int[]|mo=3")
-    var em1 = validate_body_schema(em, "POST", parse_body_json('{"xs":[3,4]}'), "")
+    var em1 = validate_body_schema(em, "POST", parse_body_json('{"xs":[3,4]}'), '{"xs":[3,4]}')
     check(not em1[0] and _has(em1[1][0], '"loc":["body","xs",1]')
           and _has(em1[1][0], '"type":"multiple_of"'), "elem multiple_of idx")
     var en = Handler(0, "en")
     en.set_data("_body_schema", "mode:str[fast,slow]")
-    var en1 = validate_body_schema(en, "POST", parse_body_json('{"mode":"turbo"}'), "")
+    var en1 = validate_body_schema(en, "POST", parse_body_json('{"mode":"turbo"}'), '{"mode":"turbo"}')
     check(not en1[0] and _has(en1[1][0], "\"ctx\":{\"expected\":\"'fast' or 'slow'\"}"), "enum ctx.expected")
     # 决策-83: input 片段按 JSON 类型渲染 (JSON 字符串值恒带引号, 不按字面猜测).
     var ip = Handler(0, "ip")
     ip.set_data("_body_schema", "s:str|len=3-5;n:int")
-    var ip1 = validate_body_schema(ip, "POST", parse_body_json('{"s":"12","n":1}'), "")
+    var ip1 = validate_body_schema(ip, "POST", parse_body_json('{"s":"12","n":1}'), '{"s":"12","n":1}')
     check(not ip1[0] and _has(ip1[1][0], '"input":"12"'), "string field numeric-look input quoted")
-    var ip2 = validate_body_schema(ip, "POST", parse_body_json('{"s":"abcd","n":"1e1"}'), "")
+    var ip2 = validate_body_schema(ip, "POST", parse_body_json('{"s":"abcd","n":"1e1"}'), '{"s":"abcd","n":"1e1"}')
     check(not ip2[0] and _has(ip2[1][0], '"type":"int_parsing","input":"1e1"'), "int_parsing input quoted")
     # 决策-83 附带: parse_float_lax 负号修复 (原实现 range(i,n) 跳过符号位 -> 丢负号).
     check(_coerce_body_scalar("float", "string", "-1.5")[1] == "-1.5", "negative float coercion keeps sign")
     check(_coerce_body_scalar("float", "string", "-0.5")[1] == "-0.5", "negative float -0.5 preserved")
+    # 决策-85 (ADR-0060): Content-Type 分派 + body 顶层值语义 (上游 strict_content_type 默认).
+    var ct = Handler(0, "ct_dispatch")
+    ct.set_data("_body_schema", "x:float")
+    # 非 JSON CT -> 原始字符串 -> model_attributes_type (loc ["body"], input 带引号).
+    var ct1 = validate_body_schema(ct, "POST", parse_body_json('{"x":1}'), '{"x":1}',
+                                   "text/plain")
+    check(not ct1[0] and _has(ct1[1][0], '"type":"model_attributes_type"')
+          and _has(ct1[1][0], '\"loc\":[\"body\"]')
+          and _has(ct1[1][0], '"input":"{\\"x\\":1}"'), "non-JSON CT -> model_attributes_type")
+    var ct2 = validate_body_schema(ct, "POST", parse_body_json('{"x":1}'), '{"x":1}',
+                                   "application/x-www-form-urlencoded")
+    check(not ct2[0] and _has(ct2[1][0], '"type":"model_attributes_type"'),
+          "form CT -> model_attributes_type (JSON body)")
+    var ct3 = validate_body_schema(ct, "POST", parse_body_json('{"x":1}'), '{"x":1}',
+                                   "application/json; charset=utf-8")
+    check(ct3[0] and ct3[2]["x"] == "1.0", "JSON CT with charset parses")
+    var ct4 = validate_body_schema(ct, "POST", parse_body_json('{"x":1}'), '{"x":1}',
+                                   "application/vnd.api+json")
+    check(ct4[0] and ct4[2]["x"] == "1.0", "application/*+json parses")
+    # 无 body -> missing ["body"] input null.
+    var ct5 = validate_body_schema(ct, "POST", ParsedParams(), "")
+    check(not ct5[0] and _has(ct5[1][0], '"type":"missing"')
+          and _has(ct5[1][0], '["body"]') and _has(ct5[1][0], '"input":null'),
+          "empty body -> missing")
+    # JSON null -> missing ["body"].
+    var ct6 = validate_body_schema(ct, "POST", parse_body_json("null"), "null")
+    check(not ct6[0] and _has(ct6[1][0], '"type":"missing"'), "null -> missing")
+    # JSON 非 object -> model_attributes_type (input = 原值).
+    var ct7 = validate_body_schema(ct, "POST", parse_body_json("[1,2]"), "[1,2]")
+    check(not ct7[0] and _has(ct7[1][0], '"type":"model_attributes_type"')
+          and _has(ct7[1][0], '"input":[1,2]'), "array -> model_attributes_type")
+    var ct8 = validate_body_schema(ct, "POST", parse_body_json('"hi"'), '"hi"')
+    check(not ct8[0] and _has(ct8[1][0], '"type":"model_attributes_type"')
+          and _has(ct8[1][0], '"input":"hi"'), "string -> model_attributes_type")
+    # json_invalid: loc ["body", pos] + ctx.error + input {} (合法 JSON 输出).
+    var ct9 = validate_body_schema(ct, "POST", parse_body_json("{bad"), "{bad")
+    check(not ct9[0] and _has(ct9[1][0], '"type":"json_invalid"')
+          and _has(ct9[1][0], '["body",1]')
+          and _has(ct9[1][0], '"input":{}')
+          and _has(ct9[1][0], '"ctx":{"error":"Expecting property name enclosed in double quotes"}'),
+          "json_invalid loc/ctx/input")
+    # 非有限 number 常量 (CPython allow_nan): 顶层非 object; input 转义为合法 JSON 字符串
+    # (上游渲染 500 — ADR-0060 §5 inf/nan 既有偏差, 此处仅保 detail 合法).
+    var ct11 = validate_body_schema(ct, "POST", parse_body_json("NaN"), "NaN")
+    check(not ct11[0] and _has(ct11[1][0], '"type":"model_attributes_type"')
+          and _has(ct11[1][0], '"input":"NaN"'), "NaN top-level -> quoted input (valid JSON)")
+    var ct10 = validate_body_schema(ct, "POST", parse_body_json('{"x":1}trailing'),
+                                    '{"x":1}trailing')
+    check(not ct10[0] and _has(ct10[1][0], '["body",7]')
+          and _has(ct10[1][0], '"error":"Extra data"'), "json_invalid Extra data pos")
     print("Mojo body_schema (决策-38) test completed!")

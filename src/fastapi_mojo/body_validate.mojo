@@ -10,6 +10,7 @@ from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, 
                          err_obj, err_obj_ctx, _in_enum_csv, _enum_or_msg, _split_top, _trim,
                          _find_eq, _is_int_lit, _is_num_lit)
 from body_coerce import _coerce_body_scalar, _elem_type_err, _elem_json_type
+from body_json import validate_body_json, content_type_is_json
 from body_constraints import (_json_input_frag, _json_input_frag_typed,
                               _apply_constraints, _apply_elem_constraints)
 from handler import Handler
@@ -275,21 +276,64 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
 
 
 def validate_body_schema(handler: Handler, method: String,
-                         body_params: ParsedParams, body_str: String) raises -> Tuple[Bool, List[String], Dict[String, String]]:
-    """`validate_body_schema` (决策-38): 按 _body_schema 校验请求 body.
+                         body_params: ParsedParams, body_str: String,
+                         content_type: String = "application/json") raises -> Tuple[Bool, List[String], Dict[String, String]]:
+    """`validate_body_schema` (决策-38, 决策-85): 按 _body_schema 校验请求 body.
 
     返回 (ok, errors, values): ok=False -> errors = FastAPI detail 对象 (loc/msg/type);
     ok=True -> values = 字段 -> 校验值 (含默认值), dispatch 注入 body_<name>.
     仅 POST/PUT/PATCH 且声明 _body_schema 时生效; 其余直接 ok.
-    """
+
+    决策-85 (ADR-0060): 顶层值语义 + CT 分派对齐上游 `strict_content_type=True`
+    默认 —— 仅 JSON CT (`content_type_is_json`) 才解析 JSON body, 否则 body 视为
+    原始字符串 -> `model_attributes_type`; 无 body -> `missing`; JSON `null` ->
+    `missing`; JSON 非 object -> `model_attributes_type`; 非法 JSON ->
+    `json_invalid` (loc `["body", pos]` + `ctx.error`, input `{}`)."""
     var ok_vals = Dict[String, String]()
     if "_body_schema" not in handler.data:
         return (True, List[String](), ok_vals^)
     if method != "POST" and method != "PUT" and method != "PATCH":
         return (True, List[String](), ok_vals^)
     var errs = List[String]()
+    # 无 wire body 判定: dispatch 传 body_str="" + 空 ParsedParams(); 单元测试可能只传
+    # body_params (body_str="") -> 以 param_count/has_error 补偿识别"确实有 body".
+    var has_body = body_str.byte_length() > 0 or body_params.has_error \
+        or body_params.param_count > 0
+    if not has_body:
+        errs.append(err_obj("[\"body\"]", "Field required", "missing", "null"))
+        return (False, errs^, ok_vals^)
+    if not content_type_is_json(content_type):
+        # 非 JSON CT: 上游 body = body_bytes (原始字符串) -> 模型无法提取字段.
+        errs.append(err_obj("[\"body\"]",
+                            "Input should be a valid dictionary or object to extract fields from",
+                            "model_attributes_type",
+                            "\"" + json_escape(body_str) + "\""))
+        return (False, errs^, ok_vals^)
+    var scan = validate_body_json(body_str)
+    if not scan.ok:
+        errs.append(err_obj_ctx("[\"body\"," + String(scan.err_pos) + "]",
+                                "JSON decode error", "json_invalid", "{}",
+                                "{\"error\":\"" + json_escape(scan.err_msg) + "\"}"))
+        return (False, errs^, ok_vals^)
+    if scan.top_kind == "null":
+        errs.append(err_obj("[\"body\"]", "Field required", "missing", "null"))
+        return (False, errs^, ok_vals^)
+    if scan.top_kind != "object":
+        var raw = String(body_str[byte=scan.val_start:scan.val_end])
+        # 保 detail 恒为合法 JSON: 非有限 number 常量 NaN/Infinity 非合法 JSON 字面量
+        # -> 转义为字符串 (CPython allow_nan 解析成功; 上游渲染 500 = ADR-0060 §5 既有
+        # inf/nan 偏差, 此处只保证本实现 detail 合法). 其余数组/对象/数字/字符串原样.
+        var inp = _json_input_frag(raw)
+        if raw == "NaN" or raw == "Infinity" or raw == "-Infinity":
+            inp = "\"" + raw + "\""
+        errs.append(err_obj("[\"body\"]",
+                            "Input should be a valid dictionary or object to extract fields from",
+                            "model_attributes_type", inp))
+        return (False, errs^, ok_vals^)
     if body_params.has_error:
-        errs.append(err_obj("[\"body\"]", "JSON decode error", "json_invalid", _json_input_frag(body_str)))
+        # 严格校验已通过 -> object; 解析器理论不应报错 (防御).
+        errs.append(err_obj_ctx("[\"body\",0]", "JSON decode error", "json_invalid",
+                                "{}", "{\"error\":\"invalid JSON\"}"))
         return (False, errs^, ok_vals^)
     var fields = parse_body_schema(handler.data["_body_schema"])
     _validate_fields(fields, body_params, "", "[\"body\"", body_str, ok_vals, errs)
