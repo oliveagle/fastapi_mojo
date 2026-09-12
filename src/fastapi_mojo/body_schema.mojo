@@ -12,6 +12,7 @@
 # Mojo 1.0.0: struct 无隐式拷贝 -> List 存字段 spec 字符串, get_field() 返回新值 (move).
 
 from json import json_escape
+from scalar_types import is_scalar_type, scalar_canonical
 
 
 # ---------- 字段 spec ----------
@@ -218,6 +219,9 @@ def _parse_field(raw: String) raises -> FieldSpec:
         fs.type_name = "str"
     elif base == "int" or base == "float" or base == "bool" or base == "obj" or base == "arr":
         fs.type_name = base
+    elif is_scalar_type(base):
+        # 决策-79: pydantic 标量类型 (uuid/date/datetime/time/timedelta/decimal)
+        fs.type_name = scalar_canonical(base)
     else:
         raise Error("body_schema: unknown type '" + base + "' in field '" + fs.name + "'")
     if j < rn and ord(rest[byte=j]) == 91:  # [..] 数组 (空) / enum (值列表)

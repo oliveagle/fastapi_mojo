@@ -36,6 +36,7 @@ from params_query_extra import (parse_table, split_csv, join_values,
                                 is_list_spec, has_eq, default_part,
                                 list_default_csv, get_param_descs)
 from json import json_escape
+from scalar_types import is_scalar_type, scalar_canonical, scalar_openapi_schema, parse_scalar, scalar_error_object
 
 
 # ---------- 声明表解析 ----------
@@ -170,9 +171,12 @@ def validate_form_collect(type_spec: Dict[String, String],
                 if pb.type_name != "string" and pb.type_name != "str":
                     var pr = parse_typed_value(pb.type_name, v)
                     if not pr[0]:
-                        var m = _elem_err_msg(pb.type_name)
                         var eloc = "[\"body\",\"" + json_escape(k) + "\"," + String(i) + "]"
-                        errs.append(_fe(eloc, m[0], m[1], "\"" + json_escape(v) + "\""))
+                        if is_scalar_type(pb.type_name):
+                            errs.append(scalar_error_object(eloc, v, parse_scalar(pb.type_name, v)))
+                        else:
+                            var m = _elem_err_msg(pb.type_name)
+                            errs.append(_fe(eloc, m[0], m[1], "\"" + json_escape(v) + "\""))
                 i += 1
             continue
         var raw = String("")
@@ -190,8 +194,11 @@ def validate_form_collect(type_spec: Dict[String, String],
             continue
         var pr = parse_typed_value(pb.type_name, raw)
         if not pr[0]:
-            var m = _elem_err_msg(pb.type_name)
-            errs.append(_fe(loc, m[0], m[1], "\"" + json_escape(raw) + "\""))
+            if is_scalar_type(pb.type_name):
+                errs.append(scalar_error_object(loc, raw, parse_scalar(pb.type_name, raw)))
+            else:
+                var m = _elem_err_msg(pb.type_name)
+                errs.append(_fe(loc, m[0], m[1], "\"" + json_escape(raw) + "\""))
     return (len(errs) == 0, errs^)
 
 
@@ -289,6 +296,28 @@ def _openapi_form_field_schema(name: String, spec: String, desc: String) raises 
         type_name = pb.type_name
     var oapi = _oapi_type(type_name)
     var title = json_escape(_cap_name(name))
+    if is_scalar_type(type_name):
+        var sbase = scalar_openapi_schema(type_name)
+        var sinner = String(sbase[byte=1:sbase.byte_length() - 1])
+        if is_list_spec(spec):
+            var o1 = "{\"items\":" + sbase + ",\"type\":\"array\",\"title\":\"" + title + "\""
+            if desc != "":
+                o1 = o1 + ",\"description\":\"" + json_escape(desc) + "\""
+            if has_eq(spec):
+                var items = split_csv(list_default_csv(spec))
+                var arr = "["
+                for i in range(len(items)):
+                    if i > 0:
+                        arr = arr + ","
+                    arr = arr + "\"" + json_escape(items[i]) + "\""
+                o1 = o1 + ",\"default\":" + arr + "]"
+            return o1 + "}"
+        var o2 = "{" + sinner + ",\"title\":\"" + title + "\""
+        if desc != "":
+            o2 = o2 + ",\"description\":\"" + json_escape(desc) + "\""
+        if has_eq(spec):
+            o2 = o2 + ",\"default\":\"" + json_escape(default_part(spec)) + "\""
+        return o2 + "}"
     if is_list_spec(spec):
         var out = "{\"items\":{\"type\":\"" + oapi + "\"},\"type\":\"array\",\"title\":\"" + title + "\""
         if desc != "":

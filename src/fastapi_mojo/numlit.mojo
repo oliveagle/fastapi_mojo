@@ -9,6 +9,9 @@
 # typed header) / openapi_schemas (header schema 类型化默认)。依赖方向:
 # {params_typed, param_constraints, openapi_schemas} -> numlit (单向, 无环).
 
+from scalar_types import is_scalar_type, scalar_canonical, parse_scalar
+
+
 def is_int_literal(s: String) -> Bool:
     """True if s is a non-empty integer literal (optional leading '-')."""
     var n = s.byte_length()
@@ -192,6 +195,12 @@ def parse_base(raw: String) -> ParsedBase:
                 if vals == "":
                     return ParsedBase("str", False, "", True)
                 return ParsedBase("str", True, vals)
+            # 决策-79: 标量类型 (uuid/date/.../decimal) 的 list = 空括号;
+            # 非空括号 (enum) 对标量不可表达 -> 拒绝
+            if is_scalar_type(base):
+                if vals == "":
+                    return ParsedBase(scalar_canonical(base), False, "", True)
+                return ParsedBase()
             if base == "int" or base == "float" or base == "bool":
                 if vals == "":
                     return ParsedBase(base, False, "", True)
@@ -202,6 +211,8 @@ def parse_base(raw: String) -> ParsedBase:
         return ParsedBase("str", False, "")
     if raw == "int" or raw == "float" or raw == "bool":
         return ParsedBase(raw, False, "")
+    if is_scalar_type(raw):
+        return ParsedBase(scalar_canonical(raw), False, "")
     return ParsedBase()
 
 
@@ -276,4 +287,9 @@ def parse_typed_value(type_name: String, raw: String) -> Tuple[Bool, String]:
         if pr[1]:
             return (True, "true")
         return (True, "false")
+    if is_scalar_type(type_name):
+        var sp = parse_scalar(type_name, raw)
+        if sp.ok:
+            return (True, sp.value)
+        return (False, "")
     return (False, "")

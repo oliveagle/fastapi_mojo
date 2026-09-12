@@ -12,6 +12,7 @@ from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field,
 from param_constraints import (ConstraintSpec, constraint_schema_fragments,
                                parse_constraint_entry)
 from numlit import parse_base, parse_typed_value
+from scalar_types import is_scalar_type, scalar_openapi_schema
 from string_builder import StringBuilder
 from json import json_escape
 
@@ -108,6 +109,21 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
             sb.append(",\"default\":" + _openapi_default_value(fs))
         sb.append("}")
         return sb.take()
+    if fs.is_array and is_scalar_type(fs.elem):
+        sb.append("{\"type\":\"array\",\"items\":" + scalar_openapi_schema(fs.elem))
+        for c in _split_top(fs.constraints, 44):
+            var ct = _trim(c)
+            if ct.startswith("items="):
+                var pr = _parse_range(String(ct[byte=6:ct.byte_length()]))
+                if pr[0]:
+                    if pr[1] > 0:
+                        sb.append(",\"minItems\":" + String(pr[1]))
+                    if pr[2] > 0:
+                        sb.append(",\"maxItems\":" + String(pr[2]))
+        if fs.has_default():
+            sb.append(",\"default\":" + _openapi_default_value(fs))
+        sb.append("}")
+        return sb.take()
     if fs.is_array:
         # Decision-58: elem-level constraints live INSIDE the items schema;
         # minItems/maxItems stay on the array schema (outer level).
@@ -151,6 +167,8 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
             sb.append(",\"default\":" + _openapi_default_value(fs))
         sb.append("}")
         return sb.take()
+    if is_scalar_type(fs.type_name):
+        return _openapi_scalar_or_default(fs.type_name, "", fs.has_default(), fs.default_value)
     sb.append("{\"type\":\"" + _type_to_openapi(fs.type_name) + "\"")
     if fs.type_name == "int":
         sb.append(",\"format\":\"int32\"")
@@ -223,6 +241,20 @@ def _json_list_array(t: String, csv: String) raises -> String:
 
 # ---------- 参数 schema (决策-54: 自 openapi.mojo 移入 + 约束键) ----------
 
+def _openapi_scalar_or_default(spec: String, desc: String,
+                               has_default: Bool, default_value: String) raises -> String:
+    """标量类型 schema: scalar_types 片段 + 可选 default/description (决策-79)."""
+    var base = scalar_openapi_schema(spec)
+    var sb = StringBuilder()
+    sb.append(String(base[byte=0:base.byte_length() - 1]))
+    if has_default:
+        sb.append(",\"default\":\"" + json_escape(default_value) + "\"")
+    if desc != "":
+        sb.append(",\"description\":\"" + json_escape(desc) + "\"")
+    sb.append("}")
+    return sb.take()
+
+
 def _openapi_param_schema(base: String, desc: String, cons: ConstraintSpec) raises -> String:
     """参数 schema (决策-38 enum + 决策-43 list/default/desc + 决策-54 约束).
     键序 (ADR-0029 §3.5): type, [enum], minLength, maxLength, pattern,
@@ -274,6 +306,8 @@ def _openapi_param_schema(base: String, desc: String, cons: ConstraintSpec) rais
             if has_default:
                 sb.append(",\"default\":\"" + json_escape(default_value) + "\"")
     else:
+        if is_scalar_type(spec):
+            return _openapi_scalar_or_default(spec, desc, has_default, default_value)
         sb.append("{\"type\":\"" + _type_to_openapi(spec) + "\"")
         for f in constraint_schema_fragments(cons):
             sb.append("," + f)
@@ -310,6 +344,8 @@ def _header_param_schema(type_spec: String, desc: String, cons: ConstraintSpec) 
     var tname = "str"
     if pb.ok:
         tname = pb.type_name
+    if is_scalar_type(tname):
+        return _openapi_scalar_or_default(tname, desc, has_default, default_value)
     var sb = StringBuilder()
     sb.append("{\"type\":\"" + _type_to_openapi(tname) + "\"")
     for f in constraint_schema_fragments(cons):

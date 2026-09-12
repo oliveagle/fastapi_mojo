@@ -355,6 +355,7 @@ def validate_list_values(type_name: String, values: List[String],
     ["query",name,i]. string 元素恒过 (enum list 语法不可表达,
     注册期 set_param_type 拒绝)."""
     from params_typed import parse_typed_value
+    from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
     var i = 0
     while i < len(values):
         var v = values[i]
@@ -362,7 +363,9 @@ def validate_list_values(type_name: String, values: List[String],
             var pr = parse_typed_value(type_name, v)
             if not pr[0]:
                 var loc = "[\"query\",\"" + param_name + "\"," + String(i) + "]"
-                if type_name == "int":
+                if is_scalar_type(type_name):
+                    errs.append(scalar_error_object(loc, v, parse_scalar(type_name, v)))
+                elif type_name == "int":
                     errs.append(make_error_json(loc, "Input should be a valid integer, unable to parse string as an integer", "int_parsing", "\"" + json_escape(v) + "\""))
                 elif type_name == "float":
                     errs.append(make_error_json(loc, "Input should be a valid number, unable to parse string as a number", "float_parsing", "\"" + json_escape(v) + "\""))

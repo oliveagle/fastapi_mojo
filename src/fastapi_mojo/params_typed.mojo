@@ -30,6 +30,7 @@ from numlit import (TypeSpec, parse_type_spec, ParsedBase, parse_base,
                    parse_typed_value, parse_f64, enum_in, enum_msg)
 from param_constraints import (_pe_ctx, parse_constraint_entry,
                                check_num_constraints, check_str_constraints)
+from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
 from json import json_escape
 
 
@@ -125,6 +126,10 @@ def _vpc_one(k: String, type_spec: Dict[String, String], path_params: Dict[Strin
         return
     var pr = parse_typed_value(pb.type_name, raw)
     if not pr[0]:
+        # 决策-79: 标量类型 (uuid/date/.../decimal) 走 scalar_types 错误对象
+        if is_scalar_type(pb.type_name):
+            errs.append(scalar_error_object(loc, raw, parse_scalar(pb.type_name, raw)))
+            return
         if pb.type_name == "int":
             errs.append(_pe(loc, "Input should be a valid integer, unable to parse string as an integer", "int_parsing", "\"" + json_escape(raw) + "\""))
         elif pb.type_name == "float":

@@ -17,6 +17,7 @@ from numlit import (parse_type_spec, parse_base, parse_typed_value,
 from json import json_escape
 from param_constraints import (_pe, _pe_ctx, _rgx_match, parse_constraint_entry,
                                check_num_constraints, check_str_constraints)
+from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
 
 def _hdr_parse_err(loc: String, type_name: String, raw: String) -> String:
     """parse 失败 422 (完整上游消息 §3.4; bool = 三面对齐完整串, 决策-54 §3.4)."""
@@ -26,6 +27,8 @@ def _hdr_parse_err(loc: String, type_name: String, raw: String) -> String:
     if type_name == "float":
         return _pe(loc, "Input should be a valid number, unable to parse string as a number",
                    "float_parsing", "\"" + json_escape(raw) + "\"")
+    if is_scalar_type(type_name):
+        return scalar_error_object(loc, raw, parse_scalar(type_name, raw))
     return _pe(loc, "Input should be a valid boolean, unable to interpret input",
                "bool_parsing", "\"" + json_escape(raw) + "\"")
 

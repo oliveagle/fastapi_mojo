@@ -487,13 +487,21 @@ def test_params_typed() raises:
     assert got["b"] == "bool=false", "type b round-trip"
 
     # set_param_type rejects unknown type at registration
+    # (决策-79: uuid 已成合法标量类型; 用真正未知的 "nope" 保持拒绝语义)
     var h2 = Handler(KIND_ECHO(), "demo2")
     var raised = False
     try:
-        set_param_type(h2, "x", "uuid")
+        set_param_type(h2, "x", "nope")
     except:
         raised = True
     assert raised, "unknown type rejected at registration"
+    # 决策-79: scalar 类型注册成功 + 默认值校验
+    var h3 = Handler(KIND_ECHO(), "demo3")
+    set_param_type(h3, "id", "uuid")
+    set_param_type(h3, "day", "date=2024-01-02")
+    var got3 = get_param_types(h3)
+    assert got3["id"] == "uuid", "uuid registered"
+    assert got3["day"] == "date=2024-01-02", "date default registered"
 
     print("Typed params tests passed!")
 

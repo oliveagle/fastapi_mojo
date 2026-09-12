@@ -509,6 +509,49 @@ def register_routes(mut router: Router) raises:
     typed_h.set_data("_param_types", "count:int=5;verbose:bool")
     router.add_route("/typed", "GET", typed_h)
 
+    # 决策-79 (ADR-0054): 标量类型 demo (pydantic 内建 uuid/date/datetime/
+    # time/timedelta/decimal) — path/query 校验 + 422 (type/msg/ctx) +
+    # OpenAPI format; body/form/header 标量面同样接线.
+    var sc_uuid_h = Handler(KIND_ECHO(), "scalar_uuid")
+    sc_uuid_h.set_data("_param_types", "v:uuid")
+    router.add_route("/scalar/uuid/{v}", "GET", sc_uuid_h)
+    var sc_date_h = Handler(KIND_ECHO(), "scalar_date")
+    sc_date_h.set_data("_param_types", "v:date")
+    router.add_route("/scalar/date/{v}", "GET", sc_date_h)
+    var sc_dt_h = Handler(KIND_ECHO(), "scalar_datetime")
+    sc_dt_h.set_data("_param_types", "v:datetime")
+    router.add_route("/scalar/datetime/{v}", "GET", sc_dt_h)
+    var sc_time_h = Handler(KIND_ECHO(), "scalar_time")
+    sc_time_h.set_data("_param_types", "v:time")
+    router.add_route("/scalar/time/{v}", "GET", sc_time_h)
+    var sc_td_h = Handler(KIND_ECHO(), "scalar_timedelta")
+    sc_td_h.set_data("_param_types", "v:timedelta")
+    router.add_route("/scalar/timedelta/{v}", "GET", sc_td_h)
+    var sc_dec_h = Handler(KIND_ECHO(), "scalar_decimal")
+    sc_dec_h.set_data("_param_types", "v:decimal")
+    router.add_route("/scalar/decimal/{v}", "GET", sc_dec_h)
+    # query 面 + 默认值
+    var sc_q_h = Handler(KIND_ECHO(), "scalar_query")
+    sc_q_h.set_data("_param_types", "id:uuid;day:date=2024-01-02")
+    router.add_route("/scalar/query", "GET", sc_q_h)
+    # query list of scalar (决策-43 list 面 + 决策-79 标量)
+    var sc_list_h = Handler(KIND_ECHO(), "scalar_list")
+    sc_list_h.set_data("_param_types", "ids:uuid[]")
+    router.add_route("/scalar/list", "GET", sc_list_h)
+    # body 面 (JSON model 标量字段)
+    var sc_body_h = Handler(KIND_ECHO(), "scalar_body")
+    sc_body_h.set_data("_body_schema", "id:uuid;when:datetime;amount:decimal")
+    router.add_route("/scalar/body", "POST", sc_body_h)
+    # form 面 (urlencoded 标量字段)
+    var sc_form_h = Handler(KIND_ECHO(), "scalar_form")
+    sc_form_h.set_data("_form_types", "id:uuid;amount:decimal")
+    router.add_route("/scalar/form", "POST", sc_form_h)
+    # header 面 (wire X-Id)
+    var sc_hdr_h = Handler(KIND_ECHO(), "scalar_header")
+    sc_hdr_h.set_data("_reads_headers", "X-Id")
+    sc_hdr_h.set_data("_header_types", "X-Id:uuid")
+    router.add_route("/scalar/hdr", "GET", sc_hdr_h)
+
     # F2 声明式异常映射 demo (Goal-0002 §1.1): Handler.data["_error_map"]
     #   /errors/{item_id}: item_id=99 -> 404 (Item not found); 其它 int -> 422 (Invalid ID).
     #   命中时直接返回 {status, detail}, 不进 run_handler (FastAPI HTTPException 语义).

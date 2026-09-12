@@ -324,6 +324,88 @@ expect_code "typed query default count ok" "200" "http://127.0.0.1:$PORT/typed?v
 expect_code "typed query int bad -> 422" "422" "http://127.0.0.1:$PORT/typed?count=abc&verbose=true"
 expect_code "typed query missing required -> 422" "422" "http://127.0.0.1:$PORT/typed"
 
+echo "== scalar types (决策-79: uuid/date/datetime/time/timedelta/decimal) =="
+# pydantic 内建标量类型参数校验 + 422 (type/msg/ctx) + OpenAPI format.
+UUID_UP="A987FB5A-8CB6-4F3F-8F6B-000000000001"
+UUID_LO="a987fb5a-8cb6-4f3f-8f6b-000000000001"
+expect_code "SC-1 uuid path ok" 200 "$BASE/scalar/uuid/$UUID_UP"
+expect_code "SC-2 uuid simple (32 hex) ok" 200 "$BASE/scalar/uuid/a987fb5a8cb64f3f8f6b000000000001"
+expect_code "SC-3 uuid bad -> 422" 422 "$BASE/scalar/uuid/nope"
+expect_body_contains "SC-3 uuid 422 exact msg" 'Input should be a valid UUID, invalid character: found `n` at 1' "$BASE/scalar/uuid/nope"
+expect_body_contains "SC-3 uuid 422 ctx" '"ctx":{"error":"invalid character: found `n` at 1"}' "$BASE/scalar/uuid/nope"
+expect_code "SC-4 uuid group count -> 422" 422 "$BASE/scalar/query?id=%7B%7D"
+expect_body_contains "SC-4 uuid group count msg" 'invalid group count: expected 5, found 1' "$BASE/scalar/query?id=%7B%7D"
+expect_code "SC-5 uuid braced ok (query decoded)" 200 "$BASE/scalar/query?id=%7B$UUID_LO%7D"
+expect_code "SC-6 uuid urn ok (query)" 200 "$BASE/scalar/query?id=urn:uuid:$UUID_LO"
+
+expect_code "SC-7 date path ok" 200 "$BASE/scalar/date/2024-01-02"
+expect_code "SC-8 date leap ok" 200 "$BASE/scalar/date/2024-02-29"
+expect_code "SC-9 date non-leap -> 422" 422 "$BASE/scalar/date/2023-02-29"
+expect_body_contains "SC-9 date day-range msg" 'Input should be a valid date or datetime, day value is outside expected range' "$BASE/scalar/date/2023-02-29"
+expect_code "SC-10 date year0 -> 422" 422 "$BASE/scalar/date/0000-01-01"
+expect_body_contains "SC-10 date year0 type" '"type":"date_parsing"' "$BASE/scalar/date/0000-01-01"
+expect_code "SC-11 date inexact -> 422" 422 "$BASE/scalar/date/2024-01-02T03:04:05"
+expect_body_contains "SC-11 date inexact type" '"type":"date_from_datetime_inexact"' "$BASE/scalar/date/2024-01-02T03:04:05"
+
+expect_code "SC-12 datetime ok" 200 "$BASE/scalar/datetime/2024-01-02T03:04:05"
+expect_code "SC-13 datetime Z ok" 200 "$BASE/scalar/datetime/2024-01-02T03:04:05Z"
+expect_code "SC-14 datetime epoch ok" 200 "$BASE/scalar/datetime/1704164645"
+expect_code "SC-15 datetime bad -> 422" 422 "$BASE/scalar/datetime/x"
+expect_body_contains "SC-15 datetime msg" 'Input should be a valid datetime or date, input is too short' "$BASE/scalar/datetime/x"
+
+expect_code "SC-16 time ok" 200 "$BASE/scalar/time/03:04:05"
+expect_code "SC-17 time bad -> 422" 422 "$BASE/scalar/time/25:00:00"
+expect_body_contains "SC-17 time hour-range msg" 'Input should be in a valid time format, hour value is outside expected range of 0-23' "$BASE/scalar/time/25:00:00"
+
+expect_code "SC-18 timedelta ISO ok" 200 "$BASE/scalar/timedelta/P1DT2H"
+expect_code "SC-19 timedelta bad -> 422" 422 "$BASE/scalar/timedelta/x"
+expect_body_contains "SC-19 timedelta msg" 'Input should be a valid timedelta, invalid digit in duration' "$BASE/scalar/timedelta/x"
+
+expect_code "SC-20 decimal ok" 200 "$BASE/scalar/decimal/3.14"
+expect_code "SC-21 decimal bad -> 422" 422 "$BASE/scalar/decimal/abc"
+expect_body_contains "SC-21 decimal msg (no ctx)" '{"loc":["path","v"],"msg":"Input should be a valid decimal","type":"decimal_parsing","input":"abc"}' "$BASE/scalar/decimal/abc"
+
+expect_code "SC-22 query collect-all -> 422" 422 "$BASE/scalar/query?id=abc&day=no"
+expect_body_contains "SC-22 query id err" '"loc":["query","id"]' "$BASE/scalar/query?id=abc&day=no"
+expect_body_contains "SC-22 query day err" '"loc":["query","day"]' "$BASE/scalar/query?id=abc&day=no"
+expect_body_contains "SC-23 query default day injected" '"query_day": "2024-01-02"' "$BASE/scalar/query?id=$UUID_LO"
+
+expect_code "SC-24 scalar list ok" 200 "$BASE/scalar/list?ids=$UUID_LO&ids=$UUID_LO"
+expect_code "SC-25 scalar list bad -> 422" 422 "$BASE/scalar/list?ids=nope"
+expect_body_contains "SC-25 list idx loc" '"loc":["query","ids",0]' "$BASE/scalar/list?ids=nope"
+
+SCB_VALID='{"id":"A987FB5A-8CB6-4F3F-8F6B-000000000001","when":"2024-01-02T03:04:05","amount":"3.14"}'
+expect_code "SC-26 json body ok" 200 "$BASE/scalar/body" POST "$SCB_VALID"
+expect_body_contains "SC-26 body scalar inject" '"body_id": "A987FB5A-8CB6-4F3F-8F6B-000000000001"' "$BASE/scalar/body" POST "$SCB_VALID"
+expect_code "SC-27 json body bad -> 422" 422 "$BASE/scalar/body" POST '{"id":"nope","when":"x","amount":"abc"}'
+expect_body_contains "SC-27 body uuid err" '"loc":["body","id"],"msg":"Input should be a valid UUID' "$BASE/scalar/body" POST '{"id":"nope","when":"x","amount":"abc"}'
+expect_body_contains "SC-27 body decimal err" '"loc":["body","amount"],"msg":"Input should be a valid decimal"' "$BASE/scalar/body" POST '{"id":"nope","when":"x","amount":"abc"}'
+expect_code "SC-28 json body missing -> 422" 422 "$BASE/scalar/body" POST '{}'
+expect_body_contains "SC-28 body field required" '"loc":["body","id"],"msg":"Field required"' "$BASE/scalar/body" POST '{}'
+
+expect_code "SC-29 form ok" 200 "$BASE/scalar/form" POST "id=$UUID_LO&amount=1.5"
+expect_code "SC-30 form bad -> 422" 422 "$BASE/scalar/form" POST "id=nope&amount=abc"
+expect_body_contains "SC-30 form uuid err" '"loc":["body","id"],"msg":"Input should be a valid UUID' "$BASE/scalar/form" POST "id=nope&amount=abc"
+
+SC_HDR_OK=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "X-Id: $UUID_LO" "$BASE/scalar/hdr")
+if [[ "$SC_HDR_OK" == "200" ]]; then pass "SC-31 header scalar ok"
+else fail "SC-31 header scalar ok" "got $SC_HDR_OK"; fi
+SC_HDR_BAD=$(curl -s --max-time 5 -H "X-Id: nope" "$BASE/scalar/hdr")
+if [[ "$SC_HDR_BAD" == *'"type":"uuid_parsing"'* && "$SC_HDR_BAD" == *'"loc":["header","X-Id"]'* ]]; then pass "SC-32 header scalar bad -> uuid_parsing"
+else fail "SC-32 header scalar bad" "got: ${SC_HDR_BAD:0:160}"; fi
+
+SC_OA=$(curl -s --max-time 5 "$BASE/openapi.json")
+if [[ "$SC_OA" == *'"schema":{"type":"string","format":"uuid"}'* ]]; then pass "SC-33 openapi uuid format"
+else fail "SC-33 openapi uuid format" "missing uuid schema"; fi
+if [[ "$SC_OA" == *'"schema":{"type":"string","format":"date-time"}'* ]]; then pass "SC-34 openapi date-time format"
+else fail "SC-34 openapi date-time format" "missing date-time schema"; fi
+if [[ "$SC_OA" == *'"schema":{"type":"string","format":"duration"}'* ]]; then pass "SC-35 openapi duration format"
+else fail "SC-35 openapi duration format" "missing duration schema"; fi
+if [[ "$SC_OA" == *'"anyOf":[{"type":"number"},{"type":"string","pattern":"^(?!^[-+.]*$)'* ]]; then pass "SC-36 openapi decimal anyOf"
+else fail "SC-36 openapi decimal anyOf" "missing decimal schema"; fi
+if [[ "$SC_OA" == *'"scalar_body":{"type":"object","properties":{"id":{"type":"string","format":"uuid"},"when":{"type":"string","format":"date-time"},"amount":{"anyOf"'* ]]; then pass "SC-37 openapi body scalar component"
+else fail "SC-37 openapi body scalar component" "missing component"; fi
+
 echo "== unified error body + error_map (Goal-0002 F2) =="
 # 声明式异常映射: _error_map = "item_id=99:404:Item not found;item_id=*:422:Invalid ID"
 expect_code "error_map item_id=99 -> 404" "404" "$BASE/errors/99"

@@ -13,6 +13,7 @@ from params_query import ParsedParams
 from params_json import parse_body_json
 from json import json_escape
 from std.ffi import external_call, CStringSlice
+from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
 
 def _body_rgx_match(pattern: String, s: String) -> Int:
     """决策-57 FFI: regex_match(pattern, s) -> 1=match / 0=no / -1=编译失败 (bridge/regex.rs)."""
@@ -33,6 +34,8 @@ def _type_err(fs: FieldSpec) -> Tuple[String, String]:
         return ("Input should be a valid number, unable to parse string as a number", "float_parsing")
     if fs.type_name == "bool":
         return ("Input should be a valid boolean", "bool_parsing")
+    if is_scalar_type(fs.type_name):
+        return ("Input should be a valid string", "string_type")
     return ("Input should be an object", "model_type")
 
 
@@ -270,6 +273,8 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
             ok_t = t == "object"
         elif fs.type_name == "arr":
             ok_t = t == "array"
+        elif is_scalar_type(fs.type_name):
+            ok_t = t == "string"
         if not ok_t:
             var te = _type_err(fs)
             errs.append(err_obj(floc + "]", te[0], te[1], _json_input_frag(raw)))
@@ -277,11 +282,25 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
         if fs.is_enum and not _in_enum_csv(raw, fs.enum_values):
             errs.append(err_obj(floc + "]", _enum_or_msg(fs.enum_values), "enum", _json_input_frag(raw)))
             continue
+        if is_scalar_type(fs.type_name) and not fs.is_array:
+            var sv = _strip_quotes(raw)
+            var sp = parse_scalar(fs.type_name, sv)
+            if not sp.ok:
+                errs.append(scalar_error_object(floc + "]", sv, sp))
+                continue
+            out[key] = raw
+            continue
         out[key] = raw
         if fs.is_array:
             var elems = _split_json_array(raw)
             for ei in range(len(elems)):
                 var eloc = floc + "," + String(ei) + "]"
+                if is_scalar_type(fs.elem):
+                    var sv2 = _strip_quotes(elems[ei])
+                    var sp2 = parse_scalar(fs.elem, sv2)
+                    if not sp2.ok:
+                        errs.append(scalar_error_object(eloc, sv2, sp2))
+                    continue
                 var ec = _elem_check(fs.elem, elems[ei])
                 if not ec[0]:
                     errs.append(err_obj(eloc, ec[1], ec[2], _json_input_frag(elems[ei])))
