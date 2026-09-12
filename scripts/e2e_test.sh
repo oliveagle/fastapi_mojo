@@ -30,6 +30,7 @@
 #   - Rust JSON serializer opt-in: FASTAPI_MOJO_JSON_SERIALIZER=rust (决策-66, JR-1..JR-6)
 #   - OAuth2 scopes: _auth_scopes gate + oauth2 flows OpenAPI (决策-67, OT-24..OT-33)
 #   - HTTPDigest runtime + OpenAPI securitySchemes (basic/bearer/digest/apiKey) (决策-69, DG-1..6 / SO-1..5)
+#   - OpenIdConnect + OAuth2AuthorizationCodeBearer (runtime + OpenAPI) (决策-70, OI-1..4 / AC-1..7)
 #   - RedirectResponse: _redirect_url + _redirect_status 307/303/301/308 + URL quote (决策-68, RD-1..RD-10)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
@@ -963,6 +964,44 @@ else fail "SO-4 _auth_scheme_name override" "missing in: ${SO_API:0:400}"; fi
 if [[ "$SO_API" != *'{"GET":'* && "$SO_API" != *'{"POST":'* && "$SO_API" != *'{"DELETE":'* && "$SO_API" != *'{"PATCH":'* ]]; then
     pass "SO-5 OpenAPI method keys lowercase (no uppercase method keys)"
 else fail "SO-5 method keys lowercase" "found uppercase method key"; fi
+
+# --- 决策-70 (ADR-0045): OpenIdConnect + OAuth2AuthorizationCodeBearer ---------------
+echo "== OpenIdConnect + OAuth2AuthorizationCodeBearer (决策-70) =="
+OI_NO=$(curl -sS -m 5 -D - -o "$TMP/oi_no.json" "$BASE/openid")
+if [[ "$OI_NO" == *'HTTP/1.1 401'* && "$OI_NO" == *'WWW-Authenticate: Bearer'* ]]; then pass "OI-1 openid no auth -> 401 + WWW-Authenticate: Bearer"
+else fail "OI-1 openid no auth -> 401 + WWW-Authenticate: Bearer" "hdr: ${OI_NO:0:200}"; fi
+if [[ "$(cat "$TMP/oi_no.json")" == *'"detail": "Not authenticated"'* ]]; then pass "OI-2 openid 401 detail Not authenticated"
+else fail "OI-2 openid 401 detail" "body: $(head -c 120 "$TMP/oi_no.json")"; fi
+OI_BR=$(curl -sS -m 5 -H "Authorization: Bearer tok" "$BASE/openid")
+if [[ "$OI_BR" == *'"auth_credentials": "Bearer tok"'* ]]; then pass "OI-3 openid Bearer -> 200 + auth_credentials (raw header)"
+else fail "OI-3 openid Bearer" "body: ${OI_BR:0:200}"; fi
+OI_BS=$(curl -sS -m 5 -H "Authorization: Basic x" "$BASE/openid")
+if [[ "$OI_BS" == *'"auth_credentials": "Basic x"'* ]]; then pass "OI-4 openid presence-only (any scheme -> 200)"
+else fail "OI-4 openid presence-only" "body: ${OI_BS:0:200}"; fi
+
+AC_NO=$(curl -sS -m 5 -D - -o "$TMP/ac_no.json" "$BASE/authcode")
+if [[ "$AC_NO" == *'HTTP/1.1 401'* && "$AC_NO" == *'WWW-Authenticate: Bearer'* ]]; then pass "AC-1 authcode no auth -> 401 + WWW-Authenticate: Bearer"
+else fail "AC-1 authcode no auth -> 401 + WWW-Authenticate: Bearer" "hdr: ${AC_NO:0:200}"; fi
+AC_OK=$(curl -sS -m 5 -H "Authorization: Bearer tok" "$BASE/authcode")
+if [[ "$AC_OK" == *'"auth_token": "tok"'* ]]; then pass "AC-2 authcode Bearer -> 200 + auth_token"
+else fail "AC-2 authcode Bearer" "body: ${AC_OK:0:200}"; fi
+AC_LC=$(curl -sS -m 5 -H "Authorization: bearer tok" "$BASE/authcode")
+if [[ "$AC_LC" == *'"auth_token": "tok"'* ]]; then pass "AC-3 authcode scheme case-insensitive (lowercase bearer ok)"
+else fail "AC-3 authcode lowercase bearer" "body: ${AC_LC:0:200}"; fi
+AC_BAD=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" -H "Authorization: digest x" "$BASE/authcode")
+if [[ "$AC_BAD" == "401" ]]; then pass "AC-4 authcode wrong scheme (digest) -> 401"
+else fail "AC-4 authcode wrong scheme -> 401" "got $AC_BAD"; fi
+
+SO2_API=$(http_body "$BASE/openapi.json")
+if [[ "$SO2_API" == *'"OpenIdConnect":{"type":"openIdConnect","openIdConnectUrl":"/.well-known/openid-configuration"}'* && "$SO2_API" == *'"security":[{"OpenIdConnect":[]}]'* ]]; then
+    pass "AC-5 securityScheme openIdConnect + operation security"
+else fail "AC-5 openIdConnect scheme" "missing in: ${SO2_API:0:400}"; fi
+if [[ "$SO2_API" == *'"OAuth2AuthorizationCodeBearer":{"type":"oauth2","flows":{"authorizationCode":{"scopes":{"items:read":"Read items"},"authorizationUrl":"/authorize","tokenUrl":"/token"}}}'* && "$SO2_API" == *'"security":[{"OAuth2AuthorizationCodeBearer":[]}]'* ]]; then
+    pass "AC-6 securityScheme authorizationCode flow + operation security"
+else fail "AC-6 authorizationCode flow" "missing in: ${SO2_API:0:500}"; fi
+if [[ "$SO2_API" == *'"OAuth2PasswordBearer":{"type":"oauth2","flows":{"password":{'* && "$SO2_API" == *'"tokenUrl":"token"'* ]]; then
+    pass "AC-7 password-flow scheme uncontaminated (tokenUrl=token)"
+else fail "AC-7 password scheme uncontaminated" "missing in: ${SO2_API:0:500}"; fi
 
 # --- response_model (决策-35, Goal-0003 P1): 响应字段过滤 ---------------------------------
 # /profile 返回 name/age/email/secret, 但 _response_model="name;age" 只返回 name/age.

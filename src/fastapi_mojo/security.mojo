@@ -396,6 +396,45 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
         s4.auth_credentials = creds3
         return s4^
 
+    # ---- OAuth2AuthorizationCodeBearer (决策-70, 上游: 与 OAuth2PasswordBearer 同 runtime,
+    #      只提取 Bearer token, scheme 大小写不敏感, param 可为空) ----
+    elif auth_spec == "authcode":
+        var authz4 = _get_header("Authorization")
+        var sp4 = -1
+        for k in range(authz4.byte_length()):
+            if ord(authz4[byte=k]) == 32:  # ' '
+                sp4 = k
+                break
+        var scheme4 = authz4
+        var param4 = ""
+        if sp4 >= 0:
+            scheme4 = _bstr(authz4, 0, sp4)
+            param4 = _trim(_bstr(authz4, sp4 + 1, authz4.byte_length()))
+        if authz4 == "" or not _eq_ci(scheme4, "bearer"):
+            var f10 = AuthResult()
+            f10.ok = False
+            f10.detail = "Not authenticated"
+            f10.www_authenticate = "Bearer" + _realm_part(realm)
+            return f10^
+        var s5 = AuthResult()
+        s5.ok = True
+        s5.auth_token = param4
+        return s5^
+
+    # ---- OpenIdConnect (决策-70, 上游 stub: 只校验 Authorization 头存在, 原样返回整个头) ----
+    elif auth_spec == "openid":
+        var authz5 = _get_header("Authorization")
+        if authz5 == "":
+            var f11 = AuthResult()
+            f11.ok = False
+            f11.detail = "Not authenticated"
+            f11.www_authenticate = "Bearer" + _realm_part(realm)
+            return f11^
+        var s6 = AuthResult()
+        s6.ok = True
+        s6.auth_credentials = authz5
+        return s6^
+
     # ---- 未知 spec ----
     else:
         var f8 = AuthResult()

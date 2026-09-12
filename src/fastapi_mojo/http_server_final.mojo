@@ -851,6 +851,27 @@ def register_routes(mut router: Router) raises:
     digest_h.set_data("message", "digest auth demo")
     router.add_route("/digest", "GET", digest_h)
 
+    # 决策-70 (ADR-0045): OpenIdConnect stub parity demo.
+    # /openid: Authorization 头存在 (任意 scheme) -> 200 + auth_credentials=原始头;
+    #   缺失/空头 -> 401 + WWW-Authenticate: Bearer. OpenAPI: type=openIdConnect.
+    var openid_h = Handler(KIND_ECHO(), "openid_demo")
+    openid_h.set_data("_auth", "openid")
+    openid_h.set_data("_openid_url", "/.well-known/openid-configuration")
+    openid_h.set_data("message", "openid demo")
+    router.add_route("/openid", "GET", openid_h)
+
+    # 决策-70 (ADR-0045): OAuth2AuthorizationCodeBearer parity demo.
+    # /authcode: Bearer token (scheme 大小写不敏感) -> 200 + auth_token;
+    #   缺失/非 bearer -> 401 + WWW-Authenticate: Bearer.
+    # OpenAPI: type=oauth2 + flows.authorizationCode {authorizationUrl, tokenUrl, scopes}.
+    var ac_h = Handler(KIND_ECHO(), "authcode_demo")
+    ac_h.set_data("_auth", "authcode")
+    ac_h.set_data("_authcode_authorization_url", "/authorize")
+    ac_h.set_data("_authcode_token_url", "/token")
+    ac_h.set_data("_authcode_scopes", "items:read=Read items")
+    ac_h.set_data("message", "authcode demo")
+    router.add_route("/authcode", "GET", ac_h)
+
     # 决策-44 (Goal-0003 P2 #17): OAuth2 password flow + JWT (HS256) — 对标矩阵最后一项.
     # /token (POST form): OAuth2PasswordRequestForm 等价 (grant_type 可选/username/password
     #   必填); 凭据 admin:s3cret; 成功 -> 200 {access_token: HS256 JWT, token_type: bearer}.

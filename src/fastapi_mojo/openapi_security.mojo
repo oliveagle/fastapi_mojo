@@ -90,6 +90,10 @@ def _default_scheme_name(auth: String) -> String:
         return "HTTPDigest"
     if auth == "oauth2":
         return "OAuth2PasswordBearer"
+    if auth == "authcode":
+        return "OAuth2AuthorizationCodeBearer"
+    if auth == "openid":
+        return "OpenIdConnect"
     if _has_prefix(auth, "apikey:"):
         var parts = _apikey_in_name(auth)
         if parts[0] == "header":
@@ -110,15 +114,21 @@ def _auth_scheme_name(h: Handler) raises -> String:
     return _default_scheme_name(h.data["_auth"])
 
 
-def _auth_scheme_json(auth: String) -> String:
+def _auth_scheme_json(auth: String, h: Handler) raises -> String:
     """非 oauth2 的 securityScheme JSON 对象 (上游键序 type[, scheme|in,name]).
-    oauth2 / 未知 -> "" (oauth2 由 flows 形态单独生成)."""
+    oauth2 / authcode / 未知 -> "" (oauth2 族由 flows 形态单独生成).
+    openid 需要 handler 上的 `_openid_url` (上游 openIdConnectUrl=)."""
     if auth == "basic":
         return "{\"type\":\"http\",\"scheme\":\"basic\"}"
     if auth == "bearer":
         return "{\"type\":\"http\",\"scheme\":\"bearer\"}"
     if auth == "digest":
         return "{\"type\":\"http\",\"scheme\":\"digest\"}"
+    if auth == "openid":
+        var oid_url = ""
+        if "_openid_url" in h.data:
+            oid_url = h.data["_openid_url"]
+        return "{\"type\":\"openIdConnect\",\"openIdConnectUrl\":\"" + json_escape(oid_url) + "\"}"
     if _has_prefix(auth, "apikey:"):
         var parts = _apikey_in_name(auth)
         if parts[0] == "" or parts[1] == "":
@@ -128,19 +138,37 @@ def _auth_scheme_json(auth: String) -> String:
     return ""
 
 
-def _oauth2_scheme_scopes_json(router: Router) raises -> Tuple[String, String]:
-    """扫描路由表: token handler 声明的 `_oauth2_scopes` (`name=desc;...`) ->
-    (scopes 对象 JSON, tokenUrl). tokenUrl 默认 "token"; 无声明 -> 空对象."""
+def _oauth2_scheme_scopes_json(router: Router, code: Bool) raises -> Tuple[String, String, String]:
+    """扫描路由表: token handler 声明的 scopes (`name=desc;...`) ->
+    (scopes 对象 JSON, tokenUrl, authorizationUrl).
+
+    code=False -> password flow: 键 `_oauth2_scopes` / `_oauth2_token_url`
+    (默认 "token")。code=True -> authorizationCode flow: 键 `_authcode_scopes` /
+    `_authcode_token_url` / `_authcode_authorization_url`。两套键故意分离,
+    避免 password 与 authorizationCode 两个 scheme 互相污染 tokenUrl/scopes。"""
     var scopes_json = ""
     var token_url = "token"
+    var authz_url = ""
+    var scopes_key = "_oauth2_scopes"
+    var token_key = "_oauth2_token_url"
+    var authz_key = "_oauth2_authorization_url"
+    if code:
+        token_url = ""
+        scopes_key = "_authcode_scopes"
+        token_key = "_authcode_token_url"
+        authz_key = "_authcode_authorization_url"
     var total = router.route_count()
     for i in range(total):
-        if "_oauth2_token_url" in router.routes[i].handler.data:
-            var tu = router.routes[i].handler.data["_oauth2_token_url"]
+        if token_key in router.routes[i].handler.data:
+            var tu = router.routes[i].handler.data[token_key]
             if tu != "":
                 token_url = tu
-        if "_oauth2_scopes" in router.routes[i].handler.data:
-            var spec = router.routes[i].handler.data["_oauth2_scopes"]
+        if authz_key in router.routes[i].handler.data:
+            var au = router.routes[i].handler.data[authz_key]
+            if au != "":
+                authz_url = au
+        if scopes_key in router.routes[i].handler.data:
+            var spec = router.routes[i].handler.data[scopes_key]
             for pair in _split_semi(spec):
                 # 首个 '=' 切 name / desc
                 var eq = -1
@@ -155,7 +183,7 @@ def _oauth2_scheme_scopes_json(router: Router) raises -> Tuple[String, String]:
                 if scopes_json.byte_length() > 0:
                     scopes_json += ","
                 scopes_json += "\"" + json_escape(nm) + "\":\"" + json_escape(desc) + "\""
-    return (scopes_json, token_url)
+    return (scopes_json, token_url, authz_url)
 
 def _hidden(r: Route) raises -> Bool:
     """`_include_in_schema="0"` 路由不进 spec (决策-52, P24-13)."""
@@ -201,10 +229,13 @@ def security_schemes_json(router: Router) raises -> String:
         ss_names.append(nm)
         var auth_kind = h_i.data["_auth"] if "_auth" in h_i.data else ""
         if auth_kind == "oauth2":
-            var osj = _oauth2_scheme_scopes_json(router)
+            var osj = _oauth2_scheme_scopes_json(router, False)
             ss_jsons.append("\"" + json_escape(nm) + "\":{\"type\":\"oauth2\",\"flows\":{\"password\":{\"scopes\":{" + osj[0] + "},\"tokenUrl\":\"" + json_escape(osj[1]) + "\"}}}")
+        elif auth_kind == "authcode":
+            var osj2 = _oauth2_scheme_scopes_json(router, True)
+            ss_jsons.append("\"" + json_escape(nm) + "\":{\"type\":\"oauth2\",\"flows\":{\"authorizationCode\":{\"scopes\":{" + osj2[0] + "},\"authorizationUrl\":\"" + json_escape(osj2[2]) + "\",\"tokenUrl\":\"" + json_escape(osj2[1]) + "\"}}}")
         else:
-            var sj = _auth_scheme_json(auth_kind)
+            var sj = _auth_scheme_json(auth_kind, h_i)
             if sj == "":
                 continue
             ss_jsons.append("\"" + json_escape(nm) + "\":" + sj)
