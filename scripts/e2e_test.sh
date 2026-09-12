@@ -44,6 +44,8 @@
 #   - Depends use_cache: 每请求 memo 表 (默认 cached 菱形 1 次 / _depends_nocache =
 #     use_cache=False 重派发 / 嵌套 nocache 结果入库供 cached 引用复用, 上游 P9-1/2/3)
 #     (决策-47, DC-1..DC-7; _dep_calls 观测超集)
+#   - Depends(yield) teardown: 依赖 _dep_teardown 命令, 响应 flush 后逆解析序执行
+#     (background 之后 = 上游 ExitStack LIFO); 异常响应后仍执行 (DT-1..DT-4, 决策-75)
 #   - FileResponse/StreamingResponse: 200/206 (单段/multipart/merge/suffix/open/clamp) /
 #     400×4 精确消息 / 416 / 500 / If-Range / INM·IMS 忽略 / HEAD 仅头 / CD (attachment·inline
 #     RFC5987) / etag = md5(f64(mtime)-size) (fmtool f64repr × md5sum 交叉验证) / chunked
@@ -1202,6 +1204,34 @@ else fail "DC-6 /di regression" "body: ${DCD:0:240}"; fi
 APIR=$(curl -sS -m 5 "$BASE/api/items/42")
 if [[ "$APIR" == *'"api_env_env": "api"'* && "$APIR" != *'_calls"'* ]]; then pass "DC-7 APIRouter base deps (AR-3) regression: no _calls leak"
 else fail "DC-7 APIRouter base deps regression" "body: ${APIR:0:240}"; fi
+
+# --- Depends(yield) teardown (决策-75, ADR-0050) ---------------------------------
+# /di-teardown: _depends=dep_td_outer(->_depends=dep_td_inner) + _background.
+#   响应后序: BG (background) -> OUTER -> INNER (逆解析序 LIFO = 上游 ExitStack).
+# /di-teardown-raise: _exception_raise -> 异常响应后仍 OUTER -> INNER.
+# /di-teardown-twice: _depends=dep_td_outer;dep_td_outer -> cached -> teardown 1 次.
+echo "== Depends(yield) teardown (决策-75, ADR-0050) =="
+DEPTD_LOG=/tmp/fm_dep_td.log
+: > "$DEPTD_LOG"
+DTD=$(curl -sS -m 5 "$BASE/di-teardown")
+if [[ "$DTD" == *'"dep_td_outer_outer_val": "outer"'* && "$DTD" == *'"dep_td_outer_dep_td_inner_inner_val": "inner"'* ]]; then pass "DT-1 /di-teardown 200 + nested dep outputs"
+else fail "DT-1 /di-teardown outputs" "body: ${DTD:0:240}"; fi
+sleep 0.5
+DTD_ORDER=$(tr '\n' ',' < "$DEPTD_LOG")
+if [[ "$DTD_ORDER" == "BG,OUTER,INNER," ]]; then pass "DT-2 teardown order BG->OUTER->INNER (bg first, then reverse setup)"
+else fail "DT-2 teardown order" "log: [$DTD_ORDER]"; fi
+: > "$DEPTD_LOG"
+DTDR=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$BASE/di-teardown-raise")
+sleep 0.5
+DTDR_ORDER=$(tr '\n' ',' < "$DEPTD_LOG")
+if [[ "$DTDR" == "418" && "$DTDR_ORDER" == "OUTER,INNER," ]]; then pass "DT-3 exception 418 + teardown still runs (OUTER->INNER)"
+else fail "DT-3 teardown on exception" "code=$DTDR log: [$DTDR_ORDER]"; fi
+: > "$DEPTD_LOG"
+DTDT=$(curl -sS -m 5 "$BASE/di-teardown-twice")
+sleep 0.5
+DTDT_ORDER=$(tr '\n' ',' < "$DEPTD_LOG")
+if [[ "$DTDT" == *'"dep_td_outer_outer_val": "outer"'* && "$DTDT_ORDER" == "OUTER,INNER," ]]; then pass "DT-4 cached dep teardown exactly once (use_cache=True)"
+else fail "DT-4 cached teardown once" "log: [$DTDT_ORDER]"; fi
 
 # --- body validation / Field constraints / Enum (决策-38) ---------------------------
 # /validate (POST, _body_schema): name:str;price:float|gt=0;quantity:int=10;

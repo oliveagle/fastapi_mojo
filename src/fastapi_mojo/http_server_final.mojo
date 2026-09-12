@@ -101,6 +101,54 @@ def _ct_is_multipart(ct: String) -> Bool:
     前缀匹配 'multipart/form-data' (尾部 '; boundary=...' 忽略)."""
     return lower_ascii(ct).startswith("multipart/form-data")
 
+def _exec_one_cmd(cmd_raw: String, timeout_ms: Int, do_log: Bool, tag: String,
+                  req_id: String, method: String, path: String) raises:
+    """决策-29 / 75: trim + 同步执行单条 shell 命令 (run_command_json FFI) + 日志.
+    共享给 _run_background (tag="[bg]") 与 _run_dep_teardowns (tag="[dep-teardown]")."""
+    var b = 0
+    var e = cmd_raw.byte_length()
+    while b < e and (ord(cmd_raw[byte=b]) == 32 or ord(cmd_raw[byte=b]) == 9):
+        b += 1
+    while e > b and (ord(cmd_raw[byte=e - 1]) == 32 or ord(cmd_raw[byte=e - 1]) == 9):
+        e -= 1
+    if e <= b:
+        return
+    var final_cmd = String(cmd_raw[byte=b:e])
+    var slice = external_call["run_command_json", CStringSlice[origin_of(String(""))]](
+        final_cmd.as_c_string_slice(), Int64(timeout_ms))
+    var out = span_to_str(slice.as_bytes())
+    _ = external_call["run_command_free", NoneType](slice)
+    if do_log:
+        print(tag + " req=" + req_id + " " + method + " " + path + " cmd=" + final_cmd
+              + " out=" + out[byte=0:min(out.byte_length(), 200)])
+
+
+def _run_dep_teardowns(teardowns: List[String], req_id: String, method: String,
+                       path: String) raises:
+    """决策-75 (ADR-0050): Depends(yield) 等价 —— 响应已 flush 后执行依赖 teardown.
+
+    teardowns 元素 = 某依赖的 `_dep_teardown` (换行分隔多命令), 按依赖**解析完成序**
+    追加 (子依赖先于父). 本函数**逆序**遍历 = LIFO (上游 `request_async_exit_stack`
+    关闭序: 后进入的依赖先 teardown). 每条命令 2000ms timeout + "[dep-teardown]"
+    日志 (与 `_background` 同机制, run_command_json FFI)。
+    """
+    var k = len(teardowns)
+    while k > 0:
+        k -= 1
+        var raw = teardowns[k]
+        var n = raw.byte_length()
+        var start = 0
+        var i = 0
+        while i <= n:
+            var is_sep = (i == n) or (ord(raw[byte=i]) == 10)  # '\n'
+            if is_sep:
+                if i > start:
+                    _exec_one_cmd(String(raw[byte=start:i]), 2000, True,
+                                  "[dep-teardown]", req_id, method, path)
+                start = i + 1
+            i += 1
+
+
 def _run_background(handler: Handler, req_id: String, method: String,
                        path: String, query: String) raises:
     """F11 (v0.5.1): BackgroundTasks - 响应已发送后同步执行声明的命令.
@@ -137,23 +185,8 @@ def _run_background(handler: Handler, req_id: String, method: String,
         var is_sep = (i == n) or (ord(cmds_raw[byte=i]) == 10)  # '\n'
         if is_sep:
             if i > start:
-                var cmd = String(cmds_raw[byte=start:i])
-                # trim leading/trailing whitespace
-                var b = 0
-                var e = cmd.byte_length()
-                while b < e and (ord(cmd[byte=b]) == 32 or ord(cmd[byte=b]) == 9):
-                    b += 1
-                while e > b and (ord(cmd[byte=e - 1]) == 32 or ord(cmd[byte=e - 1]) == 9):
-                    e -= 1
-                if e > b:
-                    var final_cmd = String(cmd[byte=b:e])
-                    var slice = external_call["run_command_json", CStringSlice[origin_of(String(""))]](
-                        final_cmd.as_c_string_slice(), Int64(timeout_ms))
-                    var out = span_to_str(slice.as_bytes())
-                    _ = external_call["run_command_free", NoneType](slice)
-                    if do_log:
-                        print("[bg] req=" + req_id + " " + method + " " + path + " cmd=" + final_cmd
-                              + " out=" + out[byte=0:min(out.byte_length(), 200)])
+                _exec_one_cmd(String(cmds_raw[byte=start:i]), timeout_ms, do_log,
+                              "[bg]", req_id, method, path)
             start = i + 1
         i += 1
 
@@ -270,7 +303,8 @@ def dispatch_dep(router: Router,
                  body: ParsedParams,
                  visited: List[String],
                  nocache: Bool,
-                 mut cache: DepCache) raises -> Bool:
+                 mut cache: DepCache,
+                 mut teardowns: List[String]) raises -> Bool:
     """F-DI + 决策-47 (ADR-0022): 递归解析并派发一个依赖 (KIND_DEPENDENCY),
     输出注入 target (前缀 depname_key).
 
@@ -299,7 +333,7 @@ def dispatch_dep(router: Router,
                 # 子依赖输出并入 runtime (dep 自身的 runtime), 使其 run_handler 可见.
                 # 默认 cached 引用 (upstream use_cache=True).
                 dispatch_dep(router, nested, runtime, info, query, body,
-                             child_visited, False, cache)
+                             child_visited, False, cache, teardowns)
             i += 1
     if "_depends_nocache" in runtime:
         var names_nc = _split_depends(runtime["_depends_nocache"])
@@ -309,7 +343,7 @@ def dispatch_dep(router: Router,
             if nested_nc.name != "":
                 # nocache 引用 (upstream use_cache=False).
                 dispatch_dep(router, nested_nc, runtime, info, query, body,
-                             child_visited, True, cache)
+                             child_visited, True, cache, teardowns)
             j += 1
 
     # memo 查找 (仅 cached 引用; P9-3: nocache 派发的结果同样入库).
@@ -317,6 +351,12 @@ def dispatch_dep(router: Router,
     if mi >= 0 and not nocache:
         cache.inject(dep.name, mi, target)
         return True
+
+    # 决策-75 (ADR-0050): Depends(yield) 等价 —— 该依赖**实际派发**时登记其
+    # teardown (memo 命中不登记 -> use_cache=True 每请求一次; 子依赖已先登记 =
+    # 解析完成序), 响应后逆序执行 (LIFO = 上游 request AsyncExitStack 关闭序).
+    if "_dep_teardown" in dep.data and dep.data["_dep_teardown"] != "":
+        teardowns.append(dep.data["_dep_teardown"])
 
     # 派发依赖 (KIND_DEPENDENCY 返回非 '_' 前缀字段, 含已并入的子依赖输出).
     var dep_h = Handler(dep.kind, dep.name)
@@ -341,7 +381,8 @@ def resolve_depends(router: Router,
                     query: ParsedParams,
                     body: ParsedParams,
                     visited: List[String],
-                    mut cache: DepCache) raises -> Bool:
+                    mut cache: DepCache,
+                    mut teardowns: List[String]) raises -> Bool:
     """F-DI (Depends, 决策-33/47): 解析主 handler 声明的 _depends (默认 cached)
     与 _depends_nocache (upstream use_cache=False), 派发每个直接依赖并注入
     输出到 target (前缀 depname_outputkey). 不派发 dep 自身 (由 dispatch 派发).
@@ -359,7 +400,7 @@ def resolve_depends(router: Router,
             var nested = router.find_handler_by_name(names[i])
             if nested.name != "":
                 if dispatch_dep(router, nested, target, info, query, body,
-                                base_visited, False, cache):
+                                base_visited, False, cache, teardowns):
                     any = True
             i += 1
     if "_depends_nocache" in dep.data:
@@ -369,7 +410,7 @@ def resolve_depends(router: Router,
             var nested_nc = router.find_handler_by_name(names_nc[j])
             if nested_nc.name != "":
                 if dispatch_dep(router, nested_nc, target, info, query, body,
-                                base_visited, True, cache):
+                                base_visited, True, cache, teardowns):
                     any = True
             j += 1
     return any
@@ -573,6 +614,38 @@ def register_routes(mut router: Router) raises:
     dim_h.set_data("_depends", "dc_auth2;dc_tick")
     dim_h.set_data("_dep_calls", "true")
     router.add_route("/di-mix", "GET", dim_h)
+
+    # 决策-75 (ADR-0050): Depends(yield) 等价 demo (上游 generator 依赖 cleanup).
+    #   dep_td_inner (base): _dep_teardown = "echo INNER >> /tmp/fm_dep_td.log"
+    #   dep_td_outer (_depends=dep_td_inner): _dep_teardown = "echo OUTER >> ..."
+    #     /di-teardown (KIND_ECHO): _depends=dep_td_outer + _background="echo BG >> ..."
+    #       响应后序 = BG (background) -> OUTER -> INNER (逆解析序 LIFO, 上游一致:
+    #       background 先于 request AsyncExitStack 关闭).
+    #     /di-teardown-raise: 同依赖 + _exception_raise -> 异常响应后仍 OUTER -> INNER.
+    router.add_dependency(Handler(KIND_DEPENDENCY(), "dep_td_inner"))
+    router.dependencies[len(router.dependencies) - 1].set_data("inner_val", "inner")
+    router.dependencies[len(router.dependencies) - 1].set_data("_dep_teardown",
+        "echo INNER >> /tmp/fm_dep_td.log")
+    router.add_dependency(Handler(KIND_DEPENDENCY(), "dep_td_outer"))
+    router.dependencies[len(router.dependencies) - 1].set_data("outer_val", "outer")
+    router.dependencies[len(router.dependencies) - 1].set_data("_depends", "dep_td_inner")
+    router.dependencies[len(router.dependencies) - 1].set_data("_dep_teardown",
+        "echo OUTER >> /tmp/fm_dep_td.log")
+    var dtd_h = Handler(KIND_ECHO(), "di_teardown")
+    dtd_h.set_data("message", "DI teardown demo (Depends yield)")
+    dtd_h.set_data("_depends", "dep_td_outer")
+    dtd_h.set_data("_background", "echo BG >> /tmp/fm_dep_td.log")
+    router.add_route("/di-teardown", "GET", dtd_h)
+    var dtdr_h = Handler(KIND_ECHO(), "di_teardown_raise")
+    dtdr_h.set_data("message", "DI teardown on exception")
+    dtdr_h.set_data("_depends", "dep_td_outer")
+    dtdr_h.set_data("_exception_raise", "TdBoom: x")
+    dtdr_h.set_data("_exc_handlers", "TdBoom:418:boom")
+    router.add_route("/di-teardown-raise", "GET", dtdr_h)
+    var dtd2_h = Handler(KIND_ECHO(), "di_teardown_twice")
+    dtd2_h.set_data("message", "DI teardown cached once (diamond)")
+    dtd2_h.set_data("_depends", "dep_td_outer;dep_td_outer")
+    router.add_route("/di-teardown-twice", "GET", dtd2_h)
 
     # APIRouter (决策-37, FastAPI APIRouter/include_router):
     #   items_api = APIRouter(prefix="/api/items", tags=["items"], dependencies=[api_env])
@@ -1452,6 +1525,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                 var is_405 = False
                 var allow_methods = List[String]()
                 var auth_www = ""  # 决策-34: 401 响应的 WWW-Authenticate 头 (auth 失败时非空)
+                # 决策-75 (ADR-0050): 本请求依赖 teardown 收集器 (Depends(yield) 等价).
+                # 每连接迭代重置; resolve_depends 实际派发的依赖按解析完成序追加;
+                # 响应 flush 后 _run_dep_teardowns 逆序执行 (上游 ExitStack LIFO).
+                var dep_teardowns = List[String]()
 
                 if not route_result.matched:
                     # Path exists but method not registered -> 405 + Allow (RFC 7231).
@@ -1706,7 +1783,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                     var dcache = DepCache()
                                     var _ = resolve_depends(router, route_result.handler, req_params,
                                                     info, query_params, body_params,
-                                                    List[String](), dcache)
+                                                    List[String](), dcache, dep_teardowns)
                                     # _dep_calls=true -> 注入各 dep 每请求实际派发次数
                                     # (observability 超集, 上游无此面; ADR-0022 §3.5-2).
                                     inject_dep_calls(route_result.handler.data, req_params, dcache)
@@ -1760,6 +1837,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                     var exc_dur = mw_timing(mw_chain, start_ms)
                                     _finish_request(mw_chain, req_id, method, path, query,
                                                gres.status_line + " (exc)", exc_dur)
+                                    _run_dep_teardowns(dep_teardowns, req_id, method, path)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
                                     else:
@@ -1805,6 +1883,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                         var st_dur = mw_timing(mw_chain, start_ms)
                                         _finish_request(mw_chain, req_id, method, path, query,
                                                    st_status + " (stream)", st_dur)
+                                        _run_dep_teardowns(dep_teardowns, req_id, method, path)
                                         if external_call["get_close_after_response", Int]() != 0:
                                             external_call["conn_done", NoneType](cfd, False)
                                         else:
@@ -1844,6 +1923,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                         sse_body.as_c_string_slice(), sse_extra.as_c_string_slice())
                                     var sse_dur = mw_timing(mw_chain, start_ms)
                                     _finish_request(mw_chain, req_id, method, path, query, sse_status + " (sse)", sse_dur)
+                                    _run_dep_teardowns(dep_teardowns, req_id, method, path)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
                                     else:
@@ -1885,6 +1965,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                     var fdur = mw_timing(mw_chain, start_ms)
                                     _finish_request(mw_chain, req_id, method, path, query,
                                                fstatus + " (file)", fdur)
+                                    _run_dep_teardowns(dep_teardowns, req_id, method, path)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
                                     else:
@@ -1909,6 +1990,7 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                     var rdur = mw_timing(mw_chain, start_ms)
                                     _finish_request(mw_chain, req_id, method, path, query,
                                                rstatus + " (redirect)", rdur)
+                                    _run_dep_teardowns(dep_teardowns, req_id, method, path)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
                                     else:
@@ -2013,6 +2095,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                 # F11: BackgroundTasks 在响应已 flush 后同步执行声明的命令
                 # (对齐 Starlette BackgroundTask 语义, 客户端已收到响应).
                 _run_background(route_result.handler, req_id, method, path, query)
+
+                # 决策-75 (ADR-0050): Depends(yield) teardown — 上游在
+                # background tasks 之后关闭 request AsyncExitStack, 故此处逆序执行.
+                _run_dep_teardowns(dep_teardowns, req_id, method, path)
 
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)

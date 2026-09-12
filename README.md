@@ -19,6 +19,7 @@
 - ✅ SSE `ServerSentEvent` 字段（`_sse_event`/`_sse_id`/`_sse_retry`/`_sse_comment`：字段序 comment→event→data→id→retry + `\n\n`；`_split_sse_lines` 保留尾空串；data = raw_data 不 JSON 编码，ADR-0047）
 - ✅ CORS `CORSMiddleware` 全量等价（`FASTAPI_MOJO_CORS_*` env 声明式：`_ORIGIN_REGEX`/`_EXPOSE_HEADERS`/`_PRIVATE_NETWORK` + 真预检 **200 `OK`** / **400 `Disallowed CORS …`** text/plain + `Vary: Origin`；`*` methods→ALL_METHODS / `*` headers→镜像，ADR-0048）
 - ✅ 异常响应自定义头（对齐 `HTTPException(..., headers=...)`：路由级 `_exc_headers` / 全局 `FASTAPI_MOJO_EXCEPTION_HEADERS` `;` 分隔 `TAG=Name: V|Name2: V2`，命中 tag → `Exception` catch-all；JSON 面复用 extra 入口 / text 面新增 `send_text_response_status_extra`，ADR-0049）
+- ✅ `Depends(yield)` teardown（依赖声明 `_dep_teardown`；响应 flush 后**逆解析序**执行 = 上游 `AsyncExitStack` LIFO，在 background tasks 之后，异常响应后仍执行；FFI diff=0，ADR-0050）
 - ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
@@ -210,7 +211,7 @@ journalctl -u fastapi_mojo -f
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，591 项检查含 异常响应自定义头、Rust JSON serializer、OAuth2 scopes、RedirectResponse/redirect_slashes、SSE ServerSentEvent 字段、CORS 全量等价、HTTPDigest/securitySchemes、OpenIdConnect/AuthorizationCode、TLS/HTTPS、
+# 集成测试（单一 binary 端到端，595 项检查含 Depends(yield) teardown、异常响应自定义头、Rust JSON serializer、OAuth2 scopes、RedirectResponse/redirect_slashes、SSE ServerSentEvent 字段、CORS 全量等价、HTTPDigest/securitySchemes、OpenIdConnect/AuthorizationCode、TLS/HTTPS、
 # HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；工具链 fmtool = Rust, 零 Python）
 ./scripts/e2e_test.sh
 ```
