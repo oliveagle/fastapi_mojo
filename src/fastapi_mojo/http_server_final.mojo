@@ -9,7 +9,7 @@ from std.ffi import external_call, c_char, CStringSlice
 from json import json_serialize_dict
 from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET, KIND_OAUTH2_TOKEN
-from params_query import parse_path_params, parse_query_params, url_decode, ParsedParams
+from params_query import parse_path_params, parse_query_params, url_decode, url_decode_path, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params_collect, get_param_types
 from params_query_extra import apply_query_extras, get_param_aliases
@@ -1365,7 +1365,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
         # CStringSlice (pointer + length) and UTF-8 decoded here in
         # amortized O(n) (the C side already validated the UTF-8).
         var method = span_to_str(external_call["get_method_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
-        var path = span_to_str(external_call["get_path_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+        var raw_path = span_to_str(external_call["get_path_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+        # 决策-80 (ADR-0055): uvicorn 在路由前对 path 做百分号解码 (param 解码 +
+        # %2F 分段); 保留 raw_path 仅用于 redirect Location 的 wire 形态拼装.
+        var path = url_decode_path(raw_path)
         var query = span_to_str(external_call["get_query_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
         var body_str = span_to_str(external_call["get_body_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
 
@@ -1635,7 +1638,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                             var rhost = _get_header("Host")
                             if rhost == "":
                                 rhost = "127.0.0.1:" + String(external_call["get_configured_port", Int]())
-                            var rloc = build_redirect_location(rscheme, rhost, alt, query)
+                            # Location 用原始 (wire) path (上游 URL(scope) 重编码等价)
+                            var rloc = build_redirect_location(rscheme, rhost, alt_slash_path(raw_path), query)
                             _ = external_call["send_redirect_response", Int](
                                 cfd, "307 Temporary Redirect".as_c_string_slice(),
                                 rloc.as_c_string_slice())

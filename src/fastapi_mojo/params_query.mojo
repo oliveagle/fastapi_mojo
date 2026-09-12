@@ -147,6 +147,33 @@ def url_decode(s: String) -> String:
     return decode_utf8_bytes(bs)
 
 
+def url_decode_path(s: String) -> String:
+    """Percent-decode a URL *path* (RFC 3986 §3.3): '+' is NOT a space.
+
+    决策-80 (ADR-0055): uvicorn percent-decodes the request path before
+    Starlette routes it, so path params arrive decoded and an encoded slash
+    (`%2F`) splits segments. Mirror that here: every `%XX` becomes one byte,
+    other bytes are copied verbatim (the bridge already validated UTF-8), and
+    the byte run is UTF-8 decoded with U+FFFD replacement (invalid sequences /
+    lone `%` keep sane semantics — `%` not followed by two hex digits stays a
+    literal `%`, matching `url_decode`)."""
+    var bs = List[Int]()
+    var n = s.byte_length()
+    var i = 0
+    while i < n:
+        var c = s[byte=i]
+        if c == '%' and i + 2 < n:
+            var hi = _hexval(s, i + 1)
+            var lo = _hexval(s, i + 2)
+            if hi >= 0 and lo >= 0:
+                bs.append(hi * 16 + lo)
+                i += 3
+                continue
+        bs.append(ord(c))  # literal byte (ASCII or a raw UTF-8 continuation)
+        i += 1
+    return decode_utf8_bytes(bs)
+
+
 def parse_query_params(query: String) raises -> ParsedParams:
     """Parse query string into key-value Dict (URL-decoded)."""
     if query == "":
@@ -244,5 +271,17 @@ def main() raises:
     var r8 = parse_query_params("flag&flag2=v")
     check(r8.multi_values["flag"] == [""], "bare flag -> empty value")
     check(r8.multi_values["flag2"] == ["v"], "flag2")
+
+    # 决策-80 (ADR-0055): path percent-decode — '+' 非空格 / %XX 单字节 / 畸形保留
+    # / 非法 UTF-8 -> U+FFFD (对齐 uvicorn unquote(errors="replace")).
+    check(url_decode_path("/items/a%20b") == "/items/a b", "path decode space")
+    check(url_decode_path("/items/%7Bx%7D") == "/items/{x}", "path decode brace")
+    check(url_decode_path("/items/a+b") == "/items/a+b", "path '+' not space")
+    check(url_decode_path("/items/%E4%B8%AD") == "/items/中", "path decode utf8")
+    check(url_decode_path("/items/%2F") == "/items//", "path decode slash")
+    check(url_decode_path("/items/%252F") == "/items/%2F", "path single decode")
+    check(url_decode_path("/items/%") == "/items/%", "path lone % literal")
+    check(url_decode_path("/items/%zz") == "/items/%zz", "path malformed % kept")
+    check(url_decode_path("/items/%FF") == "/items/" + chr(0xFFFD), "path invalid utf8 -> U+FFFD")
 
     print("Mojo params (query/path) test completed!")

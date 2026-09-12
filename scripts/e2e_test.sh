@@ -406,6 +406,19 @@ else fail "SC-36 openapi decimal anyOf" "missing decimal schema"; fi
 if [[ "$SC_OA" == *'"scalar_body":{"type":"object","properties":{"id":{"type":"string","format":"uuid"},"when":{"type":"string","format":"date-time"},"amount":{"anyOf"'* ]]; then pass "SC-37 openapi body scalar component"
 else fail "SC-37 openapi body scalar component" "missing component"; fi
 
+echo "== path percent-decode (决策-80, ADR-0055) =="
+# uvicorn 在路由前对 path 做百分号解码 —— 值解码 + %2F 分段 + '+' 非空格 + U+FFFD.
+expect_code "PD-1 path %20 decoded -> 200" 200 "$BASE/items/a%20b"
+expect_body_contains "PD-1 path %20 -> 'a b'" '"item_id": "a b"' "$BASE/items/a%20b"
+expect_body_contains "PD-2 path %7Bx%7D -> '{x}'" '"item_id": "{x}"' "$BASE/items/%7Bx%7D"
+expect_body_contains "PD-3 path UTF-8 %E4%B8%AD -> 中" '"item_id": "中"' "$BASE/items/%E4%B8%AD"
+expect_body_contains "PD-4 path '+' stays literal" '"item_id": "a+b"' "$BASE/items/a+b"
+expect_code "PD-5 encoded slash splits segments -> 404" 404 "$BASE/items/a%2Fb"
+expect_body_contains "PD-6 invalid UTF-8 %FF -> U+FFFD" '"item_id": "�"' "$BASE/items/%FF"
+expect_body_contains "PD-7 lone % stays literal" '"item_id": "%"' "$BASE/items/%"
+expect_body_contains "PD-8 %25 single decode -> %" '"item_id": "%"' "$BASE/items/%25"
+expect_code "PD-9 encoded ../ traversal -> 404 (no route)" 404 "$BASE/items/%2e%2e%2fsecret"
+
 echo "== unified error body + error_map (Goal-0002 F2) =="
 # 声明式异常映射: _error_map = "item_id=99:404:Item not found;item_id=*:422:Invalid ID"
 expect_code "error_map item_id=99 -> 404" "404" "$BASE/errors/99"
@@ -707,10 +720,16 @@ expect_code "symlink escape -> 403" 403 "$BASE/evil_e2e.html"
 unlink "$SRC/static/evil_e2e.html"
 
 printf 'SECRET\n' > "$SRC/secret_e2e.html"
+# 决策-80 (ADR-0055): 百分号编码的 traversal 在解码后同样被拦截 (403)
+PD10=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' --max-time 10 "$BASE/%2e%2e%2fsecret_e2e.html")
+if [[ "$PD10" == "403" ]]; then pass "PD-10 static encoded ../ -> 403 (decoded)"
+else fail "PD-10 static encoded ../ -> 403 (decoded)" "got $PD10"; fi
 TRAVERSAL_CODE=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' --max-time 10 "$BASE/../secret_e2e.html")
 if [[ "$TRAVERSAL_CODE" == "403" ]]; then pass "../ traversal -> 403"
 else fail "../ traversal -> 403" "got $TRAVERSAL_CODE"; fi
 unlink "$SRC/secret_e2e.html"
+# 编码的扩展名分隔点 %2E 解码为 '.', 静态识别 (is_static_path) 仍命中 -> index.html
+expect_code "PD-11 encoded %2E ext decodes -> static 200" 200 "$BASE/index%2Ehtml"
 
 # --- WebSocket (RFC 6455, ADR-0006) -------------------------------------------
 
