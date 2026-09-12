@@ -13,6 +13,7 @@
 
 from json import json_escape
 from scalar_types import is_scalar_type, scalar_canonical
+from float_repr import atof_f64, fmt_f64_repr, is_dec_f64_syntax
 
 
 # ---------- 字段 spec ----------
@@ -80,11 +81,15 @@ def _trim(s: String) -> String:
 
 
 def _parse_f64(s: String) raises -> Tuple[Bool, Float64]:
-    """解析 float 字面量; 失败 -> (False, 0.0)."""
-    try:
-        return (True, Float64(s))
-    except:
+    """解析 float 字面量; 失败 -> (False, 0.0).
+
+    决策-87: 走 float_repr.atof_f64 (libc atof, 正确舍入) — Mojo `Float64(String)`
+    对 >~20 位有效数字的字面量失败 (纯 int64 累加溢出), 会把 float64 范围内的
+    长十进制 (如 12345678901234567890.0) 误判为非法。语法合法性由
+    `is_dec_f64_syntax` 判定 (atof 对垃圾串返回 0.0, 不能当合法性依据)。"""
+    if not is_dec_f64_syntax(s):
         return (False, 0.0)
+    return (True, atof_f64(s))
 
 
 def _parse_int(s: String) raises -> Tuple[Bool, Int]:
@@ -149,11 +154,12 @@ def _is_num_lit(s: String) raises -> Bool:
 
 
 def fmt_num(v: Float64) -> String:
-    """约束消息数字格式: 0.0 -> "0", 9.99 -> "9.99" (对齐 FastAPI 消息)."""
+    """约束消息数字格式: 0.0 -> "0", 9.99 -> "9.99" (对齐 FastAPI 消息).
+    决策-87: 非整值走 fmt_f64_repr (CPython repr 等价)."""
     var i = Int(v)
     if Float64(i) == v:
         return String(i)
-    return String(v)
+    return fmt_f64_repr(v)
 
 
 def err_obj(loc_json: String, msg: String, type_name: String, input_json: String) -> String:

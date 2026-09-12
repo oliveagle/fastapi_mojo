@@ -1050,6 +1050,77 @@ if [[ "$EB_OA" == *'"Body_validate_embed_post":{"properties":{"item":{"$ref":"#/
 else fail "EB-18 openapi embed wrapper schema" "missing wrapper schema"; fi
 
 
+
+# 决策-87 (ADR-0062): float 正确舍入解析 + CPython repr 等价格式化.
+# 上游 pydantic 用 CPython float() 解析 (正确舍入) + repr() 规范化; 我们改用 libc
+# atof/strfromd (正确舍入) + 最小往返 repr 算法。回归点: Mojo Float64(String) 对
+# >~20 位有效数字误判非法 (float_parsing 422); String(Float64) 偶发非最短不往返。
+echo "== float fidelity: correct rounding + repr (LF) =="
+
+LF1=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":12345678901234567890.0,"b":1}')
+if [[ "$LF1" == *'"body_f": "1.2345678901234567e+19"'* ]]; then
+    pass "LF-1 long-digit float parses (was float_parsing) -> repr 1.2345678901234567e+19"
+else fail "LF-1 long-digit float" "got ${LF1:0:220}"; fi
+
+LF2=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":123456789012345678901234567890.0,"b":1}')
+if [[ "$LF2" == *'"body_f": "1.2345678901234568e+29"'* ]]; then
+    pass "LF-2 30-digit float parses -> repr 1.2345678901234568e+29"
+else fail "LF-2 30-digit float" "got ${LF2:0:220}"; fi
+
+LF3=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":7.531168259201221e+16,"b":1}')
+if [[ "$LF3" == *'"body_f": "7.531168259201221e+16"'* ]]; then
+    pass "LF-3 shortest round-trip regression (String(Float64) bug fix)"
+else fail "LF-3 shortest round-trip" "got ${LF3:0:220}"; fi
+
+LF4=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":1e16,"b":1}')
+if [[ "$LF4" == *'"body_f": "1e+16"'* ]]; then
+    pass "LF-4 notation threshold: 1e16 -> scientific \"1e+16\""
+else fail "LF-4 1e16 -> 1e+16" "got ${LF4:0:220}"; fi
+
+LF5=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":1e15,"b":1}')
+if [[ "$LF5" == *'"body_f": "1000000000000000.0"'* ]]; then
+    pass "LF-5 1e15 -> fixed \"1000000000000000.0\""
+else fail "LF-5 1e15 fixed" "got ${LF5:0:220}"; fi
+
+LF6=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":1e-4,"b":1}')
+if [[ "$LF6" == *'"body_f": "0.0001"'* ]]; then
+    pass "LF-6 1e-4 -> fixed \"0.0001\""
+else fail "LF-6 1e-4 fixed" "got ${LF6:0:220}"; fi
+
+LF7=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":1e-5,"b":1}')
+if [[ "$LF7" == *'"body_f": "1e-05"'* ]]; then
+    pass "LF-7 1e-5 -> scientific \"1e-05\" (two-digit exponent)"
+else fail "LF-7 1e-5 scientific" "got ${LF7:0:220}"; fi
+
+LF8=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":-12345678901234567890.0,"b":1}')
+if [[ "$LF8" == *'"body_f": "-1.2345678901234567e+19"'* ]]; then
+    pass "LF-8 negative long-digit float -> signed repr"
+else fail "LF-8 negative long-digit" "got ${LF8:0:220}"; fi
+
+# float[] 元素长字面量 (数组路径同源)
+LF9=$(http_body "$BASE/validate/cross-arr" POST '{"is":[1],"fs":[12345678901234567890.0],"bs":[1]}')
+if [[ "$LF9" == *'"body_fs": "[1.2345678901234567e+19]"'* ]]; then
+    pass "LF-9 float[] long-digit element -> canonical repr"
+else fail "LF-9 float[] long-digit" "got ${LF9:0:240}"; fi
+
+# 语法门: 非数字字符串元素仍须 422 float_parsing (atof 对垃圾串返回 0.0 -> 不能当合法性依据)
+LF10=$(http_body "$BASE/validate/cross-arr" POST '{"is":[1],"fs":["abc"],"bs":[1]}')
+if [[ "$LF10" == *'"type":"float_parsing"'* ]]; then
+    pass "LF-10 float[] garbage string -> 422 float_parsing (syntax gate)"
+else fail "LF-10 float[] garbage string" "got ${LF10:0:240}"; fi
+
+LF11=$(http_body "$BASE/validate/cross" POST '{"i":1,"f":"1.2.3","b":1}')
+if [[ "$LF11" == *'"type":"float_parsing"'* ]]; then
+    pass "LF-11 string float \"1.2.3\" -> 422 float_parsing (no trailing garbage)"
+else fail "LF-11 trailing garbage" "got ${LF11:0:240}"; fi
+
+# 约束消息数字格式走 repr (非整值 0.5)
+LF12=$(http_body "$BASE/bs/detail" POST '{"s":"ab","n":12,"f":0.7,"xs":[2],"mode":"fast"}')
+if [[ "$LF12" == *'multiple of 0.5'* ]]; then
+    pass "LF-12 constraint msg non-integral number fmt -> \"multiple of 0.5\""
+else fail "LF-12 constraint msg fmt" "got ${LF12:0:240}"; fi
+
+
 # --- HEAD / OPTIONS ----------------------------------------------------------
 
 echo "== HEAD / OPTIONS =="

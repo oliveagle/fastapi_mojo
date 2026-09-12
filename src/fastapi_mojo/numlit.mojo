@@ -10,6 +10,7 @@
 # {params_typed, param_constraints, openapi_schemas} -> numlit (单向, 无环).
 
 from scalar_types import is_scalar_type, scalar_canonical, parse_scalar
+from float_repr import atof_f64, fmt_f64_repr, is_dec_f64_syntax
 
 
 def is_int_literal(s: String) -> Bool:
@@ -246,28 +247,28 @@ def parse_float_lax(s: String) -> Tuple[Bool, String]:
     for t in range(i, n):
         if ord(s[byte=t]) != 95:
             cleaned += chr(ord(s[byte=t]))
-    try:
-        # 决策-83 修复: sign 必须拼回 (原实现 range(i, n) 跳过符号位 -> 负号丢失).
-        var v = Float64(sign + cleaned)
-        return (True, String(v))
-    except:
-        return (False, "")
+    # 决策-83 修复: sign 必须拼回 (原实现 range(i, n) 跳过符号位 -> 负号丢失).
+    # 决策-87: libc atof 正确舍入 + CPython repr 等价格式化 (float_repr.mojo).
+    var v = atof_f64(sign + cleaned)
+    return (True, fmt_f64_repr(v))
 
 
 def parse_f64(s: String) raises -> Tuple[Bool, Float64]:
-    """解析 float 字面量; 失败 -> (False, 0.0) (body_schema._parse_f64 同款)."""
-    try:
-        return (True, Float64(s))
-    except:
+    """解析 float 字面量; 失败 -> (False, 0.0) (body_schema._parse_f64 同款).
+    决策-87: libc atof 正确舍入 (长有效数字不再失败); 语法合法性由
+    `is_dec_f64_syntax` 判定 (非法 -> (False, 0.0))。"""
+    if not is_dec_f64_syntax(s):
         return (False, 0.0)
+    return (True, atof_f64(s))
 
 
 def fmt_num(v: Float64) -> String:
-    """约束消息数字格式: 0.0 -> "0", 9.99 -> "9.99" (对齐 FastAPI 消息)."""
+    """约束消息数字格式: 0.0 -> "0", 9.99 -> "9.99" (对齐 FastAPI 消息).
+    决策-87: 非整值走 fmt_f64_repr (CPython repr 等价), 不再用 String(v)."""
     var i = Int(v)
     if Float64(i) == v:
         return String(i)
-    return String(v)
+    return fmt_f64_repr(v)
 
 
 # ---------- 类型元数据解析 (parse "int=10" -> (base_type, default)) ----------

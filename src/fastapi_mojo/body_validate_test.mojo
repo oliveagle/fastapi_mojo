@@ -3,9 +3,10 @@
 # Decision-38/57/58/61 executable body-validation tests (same-dir split keeps
 # both production and test modules below the 500-line God-file threshold).
 
-from body_schema import parse_body_schema, get_field, field_count
+from body_schema import parse_body_schema, get_field, field_count, _is_num_lit
 from body_validate import validate_body_schema, _check_body_spec
 from body_coerce import _coerce_body_scalar
+from float_repr import atof_f64, fmt_f64_repr, is_dec_f64_syntax
 from handler import Handler
 from params_json import parse_body_json
 from params_query import ParsedParams
@@ -347,4 +348,38 @@ def main() raises:
     var mbd13 = validate_body_schema(mbd, "POST", ParsedParams(), "")
     check(not mbd13[0] and _has(mbd13[1][0], '"type":"missing"')
           and _has(mbd13[1][0], '["body","item"]'), "embed no body -> missing [body,item]")
+    # 决策-87 (ADR-0062): 正确舍入 float 解析/格式化 (libc atof + CPython repr 等价).
+    check(fmt_f64_repr(1.0) == "1.0", "repr 1.0")
+    check(fmt_f64_repr(1e16) == "1e+16", "repr 1e16 -> scientific")
+    check(fmt_f64_repr(1e15) == "1000000000000000.0", "repr 1e15 -> fixed + .0")
+    check(fmt_f64_repr(1e-4) == "0.0001", "repr 1e-4 fixed")
+    check(fmt_f64_repr(1e-5) == "1e-05", "repr 1e-5 scientific")
+    check(fmt_f64_repr(-0.0) == "-0.0", "repr -0.0")
+    check(atof_f64("12345678901234567890.0") == atof_f64("1.2345678901234567e+19"),
+          "atof long-digit decimal (correctly rounded)")
+    # Mojo String(Float64) 非往返 BUG: repr 必须是最短往返串
+    check(fmt_f64_repr(7.531168259201221e+16) == "7.531168259201221e+16",
+          "repr round-trips (String(Float64) bug fix)")
+    var lf = Handler(0, "longfloat")
+    lf.set_data("_body_schema", "f:float")
+    var lf1 = validate_body_schema(lf, "POST",
+                                   parse_body_json('{"f":12345678901234567890.0}'),
+                                   '{"f":12345678901234567890.0}')
+    check(lf1[0] and lf1[2]["f"] == "1.2345678901234567e+19",
+          "body long-digit float parses (was float_parsing)")
+    var lf2 = validate_body_schema(lf, "POST",
+                                   parse_body_json('{"f":123456789012345678901234567890.0}'),
+                                   '{"f":123456789012345678901234567890.0}')
+    check(lf2[0] and lf2[2]["f"] == "1.2345678901234568e+29",
+          "body 30-digit float parses + repr")
+    # 决策-87: 语法合法性判定回归守护 (atof 对垃圾串返回 0.0 → 不能靠 atof)。
+    check(not is_dec_f64_syntax("zz") and not is_dec_f64_syntax("1.2.3")
+          and not is_dec_f64_syntax("5abc") and not is_dec_f64_syntax("")
+          and not is_dec_f64_syntax("1e"), "syntax reject garbage")
+    check(is_dec_f64_syntax("5") and is_dec_f64_syntax("+5.0")
+          and is_dec_f64_syntax(".5") and is_dec_f64_syntax("5.")
+          and is_dec_f64_syntax("1e-5") and is_dec_f64_syntax("inf")
+          and is_dec_f64_syntax("1.23456789012345678901e29"), "syntax accept")
+    check(not _is_num_lit("zz") and not _is_num_lit("1.2.3")
+          and _is_num_lit("5") and _is_num_lit("5.5"), "_is_num_lit syntax gate")
     print("Mojo body_schema (决策-38) test completed!")
