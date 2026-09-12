@@ -464,6 +464,41 @@ CX_HDR2=$(curl -sS -m 5 -H "x-token: 5" -H "x-app: OFF" "$BASE/con/hdr")
 if [[ "$CX_HDR2" == *'"header_x-app": "false"'* ]]; then pass "CX-21 header bool OFF -> false"
 else fail "CX-21 header bool coercion" "got: ${CX_HDR2:0:160}"; fi
 
+echo "== body cross-type scalar coercion (决策-82, ADR-0057) =="
+# pydantic v2 lax model: model 字段**跨 JSON 类型**强制 (实测 pydantic 2.13.x / fastapi 0.141.1).
+#   int   <- JSON float 整值 (7.0->7 / 1e2->100) / bool (true->1/false->0) / string;
+#           非整 float -> int_from_float; null/{}/[] -> int_type
+#   float <- JSON int/bool (1->1.0/true->1.0) / string; null -> float_type
+#   bool  <- JSON 0/1/-0.0/1.0 (+ string lax 集); 其它数值 -> bool_parsing; null -> bool_type
+#  数组元素同规则 (逐元素), 规范化后重建 JSON 文本回显.
+expect_code "BY-1a int<-float 7.0 -> 200" 200 "$BASE/validate/cross" POST '{"i":7.0,"f":1,"b":1}'
+expect_body_contains "BY-1b int<-float canonical 7" '"body_i": "7"' "$BASE/validate/cross" POST '{"i":7.0,"f":1,"b":1}'
+expect_body_contains "BY-1c float<-int 1 -> 1.0" '"body_f": "1.0"' "$BASE/validate/cross" POST '{"i":7.0,"f":1,"b":1}'
+expect_body_contains "BY-1d bool<-int 1 -> true" '"body_b": "true"' "$BASE/validate/cross" POST '{"i":7.0,"f":1,"b":1}'
+expect_body_contains "BY-2a int<-exponent 1e2 -> 100" '"body_i": "100"' "$BASE/validate/cross" POST '{"i":1e2,"f":true,"b":0.0}'
+expect_body_contains "BY-2b float<-bool true -> 1.0" '"body_f": "1.0"' "$BASE/validate/cross" POST '{"i":1e2,"f":true,"b":0.0}'
+expect_body_contains "BY-2c bool<-0.0 -> false" '"body_b": "false"' "$BASE/validate/cross" POST '{"i":1e2,"f":true,"b":0.0}'
+expect_body_contains "BY-3a int<-string 7" '"body_i": "7"' "$BASE/validate/cross" POST '{"i":"7","f":"1.0","b":"1"}'
+expect_body_contains "BY-3b bool<-string 1 -> true" '"body_b": "true"' "$BASE/validate/cross" POST '{"i":"7","f":"1.0","b":"1"}'
+expect_code "BY-4a int<-7.5 -> 422" 422 "$BASE/validate/cross" POST '{"i":7.5,"f":1,"b":1}'
+expect_body_contains "BY-4b int_from_float type" '"type":"int_from_float"' "$BASE/validate/cross" POST '{"i":7.5,"f":1,"b":1}'
+expect_body_contains "BY-4c int_from_float msg" "got a number with a fractional part" "$BASE/validate/cross" POST '{"i":7.5,"f":1,"b":1}'
+expect_code "BY-5a bool<-2 -> 422" 422 "$BASE/validate/cross" POST '{"i":1,"f":1,"b":2}'
+expect_body_contains "BY-5b bool_parsing type" '"type":"bool_parsing"' "$BASE/validate/cross" POST '{"i":1,"f":1,"b":2}'
+expect_code "BY-6a null scalars -> 422" 422 "$BASE/validate/cross" POST '{"i":null,"f":null,"b":null}'
+BY_NULL=$(http_body "$BASE/validate/cross" POST '{"i":null,"f":null,"b":null}')
+if [[ "$BY_NULL" == *'"type":"int_type"'* && "$BY_NULL" == *'"type":"float_type"'* && "$BY_NULL" == *'"type":"bool_type"'* ]]; then pass "BY-6b null -> int_type/float_type/bool_type"
+else fail "BY-6b null *_type" "got: ${BY_NULL:0:200}"; fi
+BY_ARR='{"is":[7.0,1e2,true,"7"],"fs":[1,true,"1.0"],"bs":[1,0,1.0,-0.0,"1"]}'
+expect_code "BY-7a cross-type array -> 200" 200 "$BASE/validate/cross-arr" POST "$BY_ARR"
+expect_body_contains "BY-7b int[] canonical" '"body_is": "[7,100,1,7]"' "$BASE/validate/cross-arr" POST "$BY_ARR"
+expect_body_contains "BY-7c float[] canonical" '"body_fs": "[1.0,1.0,1.0]"' "$BASE/validate/cross-arr" POST "$BY_ARR"
+expect_body_contains "BY-7d bool[] canonical" '"body_bs": "[true,false,true,false,true]"' "$BASE/validate/cross-arr" POST "$BY_ARR"
+expect_code "BY-8a int[] 7.5 -> 422" 422 "$BASE/validate/cross-arr" POST '{"is":[7.5],"fs":[],"bs":[]}'
+expect_body_contains "BY-8b int[] int_from_float idx loc" '["body","is",0]' "$BASE/validate/cross-arr" POST '{"is":[7.5],"fs":[],"bs":[]}'
+expect_code "BY-9a int[] null -> 422" 422 "$BASE/validate/cross-arr" POST '{"is":[null],"fs":[],"bs":[]}'
+expect_body_contains "BY-9b int[] null -> int_type" '"type":"int_type"' "$BASE/validate/cross-arr" POST '{"is":[null],"fs":[],"bs":[]}'
+
 echo "== unified error body + error_map (Goal-0002 F2) =="
 # 声明式异常映射: _error_map = "item_id=99:404:Item not found;item_id=*:422:Invalid ID"
 expect_code "error_map item_id=99 -> 404" "404" "$BASE/errors/99"

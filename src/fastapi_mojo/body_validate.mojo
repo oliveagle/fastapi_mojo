@@ -7,6 +7,7 @@
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
                          fmt_num, err_obj, _in_enum_csv, _enum_or_msg, _split_top, _trim,
                          _parse_f64, _parse_range, _find_eq, _is_int_lit, _is_num_lit)
+from body_coerce import _coerce_body_scalar, _elem_type_err, _elem_json_type
 from handler import Handler
 from router import Router
 from params_query import ParsedParams
@@ -14,7 +15,6 @@ from params_json import parse_body_json
 from json import json_escape
 from std.ffi import external_call, CStringSlice
 from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
-from numlit import parse_typed_value
 
 def _body_rgx_match(pattern: String, s: String) -> Int:
     """决策-57 FFI: regex_match(pattern, s) -> 1=match / 0=no / -1=编译失败 (bridge/regex.rs)."""
@@ -30,11 +30,11 @@ def _type_err(fs: FieldSpec) -> Tuple[String, String]:
     if fs.type_name == "str":
         return ("Input should be a valid string", "string_type")
     if fs.type_name == "int":
-        return ("Input should be a valid integer, unable to parse string as an integer", "int_parsing")
+        return ("Input should be a valid integer", "int_type")
     if fs.type_name == "float":
-        return ("Input should be a valid number, unable to parse string as a number", "float_parsing")
+        return ("Input should be a valid number", "float_type")
     if fs.type_name == "bool":
-        return ("Input should be a valid boolean", "bool_parsing")
+        return ("Input should be a valid boolean", "bool_type")
     if is_scalar_type(fs.type_name):
         return ("Input should be a valid string", "string_type")
     return ("Input should be an object", "model_type")
@@ -265,12 +265,12 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
         elif fs.type_name == "str":
             ok_t = t == "string"
         elif fs.type_name == "int":
-            # 决策-81 (ADR-0056): pydantic lax — JSON string 也可 ("007" -> 7)
-            ok_t = t == "int" or t == "string"
+            # 决策-81/82: pydantic lax — JSON string/float/bool 也可 ("007"->7 / 7.0->7 / true->1)
+            ok_t = t == "int" or t == "float" or t == "bool" or t == "string"
         elif fs.type_name == "float":
-            ok_t = t == "int" or t == "float" or t == "string"
+            ok_t = t == "int" or t == "float" or t == "bool" or t == "string"
         elif fs.type_name == "bool":
-            ok_t = t == "bool" or t == "string"
+            ok_t = t == "bool" or t == "int" or t == "float" or t == "string"
         elif fs.type_name == "obj":
             ok_t = t == "object"
         elif fs.type_name == "arr":
@@ -293,15 +293,14 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
             out[key] = raw
             continue
         if (fs.type_name == "int" or fs.type_name == "float" or fs.type_name == "bool") and not fs.is_array:
-            # 决策-81 (ADR-0056): 标量规范化 (pydantic lax) — 值 = parse_typed_value
-            # 结果 (JSON string "007" -> 7 / JSON 数字 1.50 -> 1.5); 解析失败 ->
-            # 与上游同款 parse 错误 (int/float/bool_parsing).
-            var spr = parse_typed_value(fs.type_name, raw)
-            if not spr[0]:
-                var ste = _type_err(fs)
-                errs.append(err_obj(floc + "]", ste[0], ste[1], _json_input_frag(raw)))
+            # 决策-81/82 (ADR-0056/0057): 标量跨类型规范化 (pydantic lax model) —
+            # JSON string "007"->7 / JSON float 7.0->7 (非整值 -> int_from_float) /
+            # JSON bool true->1 / 1.50->1.5 / 1->true; 失败 -> 上游 parse 错误.
+            var cr = _coerce_body_scalar(fs.type_name, t, raw)
+            if not cr[0]:
+                errs.append(err_obj(floc + "]", cr[2], cr[3], _json_input_frag(raw)))
                 continue
-            out[key] = spr[1]
+            out[key] = cr[1]
             _apply_constraints(fs, raw, -1, floc + "]", errs)
             continue
         out[key] = raw
@@ -314,6 +313,23 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
                     var sp2 = parse_scalar(fs.elem, sv2)
                     if not sp2.ok:
                         errs.append(scalar_error_object(eloc, sv2, sp2))
+                    continue
+                if fs.elem == "int" or fs.elem == "float" or fs.elem == "bool":
+                    # 决策-82 (ADR-0057): int/float/bool 数组元素跨类型强制
+                    # (JSON float/bool/string; null/{}/[] -> 裸 *_type 错).
+                    var et = _elem_json_type(elems[ei])
+                    if et == "null" or et == "object" or et == "array" or et == "unknown":
+                        var ete = _elem_type_err(fs.elem)
+                        errs.append(err_obj(eloc, ete[0], ete[1], _json_input_frag(elems[ei])))
+                        continue
+                    var etext = elems[ei]
+                    if et == "string":
+                        etext = _strip_quotes(elems[ei])
+                    var ecr = _coerce_body_scalar(fs.elem, et, etext)
+                    if not ecr[0]:
+                        errs.append(err_obj(eloc, ecr[2], ecr[3], _json_input_frag(elems[ei])))
+                    else:
+                        _apply_elem_constraints(fs.elem, ecr[1], fs, eloc, errs)
                     continue
                 var ec = _elem_check(fs.elem, elems[ei])
                 if not ec[0]:
@@ -335,11 +351,15 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
                     _apply_elem_constraints(fs.elem, elems[ei], fs, eloc, errs)
             _apply_constraints(fs, raw, len(elems), floc + "]", errs)
             if fs.elem == "int" or fs.elem == "float" or fs.elem == "bool":
-                # 决策-81: int/float/bool 数组元素规范化 (JSON 文本重建)
+                # 决策-81/82: int/float/bool 数组元素规范化 (JSON 文本重建; 跨类型).
                 var rebuilt = "["
                 for er in range(len(elems)):
                     var ce = elems[er]
-                    var epr = parse_typed_value(fs.elem, ce)
+                    var etr = _elem_json_type(ce)
+                    var cer = ce
+                    if etr == "string":
+                        cer = _strip_quotes(ce)
+                    var epr = _coerce_body_scalar(fs.elem, etr, cer)
                     if epr[0]:
                         ce = epr[1]
                     if er > 0:

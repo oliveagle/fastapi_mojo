@@ -138,4 +138,38 @@ def main() raises:
     check(not q2[0] and _has(q2[1][0], "string_too_long") and _has(q2[1][0], '["body","items",0]'), "elem len fail (idx loc)")
     var q3 = validate_body_schema(he, "POST", parse_body_json('{"items":["a"],"nums":[-1]}'), "")
     check(not q3[0] and _has(q3[1][0], "greater_than_equal") and _has(q3[1][0], '["body","nums",0]'), "elem ge fail (idx loc)")
+    # 决策-82 (ADR-0057): model 标量**跨 JSON 类型**强制 (pydantic lax model).
+    var cx = Handler(0, "validate_cross")
+    cx.set_data("_body_schema", "i:int;f:float;b:bool")
+    var c1 = validate_body_schema(cx, "POST", parse_body_json('{"i":7.0,"f":1,"b":1}'), "")
+    check(c1[0] and c1[2]["i"] == "7" and c1[2]["f"] == "1.0" and c1[2]["b"] == "true",
+          "cross int<-float / float<-int / bool<-int")
+    var c2 = validate_body_schema(cx, "POST", parse_body_json('{"i":1e2,"f":true,"b":0.0}'), "")
+    check(c2[0] and c2[2]["i"] == "100" and c2[2]["f"] == "1.0" and c2[2]["b"] == "false",
+          "cross exponent / float<-bool / bool<-0.0")
+    var c3 = validate_body_schema(cx, "POST", parse_body_json('{"i":"7","f":"1.0","b":"1"}'), "")
+    check(c3[0] and c3[2]["i"] == "7" and c3[2]["f"] == "1.0" and c3[2]["b"] == "true",
+          "cross from JSON string")
+    var c4 = validate_body_schema(cx, "POST", parse_body_json('{"i":7.5,"f":1,"b":1}'), "")
+    check(not c4[0] and _has(c4[1][0], "int_from_float") and _has(c4[1][0], "fractional part"),
+          "int_from_float (7.5)")
+    var c5 = validate_body_schema(cx, "POST", parse_body_json('{"i":1,"f":1,"b":2}'), "")
+    check(not c5[0] and _has(c5[1][0], "bool_parsing"), "bool_parsing (2)")
+    var c6 = validate_body_schema(cx, "POST", parse_body_json('{"i":null,"f":null,"b":null}'), "")
+    check(not c6[0] and len(c6[1]) == 3 and _has(c6[1][0], '\"type\":\"int_type\"')
+          and _has(c6[1][1], '\"type\":\"float_type\"') and _has(c6[1][2], '\"type\":\"bool_type\"'),
+          "null -> bare *_type")
+    # 数组元素跨类型 + 规范化重建
+    var ae = Handler(0, "validate_arr")
+    ae.set_data("_body_schema", "is:int[];fs:float[];bs:bool[]")
+    var a1 = validate_body_schema(ae, "POST", parse_body_json(
+        '{"is":[7.0,1e2,true,"7"],"fs":[1,true,"1.0"],"bs":[1,0,1.0,-0.0,"1"]}'), "")
+    check(a1[0] and a1[2]["is"] == "[7,100,1,7]" and a1[2]["fs"] == "[1.0,1.0,1.0]"
+          and a1[2]["bs"] == "[true,false,true,false,true]",
+          "array cross coercion + canonical rebuild")
+    var a2 = validate_body_schema(ae, "POST", parse_body_json('{"is":[7.5],"fs":[],"bs":[]}'), "")
+    check(not a2[0] and _has(a2[1][0], "int_from_float") and _has(a2[1][0], '["body","is",0]'),
+          "array int_from_float + idx loc")
+    var a3 = validate_body_schema(ae, "POST", parse_body_json('{"is":[null],"fs":[],"bs":[]}'), "")
+    check(not a3[0] and _has(a3[1][0], '\"type\":\"int_type\"'), "array null -> int_type")
     print("Mojo body_schema (决策-38) test completed!")

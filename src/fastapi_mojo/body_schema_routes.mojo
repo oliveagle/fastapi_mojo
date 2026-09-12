@@ -36,3 +36,14 @@ def register_body_schema_routes(mut router: Router) raises:
     nested_h.set_data("_body_schema",
         "root:str|len=3-12;models:obj[]{id:int|ge=1;tag:str|len=2-3}|items=1-2;profile:obj{email:str|pat=^[^@]+@[^@]+$;address:obj{city:str|len=2-40}}")
     router.add_route("/validate/nested", "POST", nested_h)
+
+    # Decision-82 (ADR-0057): pydantic lax model cross-JSON-type coercion demo.
+    var cross_h = Handler(KIND_ECHO(), "validate_cross")
+    cross_h.set_data("message", "cross-type demo")
+    cross_h.set_data("_body_schema", "i:int;f:float;b:bool")
+    router.add_route("/validate/cross", "POST", cross_h)
+
+    var cross_arr_h = Handler(KIND_ECHO(), "validate_cross_arr")
+    cross_arr_h.set_data("message", "cross-type array demo")
+    cross_arr_h.set_data("_body_schema", "is:int[];fs:float[];bs:bool[]")
+    router.add_route("/validate/cross-arr", "POST", cross_arr_h)
