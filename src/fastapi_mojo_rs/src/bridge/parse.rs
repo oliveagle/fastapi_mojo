@@ -225,37 +225,16 @@ pub fn connection_directive(hdr: &[u8]) -> ConnDirective {
 /// 匹配, 大小写不敏感）→ true. **不支持 q-value**（`gzip;q=0` 不算）—
 /// Starlette GZipMiddleware `_zlib_accept_encoding` quirk 对齐（决策-40,
 /// ADR-0015）. 无 Accept-Encoding 头 → false.
+/// 是否接受 gzip 响应（决策-40 → 决策-78 ADR-0053：对齐 starlette 1.6.0）。
+///
+/// 上游 `GZipMiddleware`: `if "gzip" in headers.get("Accept-Encoding", "")` ——
+/// **大小写敏感子串**匹配（quirk）: `gzip` / `x-gzip` / `gzip;q=0` 命中；
+/// `GZIP` / `Gzip` **不**命中；`br`/`deflate` 不命中。
 pub fn accepts_gzip(hdr: &[u8]) -> bool {
-    let v = match get_header_value_ci(hdr, b"Accept-Encoding") {
-        Some(v) => v,
-        None => return false,
-    };
-    // 逐 token 扫描 (逗号分隔, 前后空白 trim; 与 parse.rs 既有扫描风格一致)
-    let mut start = 0usize;
-    let mut i = 0usize;
-    loop {
-        while i < v.len() && v[i] != b',' {
-            i += 1;
-        }
-        let mut b = start;
-        let mut e = i;
-        while b < e && (v[b] == b' ' || v[b] == b'\t') {
-            b += 1;
-        }
-        while e > b && (v[e - 1] == b' ' || v[e - 1] == b'\t') {
-            e -= 1;
-        }
-        let tok = &v[b..e];
-        if tok.eq_ignore_ascii_case(b"gzip") || tok.eq_ignore_ascii_case(b"x-gzip") {
-            return true;
-        }
-        if i >= v.len() {
-            break;
-        }
-        start = i + 1;
-        i += 1;
+    match get_header_value_ci(hdr, b"Accept-Encoding") {
+        Some(v) => v.windows(4).any(|w| w == b"gzip"),
+        None => false,
     }
-    false
 }
 
 /// 大小写不敏感检查 `Expect: 100-continue` (RFC 7231 §5.1.1; 仅 honor

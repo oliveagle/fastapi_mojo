@@ -9,7 +9,8 @@
 //!   - 400（4 条精确消息）/ 416（bytes */size，CL 0）/ 500（缺失/非普通
 //!     文件，"Internal Server Error" 21B，均无文件头）
 //!   - HEAD = 仅头无体（上游 0.141.1 HEAD→405 quirk；§3.5 文档化偏差）
-//!   - GZip 不介入（file/streaming 绕过 send_response 单点 gzip — §3.5）
+//!   - GZip（决策-78 ADR-0053）：200 全量在可压时读全量 + gzip
+//!     （CE/CL/Vary; 上游 GZipMiddleware 压缩 FileResponse；206/Range 跳过）
 //!
 //! 零第三方 crate。Range/If-Range 从 CurrentRequest 读（io.rs 记录）。
 
@@ -403,14 +404,78 @@ fn send_full(
     extra: &str,
     is_head: bool,
 ) -> c_long {
+    // 决策-78 (ADR-0053): FileResponse gzip（上游 GZipMiddleware 压缩 FileResponse；
+    // 206/Range 走别径跳过）。可压 -> 读全量 + gzip（CL = 压缩后长度）; 不可压 -> 原样流式。
+    let gz_cfg = super::gzip::config();
+    let gz_plan = super::gzip::plan(
+        &gz_cfg,
+        ct,
+        size as usize,
+        status,
+        if extra.is_empty() { None } else { Some(extra) },
+        request::current_accepts_gzip(),
+        !is_head,
+        false,
+    );
+    let mut gz_body: Option<Vec<u8>> = None;
+    if gz_plan.compress {
+        if let Some(raw) = read_all(ffd, size) {
+            gz_body = super::gzip::gzip_compress(&raw, gz_cfg.level);
+        }
+    }
+    let extra_final = super::gzip::merge_extra(extra, gz_plan.vary, gz_body.is_some());
+    let cl = match &gz_body {
+        Some(g) => g.len() as i64,
+        None => size,
+    };
     request::set_last_status(status.as_bytes());
-    let h = file_header_block(status, ct, size, last_modified, etag, None, cd, extra);
+    let h = file_header_block(status, ct, cl, last_modified, etag, None, cd, &extra_final);
     if !send_fd(fd, h.as_bytes()) {
         return -1;
     }
-    if !is_head && !write_file_range(fd, ffd, 0, size) {
-        return -1;
+    if is_head {
+        return 0;
+    }
+    match &gz_body {
+        Some(g) => {
+            if !send_fd(fd, g) {
+                return -1;
+            }
+        }
+        None => {
+            if !write_file_range(fd, ffd, 0, size) {
+                return -1;
+            }
+        }
     }
     0
+}
+
+/// 读文件全量（gzip 用; 失败/超界 -> None）。上限 4 MiB（防御）。
+fn read_all(ffd: c_int, size: i64) -> Option<Vec<u8>> {
+    const READ_ALL_MAX: i64 = 4 * 1024 * 1024;
+    if !(0..=READ_ALL_MAX).contains(&size) {
+        return None;
+    }
+    if unsafe { lseek(ffd, 0, SEEK_SET) } < 0 {
+        return None;
+    }
+    let mut out = vec![0u8; size as usize];
+    let mut got = 0usize;
+    while got < out.len() {
+        let n = unsafe { read(ffd, out[got..].as_mut_ptr() as *mut c_void, out.len() - got) };
+        if n < 0 {
+            if errno() == EINTR {
+                continue;
+            }
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        got += n as usize;
+    }
+    out.truncate(got);
+    Some(out)
 }
 // temporary probe - appended to file_serve.rs as test

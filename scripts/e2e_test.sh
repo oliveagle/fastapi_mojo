@@ -27,7 +27,7 @@
 #   - Lifespan: 声明式 startup/shutdown 命令 (决策-36, LS-1..LS-4)
 #   - APIRouter: prefix/tags/base_deps + include_router (决策-37, AR-1..AR-8)
 #   - Body validation: _body_schema + Field 约束 + Enum + FastAPI 422 detail (决策-38, BS-1..BS-12)
-#   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
+#   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40/78, GZ-1..GZ-10, Starlette 1.6.0 parity)
 #   - Rust JSON serializer opt-in: FASTAPI_MOJO_JSON_SERIALIZER=rust (决策-66, JR-1..JR-6)
 #   - OAuth2 scopes: _auth_scopes gate + oauth2 flows OpenAPI (决策-67, OT-24..OT-33)
 #   - HTTPDigest runtime + OpenAPI securitySchemes (basic/bearer/digest/apiKey) (决策-69, DG-1..6 / SO-1..5)
@@ -179,6 +179,7 @@ if ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$PORT\$"; then
 fi
 
 TMP="$(mktemp -d /tmp/fm_e2e.XXXXXX)"
+GZ_BIGFILE=""
 SERVER_PID=""
 TLS_PID=""
 TLS_INVALID_PID=""
@@ -198,6 +199,7 @@ cleanup() {
             kill -9 "$pid" 2>/dev/null || true
         fi
     done
+    [[ -n "$GZ_BIGFILE" ]] && rm -f "$GZ_BIGFILE"
     rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -1347,17 +1349,26 @@ expect_body_contains "JS-7b deep object loc" '["body","profile","address","city"
 expect_body_contains "JS-8a OpenAPI obj[] recursive item schema" '"items":{"type":"object","properties":{"id":{"type":"integer","format":"int32","minimum":1}' "$BASE/openapi.json"
 expect_body_contains "JS-8b OpenAPI object-array sizes" '"minItems":1,"maxItems":2' "$BASE/openapi.json"
 
-# --- GZip 中间件 (决策-40, ADR-0015, Goal-0003 P2 矩阵 #24) -----------------------
+# --- GZip 中间件 (决策-40 ADR-0015 → 决策-78 ADR-0053, Starlette 1.6.0 全量对齐) ------
 # FastAPI/Starlette GZipMiddleware 声明式 env 等价形态: FASTAPI_MOJO_GZIP=1 启用
-# (默认关 = FastAPI 默认) + MIN_SIZE (默认 500, 对齐 Starlette) + MAX_SIZE (1MiB).
-# 条件: client Accept-Encoding 含裸 token gzip/x-gzip (不支持 q, 上游 quirk 对齐)
-#   + body >= min_size + 非 304 + extra 无 Content-Encoding.
-# 压缩后: Content-Encoding: gzip + Content-Length = 压缩后长度; Content-Type 不变.
+# (默认关 = FastAPI 默认) + MIN_SIZE (默认 500) + LEVEL (默认 9) + 可选 MAX_SIZE.
+# 语义 (starlette 1.6.0 middleware/gzip.py 逐项对齐):
+#   - client 判定 = Accept-Encoding 含**大小写敏感子串** gzip (GZIP/Gzip 不命中;
+#     x-gzip / gzip;q=0 命中 — 上游 quirk)
+#   - 排除 media type (默认表 text/event-stream / image/png / image/* / video/* / audio/* ...)
+#   - status 206 / extra 已声明 Content-Encoding → 跳过
+#   - **Vary: Accept-Encoding 在可压响应上恒加** (上游 IdentityResponder 同样加,
+#     与 client 是否真接受 gzip 无关); 小体 (<min_size) / 排除 / 跳过 不加
+#   - streaming 响应可压 (上游 more_body 分支, 不受 min_size 门; 压则无 CL)
+#   - FileResponse 小文件 (<min_size) 不压; >= min_size 压 (CL = 压缩后长度)
 # flate2 = 纯 Rust miniz_oxide 后端 (无 C 路径, 静态, ldd 仅 libc).
 # 零 python3 (Track B 决策-22): roundtrip 用 curl --compressed 自动 gunzip + cmp.
-echo "== GZip middleware (决策-40) =="
+echo "== GZip middleware (决策-78, Starlette 1.6.0 parity) =="
 GZ_PORT=$((PORT + 101))
 GZ_LOG="$TMP/gzip.log"
+# 大静态文件 (2000B > min_size) 触发静态路径 gzip; cleanup 兜底清理.
+GZ_BIGFILE="$SRC/static/gzbig_e2e.txt"
+head -c 2000 /dev/zero | tr '\0' 'a' > "$GZ_BIGFILE"
 ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
     FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
     FASTAPI_MOJO_GZIP=1 \
@@ -1378,29 +1389,33 @@ for _ in $(seq 1 30); do
 done
 if [[ "$GZ_READY" == 1 ]]; then
     GZ_BASE="http://127.0.0.1:$GZ_PORT"
-    # GZ-1: 默认关 (主 server 无 env): Accept-Encoding: gzip 也不压缩 (FastAPI 默认对齐)
-    if curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$BASE/openapi.json" | grep -qi 'content-encoding'; then
-        fail "GZ-1 default off: no Content-Encoding" "default server returned gzip header"
+    # GZ-1: 默认关 (主 server 无 env): Accept-Encoding: gzip 也不压缩, 无 Vary.
+    GZ1=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$BASE/openapi.json")
+    if echo "$GZ1" | grep -qi 'content-encoding' || echo "$GZ1" | grep -qi '^vary:'; then
+        fail "GZ-1 default off: no Content-Encoding/Vary" "default server compressed"
     else
-        pass "GZ-1 default off: no Content-Encoding"
+        pass "GZ-1 default off: no Content-Encoding/Vary"
     fi
-    # GZ-2: 启用 + Accept-Encoding: gzip + /openapi.json (>500B) → Content-Encoding: gzip
-    if curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/openapi.json" | grep -qi 'content-encoding: *gzip'; then
-        pass "GZ-2 gzip on: Content-Encoding: gzip"
+    # GZ-2: 启用 + AE gzip + /openapi.json (>500B) → CE: gzip + Vary: Accept-Encoding.
+    GZ2=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/openapi.json")
+    if echo "$GZ2" | grep -qi 'content-encoding: *gzip' && echo "$GZ2" | grep -qi '^vary: *accept-encoding'; then
+        pass "GZ-2 gzip on: Content-Encoding: gzip + Vary"
     else
-        fail "GZ-2 gzip on: Content-Encoding: gzip"
+        fail "GZ-2 gzip on: Content-Encoding: gzip + Vary" "$(echo "$GZ2" | tr -d '\r' | grep -iE 'content-encoding|vary' | tr '\n' ' ')"
     fi
-    # GZ-3: 启用 + 无 Accept-Encoding → identity
-    if curl -s -D - -o /dev/null "$GZ_BASE/openapi.json" | grep -qi 'content-encoding'; then
-        fail "GZ-3 no accept-encoding: identity"
+    # GZ-3: 启用 + 无 AE → identity 体 + Vary: Accept-Encoding (上游 IdentityResponder).
+    GZ3=$(curl -s -D - -o /dev/null "$GZ_BASE/openapi.json")
+    if echo "$GZ3" | grep -qi '^vary: *accept-encoding' && ! echo "$GZ3" | grep -qi 'content-encoding'; then
+        pass "GZ-3 no accept-encoding: identity + Vary"
     else
-        pass "GZ-3 no accept-encoding: identity"
+        fail "GZ-3 no accept-encoding: identity + Vary" "$(echo "$GZ3" | tr -d '\r' | grep -iE 'content-encoding|vary' | tr '\n' ' ')"
     fi
-    # GZ-4: 启用 + 小 body (/health <500B min_size) → identity
-    if curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/health" | grep -qi 'content-encoding'; then
-        fail "GZ-4 small body below min_size: identity"
+    # GZ-4: 启用 + 小体 (/health < 500) → identity, 无 Vary (未达压缩门).
+    GZ4=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/health")
+    if echo "$GZ4" | grep -qi 'content-encoding' || echo "$GZ4" | grep -qi '^vary:'; then
+        fail "GZ-4 small body below min_size: identity, no Vary" "$(echo "$GZ4" | tr -d '\r' | grep -iE 'content-encoding|vary' | tr '\n' ' ')"
     else
-        pass "GZ-4 small body below min_size: identity"
+        pass "GZ-4 small body below min_size: identity, no Vary"
     fi
     # GZ-5: roundtrip 逐字节一致 (curl --compressed 自动 gunzip) + JSON 完整性
     curl -s "$GZ_BASE/openapi.json" > "$TMP/gz_plain.json"
@@ -1410,9 +1425,54 @@ if [[ "$GZ_READY" == 1 ]]; then
     else
         fail "GZ-5 gunzip roundtrip identical"
     fi
+    # GZ-6: AE "GZIP" 大写 → 不命中 (大小写敏感 quirk) → identity + Vary.
+    GZ6=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: GZIP' "$GZ_BASE/openapi.json")
+    if echo "$GZ6" | grep -qi 'content-encoding'; then
+        fail "GZ-6 uppercase GZIP not matched" "unexpected Content-Encoding"
+    elif echo "$GZ6" | grep -qi '^vary: *accept-encoding'; then
+        pass "GZ-6 uppercase GZIP not matched (identity + Vary)"
+    else
+        fail "GZ-6 uppercase GZIP not matched" "expected Vary"
+    fi
+    # GZ-7: SSE (text/event-stream 排除) → 无 CE, 无 Vary.
+    GZ7=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/sse")
+    if echo "$GZ7" | grep -qi 'content-encoding' || echo "$GZ7" | grep -qi '^vary:'; then
+        fail "GZ-7 SSE text/event-stream excluded" "$(echo "$GZ7" | tr -d '\r' | grep -iE 'content-encoding|vary' | tr '\n' ' ')"
+    else
+        pass "GZ-7 SSE text/event-stream excluded (no CE/Vary)"
+    fi
+    # GZ-8: StreamingResponse 可压 (上游 more_body 分支, 无 min_size 门) → chunked + CE + Vary
+    #       + gunzip roundtrip 与 identity /stream 体一致.
+    GZ8=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/stream")
+    curl -s "$GZ_BASE/stream" > "$TMP/gz_stream_plain"
+    curl -s --compressed -H 'Accept-Encoding: gzip' "$GZ_BASE/stream" > "$TMP/gz_stream_gz"
+    if echo "$GZ8" | grep -qi 'content-encoding: *gzip' && echo "$GZ8" | grep -qi '^vary: *accept-encoding' \
+       && cmp -s "$TMP/gz_stream_plain" "$TMP/gz_stream_gz"; then
+        pass "GZ-8 streaming gzip + roundtrip"
+    else
+        fail "GZ-8 streaming gzip + roundtrip" "$(echo "$GZ8" | tr -d '\r' | grep -iE 'content-encoding|vary|transfer' | tr '\n' ' ')"
+    fi
+    # GZ-9: FileResponse 小文件 (/file 30B < min_size) → 无 CE, 无 Vary.
+    GZ9=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/file")
+    if echo "$GZ9" | grep -qi 'content-encoding' || echo "$GZ9" | grep -qi '^vary:'; then
+        fail "GZ-9 FileResponse small not compressed" "$(echo "$GZ9" | tr -d '\r' | grep -iE 'content-encoding|vary' | tr '\n' ' ')"
+    else
+        pass "GZ-9 FileResponse small not compressed (no CE/Vary)"
+    fi
+    # GZ-10: 静态大文件 (2000B > min_size) → CE gzip + Vary + gunzip roundtrip.
+    GZ10=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$GZ_BASE/gzbig_e2e.txt")
+    curl -s "$GZ_BASE/gzbig_e2e.txt" > "$TMP/gz_big_plain"
+    curl -s --compressed -H 'Accept-Encoding: gzip' "$GZ_BASE/gzbig_e2e.txt" > "$TMP/gz_big_gz"
+    if echo "$GZ10" | grep -qi 'content-encoding: *gzip' && echo "$GZ10" | grep -qi '^vary: *accept-encoding' \
+       && cmp -s "$TMP/gz_big_plain" "$TMP/gz_big_gz"; then
+        pass "GZ-10 static large file gzip + roundtrip"
+    else
+        fail "GZ-10 static large file gzip + roundtrip" "$(echo "$GZ10" | tr -d '\r' | grep -iE 'content-encoding|vary|content-length' | tr '\n' ' ')"
+    fi
 else
     fail "GZ side server did not start" "see $GZ_LOG"
 fi
+rm -f "$GZ_BIGFILE"
 kill -TERM "$GZ_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$GZ_PID" 2>/dev/null

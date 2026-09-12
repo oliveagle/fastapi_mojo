@@ -6,7 +6,8 @@ use std::os::raw::{c_char, c_int, c_void};
 
 use super::file_serve::{send_file_response, LinuxStat};
 use super::request::{
-    reset_request_fields, set_close_after_response, set_http_fields, set_range_headers,
+    reset_request_fields, set_accepts_gzip, set_close_after_response, set_http_fields,
+    set_range_headers,
 };
 use super::send::send_streaming_response;
 use super::state::set_static_dir;
@@ -375,4 +376,136 @@ fn stream_empty() {
     assert!(h.starts_with("HTTP/1.1 200 OK\r\n"), "{h}");
     assert!(!h.contains("Content-Type"), "{h}");
     assert_eq!(body_after(&resp), b"0\r\n\r\n");
+}
+
+// ---------- GZip (决策-78, ADR-0053): FileResponse / StreamingResponse ----------
+
+/// 单 chunk payload 提取 (chunked body: `hexlen\r\n<data>\r\n...0\r\n\r\n`).
+fn single_chunk_payload(body: &[u8]) -> Vec<u8> {
+    let nl = body.windows(2).position(|w| w == b"\r\n").expect("chunk size line");
+    let len = usize::from_str_radix(std::str::from_utf8(&body[..nl]).unwrap().trim(), 16).unwrap();
+    body[nl + 2..nl + 2 + len].to_vec()
+}
+
+fn gunzip(body: &[u8]) -> Vec<u8> {
+    let mut dec = flate2::read::GzDecoder::new(body);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut dec, &mut out).unwrap();
+    out
+}
+
+/// 2000 字节可压文本 (>= min_size 500, < 64KiB → 上游单 body 分支).
+fn compressible(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i % 26) as u8 + b'a').collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn file_case_gzip(
+    tmp: &str,
+    fname: &str,
+    content: &[u8],
+    media: &str,
+    status: &str,
+    extra: &str,
+) -> Vec<u8> {
+    setup_static(tmp);
+    std::fs::write(format!("{tmp}/{fname}"), content).unwrap();
+    reset_request_fields();
+    set_http_fields(b"GET", b"/file", b"", true, true, 7);
+    set_close_after_response(true);
+    set_range_headers(None, None);
+    set_accepts_gzip(true);
+    let mut cp = ConnPair::new();
+    assert_eq!(send_file_response(cp.b, fname, media, "", "", status, extra), 0);
+    let resp = cp.recv_settled();
+    std::fs::remove_dir_all(tmp).ok();
+    teardown();
+    resp
+}
+
+#[test]
+fn file_gzip_when_client_accepts() {
+    super::gzip::__test_reset_config();
+    std::env::set_var("FASTAPI_MOJO_GZIP", "1");
+    let content = compressible(2000);
+    let resp = file_case_gzip(
+        "/tmp/fm_fs_gz1", "big.bin", &content, "application/octet-stream", "200 OK", "",
+    );
+    let h = headers_only(&resp);
+    assert!(h.contains("Content-Encoding: gzip\r\n"), "{h}");
+    assert!(h.contains("Vary: Accept-Encoding\r\n"), "{h}");
+    // Vary 在 Content-Encoding 之前 (上游 add_vary_header 先)
+    assert!(h.find("Vary: Accept-Encoding").unwrap() < h.find("Content-Encoding").unwrap(), "{h}");
+    let b = body_after(&resp);
+    // Content-Length = 压缩后长度
+    let cl: usize = h
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Length: "))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(cl, b.len(), "{h}");
+    assert_eq!(gunzip(b), content, "roundtrip");
+    std::env::remove_var("FASTAPI_MOJO_GZIP");
+    super::gzip::__test_reset_config();
+    reset_request_fields();
+}
+
+#[test]
+fn file_small_below_min_not_gzipped_no_vary() {
+    super::gzip::__test_reset_config();
+    std::env::set_var("FASTAPI_MOJO_GZIP", "1");
+    let resp = file_case_gzip("/tmp/fm_fs_gz2", "small.bin", b"0123456789", "", "200 OK", "");
+    let h = headers_only(&resp);
+    assert!(!h.contains("Content-Encoding"), "{h}");
+    assert!(!h.contains("Vary"), "small body must not add Vary: {h}");
+    assert_eq!(body_after(&resp), b"0123456789");
+    std::env::remove_var("FASTAPI_MOJO_GZIP");
+    super::gzip::__test_reset_config();
+    reset_request_fields();
+}
+
+#[test]
+fn stream_gzip_when_client_accepts() {
+    super::gzip::__test_reset_config();
+    std::env::set_var("FASTAPI_MOJO_GZIP", "1");
+    reset_request_fields();
+    set_http_fields(b"GET", b"/stream", b"", true, true, 7);
+    set_close_after_response(true);
+    set_range_headers(None, None);
+    set_accepts_gzip(true);
+    let mut cp = ConnPair::new();
+    assert_eq!(send_streaming_response(cp.b, "200 OK", "hello |world|中", "text/plain", ""), 0);
+    let resp = cp.recv_settled();
+    let h = headers_only(&resp);
+    assert!(h.contains("Content-Encoding: gzip\r\n"), "{h}");
+    assert!(h.contains("Vary: Accept-Encoding\r\n"), "{h}");
+    assert!(!h.contains("Content-Length"), "streaming must stay chunked: {h}");
+    assert_eq!(gunzip(&single_chunk_payload(body_after(&resp))), "hello world中".as_bytes());
+    std::env::remove_var("FASTAPI_MOJO_GZIP");
+    super::gzip::__test_reset_config();
+    reset_request_fields();
+}
+
+#[test]
+fn stream_gzip_excluded_media_not_compressed() {
+    super::gzip::__test_reset_config();
+    std::env::set_var("FASTAPI_MOJO_GZIP", "1");
+    reset_request_fields();
+    set_http_fields(b"GET", b"/stream", b"", true, true, 7);
+    set_close_after_response(true);
+    set_range_headers(None, None);
+    set_accepts_gzip(true);
+    let mut cp = ConnPair::new();
+    // text/event-stream → 排除 → identity chunked (无 Vary / 无 CE)
+    assert_eq!(send_streaming_response(cp.b, "200 OK", "x|y", "text/event-stream", ""), 0);
+    let resp = cp.recv_settled();
+    let h = headers_only(&resp);
+    assert!(!h.contains("Content-Encoding"), "{h}");
+    assert!(!h.contains("Vary"), "{h}");
+    assert_eq!(body_after(&resp), b"1\r\nx\r\n1\r\ny\r\n0\r\n\r\n");
+    std::env::remove_var("FASTAPI_MOJO_GZIP");
+    super::gzip::__test_reset_config();
+    reset_request_fields();
 }

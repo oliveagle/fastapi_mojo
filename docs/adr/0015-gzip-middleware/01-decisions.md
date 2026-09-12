@@ -1,7 +1,13 @@
 # ADR-0015: GZip 响应压缩（FastAPI/Starlette GZipMiddleware 声明式等价，env 驱动）
 
+> ⚠️ **§3 / §7 已被 ADR-0053（决策-78, `fastapi_mojo-mxs`）取代**：本 ADR 的
+> 「不按 CT 过滤 / level 6 / SSE 同样受益 / streaming+file 不压」等语义与
+> starlette 1.6.0 不符。ADR-0053 逐项对齐上游（`Vary` 恒加于可压响应、大小写敏感
+> client 判定、13 项默认排除表、streaming/FileResponse 可压、`compresslevel=9`、
+> 无 size 上限）。本文 §1/§2/§4-§6 保留为决策-40 的历史记录（§3/§7 请以 ADR-0053 为准）。
+
 - **日期**：2026-09-09
-- **状态**：✅ 已接受
+- **状态**：✅ 已接受（§3/§7 由 ADR-0053 取代）
 - **决策者**：oliveagle（agent 执行，Goal-0003 P2 矩阵 #24 落地）
 - **关联**：AGENTS.md §3.1/§6（**决策-40**）、Goal-0003（P2：压缩 GZipMiddleware）、
   North Star（单 binary 零依赖 — flate2 纯 Rust miniz_oxide 后端，静态，

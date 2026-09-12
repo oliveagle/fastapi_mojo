@@ -47,11 +47,9 @@ pub fn send_response(
     send_frames(fd, status, &frames)
 }
 
-pub fn send_streaming(fd: c_int, status: &str, body: &str, media_type: &str, extra: &str) -> c_int {
-    let chunks: Vec<&str> = body.split('|').filter(|chunk| !chunk.is_empty()).collect();
-    let total: usize = chunks.iter().map(|chunk| chunk.len()).sum();
+pub fn send_streaming(fd: c_int, status: &str, body: &[u8], media_type: &str, extra: &str) -> c_int {
     let extra = combined_extra(if extra.is_empty() { None } else { Some(extra) });
-    let Some(stream) = reserve_stream(fd, total) else {
+    let Some(stream) = reserve_stream(fd, body.len()) else {
         return -1;
     };
     let media_type = if media_type.is_empty() {
@@ -66,21 +64,13 @@ pub fn send_streaming(fd: c_int, status: &str, body: &str, media_type: &str, ext
         status,
         media_type.as_deref(),
         None,
-        chunks.is_empty() || is_head,
+        body.is_empty() || is_head,
         &extra,
     ) else {
         return -1;
     };
-    if !is_head {
-        for (i, chunk) in chunks.iter().enumerate() {
-            let last = i + 1 == chunks.len();
-            frames.push(frame(
-                DATA,
-                if last { END_STREAM } else { 0 },
-                stream,
-                chunk.as_bytes(),
-            ));
-        }
+    if !is_head && !body.is_empty() {
+        frames.push(frame(DATA, END_STREAM, stream, body));
     }
     send_frames(fd, status, &frames)
 }

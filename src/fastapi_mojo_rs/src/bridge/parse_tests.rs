@@ -378,7 +378,7 @@ fn is_multipart_form_data_other_ct() {
     assert!(!is_multipart_form_data(b"POST / HTTP/1.1\r\nContent-Type: multipart\r\n\r\n"));
 }
 
-// ---------- accepts_gzip (决策-40) ----------
+// ---------- accepts_gzip (决策-40 → 决策-78 ADR-0053) ----------
 
 #[test]
 fn accepts_gzip_basic() {
@@ -387,25 +387,25 @@ fn accepts_gzip_basic() {
 }
 
 #[test]
-fn accepts_gzip_xgzip_and_case() {
+fn accepts_gzip_substring_quirk() {
+    // starlette 1.6.0: 大小写敏感子串匹配 "gzip"
     assert!(accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: x-gzip\r\n\r\n"));
-    assert!(accepts_gzip(b"GET / HTTP/1.1\r\nACCEPT-ENCODING: GZIP\r\n\r\n"));
+    // 大写 GZIP 不含小写 gzip → 上游不命中
+    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nACCEPT-ENCODING: GZIP\r\n\r\n"));
+    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: Gzip\r\n\r\n"));
 }
 
 #[test]
 fn accepts_gzip_list_tokens() {
-    // 列表中裸 token gzip 命中 (Starlette: strip 后精确匹配 gzip/x-gzip)
-    let hdr = b"GET / HTTP/1.1\r\nAccept-Encoding: br, gzip, zstd\r\n\r\n";
-    assert!(accepts_gzip(hdr));
-    // quirk 对齐: 带 q-value 的 "gzip;q=0.5" 不算 (Starlette 精确匹配, 不支持 q)
-    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=0.5\r\n\r\n"));
-    assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=0\r\n\r\n"));
+    assert!(accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: br, gzip, zstd\r\n\r\n"));
+    // 上游 quirk: 子串命中 -> 带 q-value 也接受
+    assert!(accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=0.5\r\n\r\n"));
+    assert!(accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=0\r\n\r\n"));
 }
 
 #[test]
 fn accepts_gzip_absent_or_other() {
     assert!(!accepts_gzip(b"GET / HTTP/1.1\r\n\r\n"));
     assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: br, deflate\r\n\r\n"));
-    // deflate 不含 gzip token
     assert!(!accepts_gzip(b"GET / HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n"));
 }

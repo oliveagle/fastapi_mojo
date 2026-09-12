@@ -125,27 +125,29 @@ pub fn send_response(
     } else {
         mw_ct.as_str()
     };
-    // 决策-40: GZip 判定 + 压缩 (gzip_result 持有压缩 body 生命期)
-    let gzip_result: Option<Vec<u8>> =
-        if gzip::should_gzip(
-            &gzip::config(),
-            body.len(),
-            status,
-            extra,
-            current_accepts_gzip(),
-            include_body,
-        ) {
-            gzip::gzip_compress(body)
-        } else {
-            None
-        };
-    // 压缩时追加 Content-Encoding: gzip 行 (与既有 extra 行按 \r\n 合并);
-    // 未压缩时原样透传 extra.
-    let gzip_extra: Option<String> = gzip_result
-        .is_some()
-        .then(|| match extra {
-            Some(e) => format!("{e}\r\nContent-Encoding: gzip"),
-            None => "Content-Encoding: gzip".to_string(),
+    // 决策-40 → 决策-78 (ADR-0053): GZip 判定 + 压缩 (Starlette 1.6.0 对齐).
+    // `plan.vary` -> 加 `Vary: Accept-Encoding` (上游在可压响应上恒加, 与 client
+    // 是否接受无关); `plan.compress` -> body 换 gzip 字节 + `Content-Encoding: gzip`.
+    let gz_cfg = gzip::config();
+    let gz_plan = gzip::plan(
+        &gz_cfg,
+        content_type,
+        body.len(),
+        status,
+        extra,
+        current_accepts_gzip(),
+        include_body,
+        false,
+    );
+    let gzip_result: Option<Vec<u8>> = if gz_plan.compress {
+        gzip::gzip_compress(body, gz_cfg.level)
+    } else {
+        None
+    };
+    let gzip_extra: Option<String> = gzip::extra_add_lines(gz_plan.vary, gzip_result.is_some())
+        .map(|add| match extra {
+            Some(e) => format!("{e}\r\n{add}"),
+            None => add,
         });
     let body_out: &[u8] = match &gzip_result {
         Some(c) => c.as_slice(),
@@ -246,8 +248,10 @@ pub fn send_sse_response_extra(fd: c_int, status: &str, body: &[u8], extra: &str
 ///     与 SSE builder 一致；整体空 = 零 chunk）
 ///   - 帧形: `hexlen\r\ndata\r\n ... 0\r\n\r\n`（无 content-length；
 ///     TestClient/httpx 自动解 chunked，真实 socket 可见帧）
-///   - GZip 不介入（绕过 send_response 单点 gzip — 上游 GZipMiddleware 会压缩
-///     streaming 体，§3.5 文档化偏差）
+///   - 决策-78 (ADR-0053): **GZip 介入 streaming**（上游 GZipMiddleware more_body
+///     分支）— env 启用 + client 接受 + media 未排除 + status 非 206 + extra 无
+///     Content-Encoding 时, 合并后的 body 压成 gzip 单 chunk + 追加
+///     `Vary: Accept-Encoding`/`Content-Encoding: gzip`（无 min_size 门）。
 pub fn send_streaming_response(
     fd: c_int,
     status: &str,
@@ -255,11 +259,36 @@ pub fn send_streaming_response(
     media_type: &str,
     extra: &str,
 ) -> c_long {
+    let is_head = current_method_is_head();
+    // 决策-78 (ADR-0053): streaming gzip 计划 (不受 min_size 门; 上游 more_body 分支).
+    let parts: Vec<&str> = body.split('|').filter(|p| !p.is_empty()).collect();
+    let joined: String = parts.concat();
+    let gz_cfg = gzip::config();
+    let gz_plan = gzip::plan(
+        &gz_cfg,
+        media_type,
+        joined.len(),
+        status,
+        if extra.is_empty() { None } else { Some(extra) },
+        current_accepts_gzip(),
+        !is_head,
+        true,
+    );
+    let gz_bytes: Option<Vec<u8>> = if gz_plan.compress {
+        gzip::gzip_compress(joined.as_bytes(), gz_cfg.level)
+    } else {
+        None
+    };
+    let extra_lines = gzip::merge_extra(extra, gz_plan.vary, gz_bytes.is_some());
+    let raw_or_gz: Vec<u8> = match &gz_bytes {
+        Some(g) => g.clone(),
+        None => joined.clone().into_bytes(),
+    };
     if http2_response::is_h2(fd) {
-        return http2_response::send_streaming(fd, status, body, media_type, extra) as c_long;
+        return http2_response::send_streaming(fd, status, &raw_or_gz, media_type, &extra_lines) as c_long;
     }
     let conn = if get_close_after_response() { "close" } else { "keep-alive" };
-    let mut h = String::with_capacity(256 + status.len() + media_type.len() + extra.len());
+    let mut h = String::with_capacity(256 + status.len() + media_type.len() + extra_lines.len());
     h.push_str(&format!("HTTP/1.1 {status}\r\n"));
     if !media_type.is_empty() {
         h.push_str(&format!(
@@ -273,8 +302,8 @@ pub fn send_streaming_response(
         h.push_str(&line);
         h.push_str("\r\n");
     }
-    if !extra.is_empty() {
-        h.push_str(extra);
+    if !extra_lines.is_empty() {
+        h.push_str(&extra_lines);
         h.push_str("\r\n");
     }
     h.push_str("\r\n");
@@ -284,19 +313,30 @@ pub fn send_streaming_response(
     }
     // 决策-77 (ADR-0052): HEAD → 仅头无体（无 chunk 数据 / 无终止符; 头块即结束,
     // 与上游 HEAD 语义一致）。
-    if current_method_is_head() {
+    if is_head {
         return 0;
     }
-    for part in body.split('|') {
-        if part.is_empty() {
-            continue;
-        }
-        let mut chunk = String::with_capacity(part.len() + 16);
-        chunk.push_str(&format!("{:x}\r\n", part.len()));
-        chunk.push_str(part);
-        chunk.push_str("\r\n");
-        if send_all(fd, chunk.as_bytes()) != 0 {
+    if let Some(g) = &gz_bytes {
+        // 决策-78: 压缩流 = 单个 gzip chunk（gzip 字节非 UTF-8, 用字节拼接）.
+        let mut chunk: Vec<u8> = Vec::with_capacity(g.len() + 16);
+        chunk.extend_from_slice(format!("{:x}\r\n", g.len()).as_bytes());
+        chunk.extend_from_slice(g);
+        chunk.extend_from_slice(b"\r\n");
+        if send_all(fd, &chunk) != 0 {
             return -1;
+        }
+    } else {
+        for part in body.split('|') {
+            if part.is_empty() {
+                continue;
+            }
+            let mut chunk = String::with_capacity(part.len() + 16);
+            chunk.push_str(&format!("{:x}\r\n", part.len()));
+            chunk.push_str(part);
+            chunk.push_str("\r\n");
+            if send_all(fd, chunk.as_bytes()) != 0 {
+                return -1;
+            }
         }
     }
     if send_all(fd, b"0\r\n\r\n") != 0 {
