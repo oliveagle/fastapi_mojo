@@ -63,6 +63,7 @@ use super::send::{
     send_sse_response_extra as send_send_sse_response_extra,
     send_text_response as send_send_text_response,
     send_text_response_status as send_send_text_response_status,
+    send_text_response_status_extra as send_send_text_response_status_extra,
     send_head_response as send_send_head_response,
     send_html_response as send_send_html_response,
     send_preflight_response as send_send_preflight_response,
@@ -463,6 +464,17 @@ pub extern "C" fn send_text_response_status(
     let s = unsafe { c_str_lossy(status) };
     let b = unsafe { c_str_bytes(body) };
     send_send_text_response_status(fd, &s, &b) as c_long
+}
+
+/// 决策-74 (ADR-0049): text/plain + status + extra 头行 (异常 handler 自定义头).
+#[no_mangle]
+pub extern "C" fn send_text_response_status_extra(
+    fd: c_int, status: *const c_char, body: *const c_char, extra: *const c_char,
+) -> c_long {
+    let s = unsafe { c_str_lossy(status) };
+    let b = unsafe { c_str_bytes(body) };
+    let e = unsafe { c_str_lossy(extra) };
+    send_send_text_response_status_extra(fd, &s, &b, &e) as c_long
 }
 
 #[no_mangle]

@@ -10,7 +10,8 @@ import std.os
 
 from exception_handlers import (_split_exc_msg, _parse_entry,
                                 _entry_fields, parse_exc_table,
-                                _substitute, resolve_exception_response)
+                                _substitute, resolve_exception_response,
+                                parse_exc_headers)
 from handler import Handler
 
 
@@ -132,5 +133,39 @@ def main() raises:
         check(r3.is_exc and r3.status_line == "500 Internal Server Error"
               and r3.body == "Internal Server Error" and not r3.is_json,
               "resolve default 500 (P13-10)")
+
+    # ---------- 决策-74 (ADR-0049): parse_exc_headers ----------
+    check(len(parse_exc_headers("")) == 0, "exc headers empty")
+    var hp1 = parse_exc_headers("Teapot=X-Reason: tea|WWW-Authenticate: Teapot")
+    check(len(hp1) == 1
+          and hp1["Teapot"] == "X-Reason: tea\r\nWWW-Authenticate: Teapot",
+          "exc headers multi per tag (| 分隔, \r\n 连接)")
+    var hp2 = parse_exc_headers("A=One: 1;B=Two: 2;A=Three: 3")
+    check(len(hp2) == 2 and hp2["A"] == "Three: 3" and hp2["B"] == "Two: 2",
+          "exc headers last-wins per tag")
+    var hp3 = parse_exc_headers("garbage;NoColon;=: x;Good: v")
+    check(len(hp3) == 0, "exc headers skips bad entries (无 = / 空 tag / 无 ':')")
+
+    # ---------- 决策-74: resolve_exception_response 自定义头 ----------
+    var h10 = Handler(0, "t10")
+    h10.set_data("_exc_handlers", "Teapot:418:{\"detail\":\"brewing\"}:json")
+    h10.set_data("_exc_headers", "Teapot=X-Reason: tea|WWW-Authenticate: Teapot")
+    var r10 = resolve_exception_response("Teapot: brewing", h10)
+    check(r10.is_exc and r10.status_line == "418 I'm a Teapot"
+          and r10.body == "{\"detail\":\"brewing\"}"
+          and r10.extra == "X-Reason: tea\r\nWWW-Authenticate: Teapot",
+          "resolve route _exc_headers exact tag")
+
+    var h11 = Handler(0, "t11")
+    h11.set_data("_exc_handlers", "Exception:503:down {exc}")
+    h11.set_data("_exc_headers", "Exception=X-Catch: all")
+    var r11 = resolve_exception_response("Mystery: x", h11)
+    check(r11.extra == "X-Catch: all", "resolve _exc_headers catch-all")
+
+    if std.os.getenv("FASTAPI_MOJO_EXCEPTION_HEADERS") == "":
+        var h12 = Handler(0, "t12")
+        h12.set_data("_exc_handlers", "T:418:plain")
+        var r12 = resolve_exception_response("T: x", h12)
+        check(r12.extra == "", "resolve no _exc_headers -> empty extra (env unset)")
 
     print("exception_handlers self-test: all checks passed")

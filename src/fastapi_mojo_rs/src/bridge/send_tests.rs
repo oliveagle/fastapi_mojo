@@ -224,6 +224,36 @@ fn send_text_response_status_default_500_parity() {
 }
 
 #[test]
+fn send_text_response_status_extra_sends_custom_headers() {
+    // 决策-74 (ADR-0049): 异常 handler 自定义头
+    // (上游 PlainTextResponse(status_code, headers) parity; HTTPException(headers)).
+    let mut cp = ConnPair::new();
+    let extra = "X-Reason: tea\r\nWWW-Authenticate: Teapot";
+    assert_eq!(
+        send_text_response_status_extra(cp.b, "418 I'm a Teapot", b"brewing", extra),
+        0
+    );
+    let resp = recv_all(&mut cp);
+    let head = String::from_utf8_lossy(&resp[..find_blank_line(&resp)]);
+    assert!(head.starts_with("HTTP/1.1 418 I'm a Teapot\r\n"), "{head:?}");
+    assert!(head.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+    assert!(head.contains("X-Reason: tea\r\n"), "extra hdr 1: {head:?}");
+    assert!(head.contains("WWW-Authenticate: Teapot\r\n"), "extra hdr 2: {head:?}");
+    assert_eq!(body_after_headers(&resp), b"brewing");
+}
+
+#[test]
+fn send_text_response_status_extra_empty_is_plain() {
+    // extra 为空 -> 与 send_text_response_status 等价 (无多余头).
+    let mut cp = ConnPair::new();
+    assert_eq!(send_text_response_status_extra(cp.b, "500 Internal Server Error", b"boom", ""), 0);
+    let resp = recv_all(&mut cp);
+    let head = String::from_utf8_lossy(&resp[..find_blank_line(&resp)]);
+    assert!(head.starts_with("HTTP/1.1 500 Internal Server Error\r\n"), "{head:?}");
+    assert_eq!(body_after_headers(&resp), b"boom");
+}
+
+#[test]
 fn send_preflight_response_exact_bytes() {
     // 决策-73 (ADR-0048): 返回值 = HTTP 状态码 (裸 OPTIONS → 204)。
     super::request::reset_request_fields();

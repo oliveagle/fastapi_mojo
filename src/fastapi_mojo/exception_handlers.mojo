@@ -39,6 +39,9 @@ struct GuardResult:
     var resp_data: Dict[String, String]
     var body: String
     var is_json: Bool
+    # 决策-74 (ADR-0049): 异常响应自定义头 (\r\n 分隔 "Name: value" 行; 空 = 无).
+    # 声明式 _exc_headers / FASTAPI_MOJO_EXCEPTION_HEADERS.
+    var extra: String
 
     def __init__(out self):
         self.is_exc = False
@@ -46,6 +49,7 @@ struct GuardResult:
         self.resp_data = Dict[String, String]()
         self.body = ""
         self.is_json = False
+        self.extra = ""
 
 
 def _split_exc_msg(msg: String) -> Tuple[String, String]:
@@ -176,6 +180,74 @@ def load_exc_table(handler: Handler) raises -> Dict[String, String]:
     return parse_exc_table(raw)
 
 
+def _has_colon(s: String) -> Bool:
+    """头行须含 ':' (Name: Value)."""
+    var n = s.byte_length()
+    for i in range(n):
+        if ord(s[byte=i]) == 58:
+            return True
+    return False
+
+
+def parse_exc_headers(spec: String) -> Dict[String, String]:
+    """决策-74 (ADR-0049): ';' 分隔 `TAG=H1|H2` 条目 -> tag -> "\r\n" 分隔头行.
+
+    H1/H2 = "Name: Value" ('|' 分隔多头); 非法条目 (无 '=' / 空 tag / 头无 ':')
+    静默跳过 (与 parse_exc_table 同款容错). 头值内含 '|' / ';' 不支持 (文档化).
+    """
+    var out = Dict[String, String]()
+    var n = spec.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(spec[byte=i]) == 59)  # ';'
+        if is_sep:
+            if i > start:
+                var es = String(spec[byte=start:i])
+                var eq = -1
+                var m = es.byte_length()
+                var k = 0
+                while k < m:
+                    if ord(es[byte=k]) == 61:  # '='
+                        eq = k
+                        break
+                    k += 1
+                if eq > 0:
+                    var tag = String(es[byte=0:eq])
+                    var hlist = ""
+                    if m > eq + 1:
+                        hlist = String(es[byte=eq + 1:m])
+                    var hb = ""
+                    var hn = hlist.byte_length()
+                    var hs = 0
+                    var j = 0
+                    while j <= hn:
+                        var hsep = (j == hn) or (ord(hlist[byte=j]) == 124)  # '|'
+                        if hsep:
+                            if j > hs:
+                                var one = String(hlist[byte=hs:j])
+                                if _has_colon(one):
+                                    if hb.byte_length() > 0:
+                                        hb += "\r\n"
+                                    hb += one
+                            hs = j + 1
+                        j += 1
+                    if hb.byte_length() > 0:
+                        out[tag] = hb
+            start = i + 1
+        i += 1
+    return out^
+
+
+def load_exc_headers(handler: Handler) raises -> Dict[String, String]:
+    """路由级 `_exc_headers` 存在时整体替换全局 env FASTAPI_MOJO_EXCEPTION_HEADERS
+    (与 load_exc_table 同款: 路由级 = 超集, §3.5-7)."""
+    var raw = getenv("FASTAPI_MOJO_EXCEPTION_HEADERS")
+    if "_exc_headers" in handler.data:
+        raw = handler.data["_exc_headers"]
+    return parse_exc_headers(raw)
+
+
 def _substitute(tpl: String, tag: String, msg: String) -> String:
     """替换全部 "{exc}" / "{tag}" (Mojo 1.0.0 无 format 内建, 手动扫描)."""
     var out = ""
@@ -219,11 +291,14 @@ def resolve_exception_response(msg: String, handler: Handler) raises -> GuardRes
     var has_catchall = "Exception" in table
     var raw = ""
     var is_specific = True
+    var hkey = ""
     if has_exact:
         raw = table[tag]
+        hkey = tag
     elif has_catchall:
         raw = table["Exception"]
         is_specific = False
+        hkey = "Exception"
     if raw != "":
         var (st, tpl, isj) = _entry_fields(raw)
         var vt = tag
@@ -234,6 +309,10 @@ def resolve_exception_response(msg: String, handler: Handler) raises -> GuardRes
         out.body = _substitute(tpl, vt, vm)
         out.status_line = standard_status_line(st)
         out.is_json = isj
+        # 决策-74 (ADR-0049): 命中 tag (或 catch-all) 的声明式自定义头.
+        var htab = load_exc_headers(handler)
+        if hkey in htab:
+            out.extra = htab[hkey]
         _log_exc(tag, out.status_line, msg, is_specific)
     else:
         # 未处理: 上游 ServerErrorMiddleware 默认 = 500 PlainText (P13-10)

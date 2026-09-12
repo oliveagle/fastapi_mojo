@@ -202,6 +202,13 @@ pub fn send_text_response_status(fd: c_int, status: &str, body: &[u8]) -> c_long
     send_response(fd, status, "text/plain; charset=utf-8", body, true, None) as c_long
 }
 
+/// 决策-74 (ADR-0049): 纯文本响应 + 自定义 status + extra 头行
+/// (上游 `PlainTextResponse(status_code, headers)` parity; 异常 handler 自定义头).
+pub fn send_text_response_status_extra(fd: c_int, status: &str, body: &[u8], extra: &str) -> c_long {
+    let ex = if extra.is_empty() { None } else { Some(extra) };
+    send_response(fd, status, "text/plain; charset=utf-8", body, true, ex) as c_long
+}
+
 /// F5: SSE 响应 (Content-Type: text/event-stream; charset=utf-8).
 /// 调用方传入完整 SSE body (已按 SSE spec 格式化的多事件串), send_response 一次性发送.
 /// 不维护长连接 (避免占 worker; 一次性推送后关 fd).

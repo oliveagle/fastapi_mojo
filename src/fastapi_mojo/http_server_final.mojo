@@ -1141,6 +1141,18 @@ def register_routes(mut router: Router) raises:
     exc_dup_h.set_data("_exception_raise", "Dup: d")
     router.add_route("/exc/dup", "GET", exc_dup_h)
 
+    # 决策-74 (ADR-0049): HTTPException(status_code, detail, headers) parity —
+    # 声明式自定义响应头 (_exc_headers = "TAG=Name: V|Name2: V2;..."; 精确 tag
+    # 命中, 否则 Exception catch-all). 上游 probe: 418 + {"detail":"brewing"} +
+    # X-Reason/WWW-Authenticate.
+    var exc_hdr_h = Handler(KIND_STATIC(), "exc_headers")
+    exc_hdr_h.set_data("message", "custom exception headers demo")
+    exc_hdr_h.set_data("_exception_raise", "Teapot: brewing")
+    exc_hdr_h.set_data("_exc_handlers", "Teapot:418:{\"detail\":\"brewing\"}:json")
+    exc_hdr_h.set_data("_exc_headers",
+        "Teapot=X-Reason: tea|WWW-Authenticate: Teapot")
+    router.add_route("/exc/headers", "GET", exc_hdr_h)
+
     # 决策-50 (ADR-0025): Request.state demo (Goal-0003 矩阵 #22).
     # _state_set 声明写 (值 {param} 插值) -> _reads_state 声明读 -> state_<name>.
     # KIND_ECHO: run_handler 的 path_params 实参 = req_params, 故 state_<name>
@@ -1724,7 +1736,20 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                                                body_params, info)
                                 if gres.is_exc:
                                     # 异常 handler 响应 (绕过 response_model, 原样发送)
-                                    if gres.is_json:
+                                    # 决策-74 (ADR-0049): 声明式自定义头 (_exc_headers /
+                                    # FASTAPI_MOJO_EXCEPTION_HEADERS) → *_extra 入口.
+                                    if gres.extra.byte_length() > 0:
+                                        if gres.is_json:
+                                            _ = external_call["send_simple_response_extra", Int](
+                                                cfd, gres.status_line.as_c_string_slice(),
+                                                gres.body.as_c_string_slice(),
+                                                gres.extra.as_c_string_slice())
+                                        else:
+                                            _ = external_call["send_text_response_status_extra", Int](
+                                                cfd, gres.status_line.as_c_string_slice(),
+                                                gres.body.as_c_string_slice(),
+                                                gres.extra.as_c_string_slice())
+                                    elif gres.is_json:
                                         _ = external_call["send_simple_response", Int](
                                             cfd, gres.status_line.as_c_string_slice(),
                                             gres.body.as_c_string_slice())

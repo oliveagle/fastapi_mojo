@@ -2054,6 +2054,9 @@ else fail "FR-32 /file ×10 稳定" "不稳定 (见上面各行)"; fi
 # XH-7..13: 副 server (env 表) — 精确 tag / Exception catch-all /
 #   json 条目 / 路由级 _exc_handlers 覆盖 / 同 tag 后者胜 / 无 tag 消息
 #   落 catch-all / 正常路由不受表影响.
+# XH-14..17 (决策-74, ADR-0049): HTTPException(..., headers) parity —
+#   路由级 _exc_headers / env FASTAPI_MOJO_EXCEPTION_HEADERS / catch-all 头 /
+#   路由级覆盖 env.
 # =====================================================================
 echo "== exception handlers (XH, 决策-49) =="
 
@@ -2087,12 +2090,27 @@ else
     fail "XH-6 /errors/99 404" "code=$(http_code "$BASE/errors/99")"
 fi
 
+# XH-14: HTTPException(..., headers) parity — 路由级 _exc_headers (决策-74, ADR-0049)
+curl -s --max-time 5 -D "$TMP/xh_hdr" -o "$TMP/xh_body" "$BASE/exc/headers" >/dev/null 2>&1
+tr -d '\r' < "$TMP/xh_hdr" > "$TMP/xh_hdr_c"
+xh_code=$(head -1 "$TMP/xh_hdr_c" | awk '{print $2}')
+if [[ "$xh_code" == "418" ]] \
+    && [[ "$(cat "$TMP/xh_body")" == '{"detail":"brewing"}' ]] \
+    && grep -Eiq '^content-type: *application/json$' "$TMP/xh_hdr_c" \
+    && grep -Eiq '^x-reason: *tea$' "$TMP/xh_hdr_c" \
+    && grep -Eiq '^www-authenticate: *Teapot$' "$TMP/xh_hdr_c"; then
+    pass "XH-14 /exc/headers -> 418 json + X-Reason/WWW-Authenticate (route _exc_headers)"
+else
+    fail "XH-14 /exc/headers custom headers" "code=$xh_code body=$(cat "$TMP/xh_body") hdr=$(cat "$TMP/xh_hdr_c")"
+fi
+
 # --- 副 server: env 表 ---
 EXC_PORT=$((PORT + 110))
 EXC_LOG="$TMP/exc_server.log"
 ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
     FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
     FASTAPI_MOJO_EXCEPTION_HANDLERS='ValueError:418:oops {exc};UnicornException:418:rainbow {exc};Exception:503:server down {exc};JsonExc:422:{"detail":"bad {exc}"}:json;Dup:400:first;Dup:404:second {exc}' \
+    FASTAPI_MOJO_EXCEPTION_HEADERS='ValueError=X-Env: yes;Exception=X-Catch: all;Teapot=X-Env: should-not-win' \
     "$BIN" --port "$EXC_PORT" \
     > "$EXC_LOG" 2>&1 ) &
 EXC_PID=$!
@@ -2164,6 +2182,31 @@ if [[ "$EXC_READY" == 1 ]]; then
         pass "XH-13b /health 200 (有表但正常路由不受影响)"
     else
         fail "XH-13b /health 200 (exc server)" "code=$(http_code "$EB/health")"
+    fi
+    # XH-15: env FASTAPI_MOJO_EXCEPTION_HEADERS -> 精确 tag 自定义头 (决策-74)
+    curl -s --max-time 5 -D "$TMP/xh_hdr" -o "$TMP/xh_body" "$EB/exc/ve" >/dev/null 2>&1
+    tr -d '\r' < "$TMP/xh_hdr" > "$TMP/xh_hdr_c"
+    if [[ "$(head -1 "$TMP/xh_hdr_c" | awk '{print $2}')" == "418" ]] \
+        && grep -Eiq '^x-env: *yes$' "$TMP/xh_hdr_c"; then
+        pass "XH-15 env exception headers -> ValueError X-Env"
+    else
+        fail "XH-15 env exception headers" "hdr=$(cat "$TMP/xh_hdr_c")"
+    fi
+    # XH-16: Exception catch-all 头
+    curl -s --max-time 5 -D "$TMP/xh_hdr" -o /dev/null "$EB/exc/unhandled" >/dev/null 2>&1
+    tr -d '\r' < "$TMP/xh_hdr" > "$TMP/xh_hdr_c"
+    if grep -Eiq '^x-catch: *all$' "$TMP/xh_hdr_c"; then
+        pass "XH-16 catch-all (Exception) headers -> X-Catch"
+    else
+        fail "XH-16 catch-all headers" "hdr=$(cat "$TMP/xh_hdr_c")"
+    fi
+    # XH-17: 路由级 _exc_headers 覆盖 env (route wins)
+    curl -s --max-time 5 -D "$TMP/xh_hdr" -o /dev/null "$EB/exc/headers" >/dev/null 2>&1
+    tr -d '\r' < "$TMP/xh_hdr" > "$TMP/xh_hdr_c"
+    if grep -Eiq '^x-reason: *tea$' "$TMP/xh_hdr_c" && ! grep -Eiq '^x-env:' "$TMP/xh_hdr_c"; then
+        pass "XH-17 route _exc_headers overrides env"
+    else
+        fail "XH-17 route overrides env" "hdr=$(cat "$TMP/xh_hdr_c")"
     fi
 else
     fail "XH-7..13 exception table server" "second server did not start; log: $(tail -3 "$EXC_LOG")"
