@@ -228,10 +228,15 @@ def _generate_operation(route: Route) raises -> String:
         started = True
 
     # 决策-38: requestBody (from _body_schema declaration) -> $ref components/schemas/<name>
+    # 决策-86 (ADR-0061): _body_embed -> 引用包裹模型 Body_<name>_<method>
+    # (上游 Body(embed=True) 生成单字段包裹模型; house 命名 = form 的 Body_<name>_<method>).
     if "_body_schema" in h.data and h.data["_body_schema"] != "":
+        var ref_name = h.name
+        if "_body_embed" in h.data and h.data["_body_embed"] != "":
+            ref_name = "Body_" + h.name + "_" + lower_ascii(route.method)
         if started:
             sb.append(",")
-        sb.append("\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" + json_escape(h.name) + "\"}}}}")
+        sb.append("\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" + json_escape(ref_name) + "\"}}}}")
         started = True
 
     # 决策-45/46: requestBody — multipart 路由 (文件字段, 或
@@ -383,6 +388,22 @@ def generate_openapi(router: Router, title: String, version: String, description
                 s_names.append(nm)
                 var sch = _openapi_object_schema(router.routes[i].handler.data["_body_schema"])
                 schemas.append("\"" + json_escape(nm) + "\":" + sch)
+                # 决策-86 (ADR-0061): _body_embed -> 单字段包裹 schema
+                # (Body_<name>_<method> = {<embed>: $ref <name>}, 上游 embed 结构).
+                var emb = ""
+                if "_body_embed" in router.routes[i].handler.data:
+                    emb = router.routes[i].handler.data["_body_embed"]
+                if emb != "":
+                    var wname = "Body_" + nm + "_" + lower_ascii(router.routes[i].method)
+                    var wdup = False
+                    for x in s_names:
+                        if x == wname:
+                            wdup = True
+                            break
+                    if not wdup:
+                        s_names.append(wname)
+                        var wsch = "{\"properties\":{\"" + json_escape(emb) + "\":{\"$ref\":\"#/components/schemas/" + json_escape(nm) + "\"}},\"type\":\"object\",\"required\":[\"" + json_escape(emb) + "\"],\"title\":\"" + json_escape(wname) + "\"}"
+                        schemas.append("\"" + json_escape(wname) + "\":" + wsch)
     # 决策-45/46: body schemas — multipart (文件字段 /
     # _multipart+form) 与 urlencoded form (与 _body_schema 互斥)
     var f_names = List[String]()

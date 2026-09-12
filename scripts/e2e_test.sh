@@ -954,6 +954,102 @@ if [[ "$CT17" == *'"input":"NaN"'* ]] && "$FMTOOL" jsoncheck "$TMP/ct17.json" >/
 else fail "CT-17 NaN body detail valid JSON" "$(head -c 200 "$TMP/ct17.json")"; fi
 
 
+# 决策-86 (ADR-0061): Body(embed=True) — 单 body 模型包裹在 <embed_key> 下.
+# 上游语义: 顶层非 object (/null/数组/数字/非 JSON CT 原始串/无 body) 或键缺失/nil
+# -> missing ["body",<key>] input null; 键值非 dict -> model_attributes_type
+# ["body",<key>] (input 内层原值); 键值 dict -> 内层模型校验 (loc 前缀 ["body",<key>]).
+echo "== Body(embed=True) embedded body (EB) =="
+EB_JSON='{"item":{"name":"a","price":1.5}}'
+
+EB1=$(ct_post 'application/json' "$BASE/validate/embed" "$EB_JSON")
+if [[ "$EB1" == *'"body_name": "a"'* && "$EB1" == *'"body_price": "1.5"'* ]]; then
+    pass "EB-1 embed valid inner obj -> 200 + body_<field>"
+else fail "EB-1 embed valid" "got ${EB1:0:220}"; fi
+
+EB2=$(ct_post 'application/json' "$BASE/validate/embed" '{"name":"a","price":1.5}')
+if [[ "$EB2" == *'"type":"missing"'* && "$EB2" == *'"loc":["body","item"]'* && "$EB2" == *'"input":null'* ]]; then
+    pass "EB-2 embed key absent -> missing [body,item] input null"
+else fail "EB-2 embed key absent" "got ${EB2:0:220}"; fi
+
+EB3=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":null}')
+if [[ "$EB3" == *'"type":"missing"'* && "$EB3" == *'"loc":["body","item"]'* ]]; then
+    pass "EB-3 embed item null -> missing [body,item]"
+else fail "EB-3 embed item null" "got ${EB3:0:220}"; fi
+
+EB4=$(ct_post 'application/json' "$BASE/validate/embed" '{}')
+if [[ "$EB4" == *'"type":"missing"'* && "$EB4" == *'"loc":["body","item"]'* ]]; then
+    pass "EB-4 embed empty obj -> missing [body,item]"
+else fail "EB-4 embed empty obj" "got ${EB4:0:220}"; fi
+
+EB5=$(ct_post 'application/json' "$BASE/validate/embed" '5')
+if [[ "$EB5" == *'"type":"missing"'* && "$EB5" == *'"loc":["body","item"]'* && "$EB5" != *'model_attributes_type'* ]]; then
+    pass "EB-5 embed top-level number -> missing [body,item] (not model_attributes_type)"
+else fail "EB-5 embed top-level number" "got ${EB5:0:220}"; fi
+
+EB6=$(ct_post 'application/json' "$BASE/validate/embed" '[1]')
+if [[ "$EB6" == *'"type":"missing"'* && "$EB6" == *'"loc":["body","item"]'* ]]; then
+    pass "EB-6 embed top-level array -> missing [body,item]"
+else fail "EB-6 embed top-level array" "got ${EB6:0:220}"; fi
+
+EB7=$(ct_post 'application/json' "$BASE/validate/embed" 'null')
+if [[ "$EB7" == *'"type":"missing"'* && "$EB7" == *'"loc":["body","item"]'* ]]; then
+    pass "EB-7 embed top-level null -> missing [body,item]"
+else fail "EB-7 embed top-level null" "got ${EB7:0:220}"; fi
+
+EB8=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":"str"}')
+if [[ "$EB8" == *'"type":"model_attributes_type"'* && "$EB8" == *'"loc":["body","item"]'* && "$EB8" == *'"input":"str"'* ]]; then
+    pass "EB-8 embed item string -> model_attributes_type input \"str\""
+else fail "EB-8 embed item string" "got ${EB8:0:220}"; fi
+
+EB9=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":7}')
+if [[ "$EB9" == *'"type":"model_attributes_type"'* && "$EB9" == *'"input":7'* ]]; then
+    pass "EB-9 embed item number -> model_attributes_type input 7"
+else fail "EB-9 embed item number" "got ${EB9:0:220}"; fi
+
+EB10=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":[1]}')
+if [[ "$EB10" == *'"type":"model_attributes_type"'* && "$EB10" == *'"input":[1]'* ]]; then
+    pass "EB-10 embed item array -> model_attributes_type input [1]"
+else fail "EB-10 embed item array" "got ${EB10:0:220}"; fi
+
+EB11=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":true}')
+if [[ "$EB11" == *'"type":"model_attributes_type"'* && "$EB11" == *'"input":true'* ]]; then
+    pass "EB-11 embed item bool -> model_attributes_type input true"
+else fail "EB-11 embed item bool" "got ${EB11:0:220}"; fi
+
+EB12=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":{}}')
+if [[ "$EB12" == *'"loc":["body","item","name"]'* && "$EB12" == *'"loc":["body","item","price"]'* && "$EB12" == *'"input":{}'* ]]; then
+    pass "EB-12 embed item empty obj -> nested missing locs name+price"
+else fail "EB-12 embed item empty obj" "got ${EB12:0:240}"; fi
+
+EB13=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":{"name":"a"}}')
+if [[ "$EB13" == *'"type":"missing"'* && "$EB13" == *'"loc":["body","item","price"]'* && "$EB13" == *'"input":{"name":"a"}'* ]]; then
+    pass "EB-13 embed inner missing price -> loc/input inner object"
+else fail "EB-13 embed inner missing price" "got ${EB13:0:240}"; fi
+
+EB14=$(ct_post 'application/json' "$BASE/validate/embed" '{bad')
+if [[ "$EB14" == *'"type":"json_invalid"'* && "$EB14" == *'"loc":["body",1]'* ]]; then
+    pass "EB-14 embed invalid JSON -> json_invalid pos"
+else fail "EB-14 embed invalid JSON" "got ${EB14:0:220}"; fi
+
+EB15=$(ct_post 'text/plain' "$BASE/validate/embed" "$EB_JSON")
+if [[ "$EB15" == *'"type":"missing"'* && "$EB15" == *'"loc":["body","item"]'* ]]; then
+    pass "EB-15 embed non-JSON CT -> missing [body,item] (raw string)"
+else fail "EB-15 embed non-JSON CT" "got ${EB15:0:220}"; fi
+
+EB16=$(ct_post 'application/json' "$BASE/validate/embed" '{"item":{"name":"a","price":1},"x":9}')
+if [[ "$EB16" == *'"body_name": "a"'* ]]; then
+    pass "EB-16 embed extra keys ignored -> 200"
+else fail "EB-16 embed extra keys" "got ${EB16:0:220}"; fi
+
+EB_OA=$(curl -sS -m 5 "$BASE/openapi.json")
+if [[ "$EB_OA" == *'"$ref":"#/components/schemas/Body_validate_embed_post"'* ]]; then
+    pass "EB-17 openapi embed requestBody -> wrapper \$ref Body_validate_embed_post"
+else fail "EB-17 openapi embed requestBody" "missing wrapper ref"; fi
+if [[ "$EB_OA" == *'"Body_validate_embed_post":{"properties":{"item":{"$ref":"#/components/schemas/validate_embed"}}'* ]]; then
+    pass "EB-18 openapi embed wrapper schema {item: \$ref validate_embed}"
+else fail "EB-18 openapi embed wrapper schema" "missing wrapper schema"; fi
+
+
 # --- HEAD / OPTIONS ----------------------------------------------------------
 
 echo "== HEAD / OPTIONS =="

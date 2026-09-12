@@ -275,6 +275,69 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
                                floc + "]", errs)
 
 
+def _validate_body_embed(handler: Handler, embed_key: String, body_params: ParsedParams,
+                         body_str: String, content_type: String,
+                         mut out: Dict[String, String], mut errs: List[String]) raises -> Bool:
+    """决策-86 (ADR-0061): Body(embed=True) 语义 — 单 body 模型包裹在 <embed_key> 下.
+
+    上游 (fastapi 0.141.1) `Body(embed=True)` 把单一 body 参数包成单字段模型
+    `{<param>: Model}`; 运行期 `received_body.get(<param>)` 语义:
+    顶层非 dict (无 body / 非 JSON CT 的原始字符串 / JSON null / 数组 / 数字 / bool)
+    -> `.get` 不存在或键缺失 -> `missing ["body", <param>]` (input null);
+    键值为 dict -> 内层模型校验 (loc 前缀 `["body", <param>]`);
+    键值非 dict (str / number / bool / array) -> `model_attributes_type ["body", <param>]`
+    (input = 内层原值). 非法 JSON 仍 `json_invalid` (`["body", pos]` + ctx, 与未嵌入同).
+    校验值注入键与非嵌入一致 (`body_<field>`, 本层 prefix 空)."""
+    var key_json = "\"" + json_escape(embed_key) + "\""
+    var miss_loc = "[\"body\"," + key_json + "]"
+    var loc_base = "[\"body\"," + key_json
+    var miss = err_obj(miss_loc, "Field required", "missing", "null")
+    var has_body = body_str.byte_length() > 0 or body_params.has_error \
+        or body_params.param_count > 0
+    if not has_body:
+        errs.append(miss)
+        return False
+    if not content_type_is_json(content_type):
+        # 非 JSON CT: body = 原始字符串 -> 原始串无 `.get` -> missing (上游实测).
+        errs.append(miss)
+        return False
+    var scan = validate_body_json(body_str)
+    if not scan.ok:
+        errs.append(err_obj_ctx("[\"body\"," + String(scan.err_pos) + "]",
+                                "JSON decode error", "json_invalid", "{}",
+                                "{\"error\":\"" + json_escape(scan.err_msg) + "\"}"))
+        return False
+    if scan.top_kind != "object":
+        # JSON null / 数组 / 字符串 / 数字 / bool 顶层 -> `.get` 不存在 -> missing.
+        errs.append(miss)
+        return False
+    if embed_key not in body_params.values:
+        errs.append(miss)
+        return False
+    var raw = body_params.values[embed_key]
+    var t = "string"
+    if embed_key in body_params.types:
+        t = body_params.types[embed_key]
+    if t == "null":
+        # JSON null (type 标记), 非字符串字面 "null" -> `.get` 得 None -> missing.
+        errs.append(miss)
+        return False
+    if t != "object":
+        errs.append(err_obj(miss_loc,
+                            "Input should be a valid dictionary or object to extract fields from",
+                            "model_attributes_type", _json_input_frag_typed(t, raw)))
+        return False
+    var inner = parse_body_json(raw)
+    if inner.has_error:
+        errs.append(err_obj(miss_loc,
+                            "Input should be a valid dictionary or object to extract fields from",
+                            "model_attributes_type", _json_input_frag(raw)))
+        return False
+    var fields = parse_body_schema(handler.data["_body_schema"])
+    _validate_fields(fields, inner, "", loc_base, raw, out, errs)
+    return len(errs) == 0
+
+
 def validate_body_schema(handler: Handler, method: String,
                          body_params: ParsedParams, body_str: String,
                          content_type: String = "application/json") raises -> Tuple[Bool, List[String], Dict[String, String]]:
@@ -288,12 +351,20 @@ def validate_body_schema(handler: Handler, method: String,
     默认 —— 仅 JSON CT (`content_type_is_json`) 才解析 JSON body, 否则 body 视为
     原始字符串 -> `model_attributes_type`; 无 body -> `missing`; JSON `null` ->
     `missing`; JSON 非 object -> `model_attributes_type`; 非法 JSON ->
-    `json_invalid` (loc `["body", pos]` + `ctx.error`, input `{}`)."""
+    `json_invalid` (loc `["body", pos]` + `ctx.error`, input `{}`).
+
+    决策-86 (ADR-0061): `_body_embed` 声明 -> `Body(embed=True)` 语义 (单模型包裹在
+    `<embed_key>` 下; 内层字段 loc `["body", <embed_key>, ...]`)."""
     var ok_vals = Dict[String, String]()
     if "_body_schema" not in handler.data:
         return (True, List[String](), ok_vals^)
     if method != "POST" and method != "PUT" and method != "PATCH":
         return (True, List[String](), ok_vals^)
+    if "_body_embed" in handler.data and handler.data["_body_embed"] != "":
+        var embed_errs = List[String]()
+        var embed_ok = _validate_body_embed(handler, handler.data["_body_embed"], body_params,
+                                            body_str, content_type, ok_vals, embed_errs)
+        return (embed_ok, embed_errs^, ok_vals^)
     var errs = List[String]()
     # 无 wire body 判定: dispatch 传 body_str="" + 空 ParsedParams(); 单元测试可能只传
     # body_params (body_str="") -> 以 param_count/has_error 补偿识别"确实有 body".

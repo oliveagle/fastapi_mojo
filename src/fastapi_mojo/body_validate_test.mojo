@@ -290,4 +290,61 @@ def main() raises:
                                     '{"x":1}trailing')
     check(not ct10[0] and _has(ct10[1][0], '["body",7]')
           and _has(ct10[1][0], '"error":"Extra data"'), "json_invalid Extra data pos")
+    # 决策-86 (ADR-0061): Body(embed=True) — 单 body 模型包裹在 <embed_key> 下.
+    var mbd = Handler(0, "embed")
+    mbd.set_data("_body_schema", "name:str;price:float")
+    mbd.set_data("_body_embed", "item")
+    var mbd1 = validate_body_schema(mbd, "POST",
+                                   parse_body_json('{"item":{"name":"a","price":1.5}}'),
+                                   '{"item":{"name":"a","price":1.5}}')
+    check(mbd1[0] and mbd1[2]["name"] == "a" and mbd1[2]["price"] == "1.5",
+          "embed ok: inner obj -> fields injected")
+    var mbd2 = validate_body_schema(mbd, "POST",
+                                   parse_body_json('{"name":"a","price":1.5}'),
+                                   '{"name":"a","price":1.5}')
+    check(not mbd2[0] and _has(mbd2[1][0], '"type":"missing"')
+          and _has(mbd2[1][0], '["body","item"]') and _has(mbd2[1][0], '"input":null'),
+          "embed key absent -> missing [body,item] input null")
+    var mbd3 = validate_body_schema(mbd, "POST", parse_body_json('{"item":null}'), '{"item":null}')
+    check(not mbd3[0] and _has(mbd3[1][0], '"type":"missing"')
+          and _has(mbd3[1][0], '["body","item"]'), "embed item null -> missing")
+    var mbd4 = validate_body_schema(mbd, "POST", parse_body_json('5'), '5')
+    check(not mbd4[0] and _has(mbd4[1][0], '"type":"missing"')
+          and _has(mbd4[1][0], '["body","item"]'), "embed top-level number -> missing")
+    var mbd5 = validate_body_schema(mbd, "POST", parse_body_json('[1]'), '[1]')
+    check(not mbd5[0] and _has(mbd5[1][0], '"type":"missing"'), "embed top-level array -> missing")
+    var mbd6 = validate_body_schema(mbd, "POST", parse_body_json('null'), 'null')
+    check(not mbd6[0] and _has(mbd6[1][0], '"type":"missing"'), "embed top-level null -> missing")
+    var mbd7 = validate_body_schema(mbd, "POST", parse_body_json('{"item":"str"}'), '{"item":"str"}')
+    check(not mbd7[0] and _has(mbd7[1][0], '"type":"model_attributes_type"')
+          and _has(mbd7[1][0], '["body","item"]') and _has(mbd7[1][0], '"input":"str"'),
+          "embed item string -> model_attributes_type input \"str\"")
+    var mbd8 = validate_body_schema(mbd, "POST", parse_body_json('{"item":7}'), '{"item":7}')
+    check(not mbd8[0] and _has(mbd8[1][0], '"type":"model_attributes_type"')
+          and _has(mbd8[1][0], '"input":7'), "embed item number -> model_attributes_type input 7")
+    # 字符串字面 "null" 不等于 JSON null (parse_body_json unescape -> type "string").
+    var mbdn = validate_body_schema(mbd, "POST", parse_body_json('{"item":"null"}'), '{"item":"null"}')
+    check(not mbdn[0] and _has(mbdn[1][0], '"type":"model_attributes_type"')
+          and _has(mbdn[1][0], '"input":"null"'), "embed item string \"null\" -> model_attributes_type")
+    var mbd9 = validate_body_schema(mbd, "POST", parse_body_json('{"item":{}}'), '{"item":{}}')
+    check(not mbd9[0] and len(mbd9[1]) == 2
+          and _has(mbd9[1][0], '["body","item","name"]')
+          and _has(mbd9[1][1], '["body","item","price"]') and _has(mbd9[1][0], '"input":{}'),
+          "embed item empty obj -> nested missing locs")
+    var mbd10 = validate_body_schema(mbd, "POST", parse_body_json('{"item":{"name":"a"}}'),
+                                    '{"item":{"name":"a"}}')
+    check(not mbd10[0] and _has(mbd10[1][0], '["body","item","price"]')
+          and _has(mbd10[1][0], '"input":{"name":"a"}'),
+          "embed inner missing -> loc/input = inner object")
+    var mbd11 = validate_body_schema(mbd, "POST", parse_body_json('{bad'), '{bad')
+    check(not mbd11[0] and _has(mbd11[1][0], '"type":"json_invalid"')
+          and _has(mbd11[1][0], '["body",1]'), "embed invalid JSON -> json_invalid pos")
+    var mbd12 = validate_body_schema(mbd, "POST", parse_body_json('{"item":{"name":"a","price":1.5}}'),
+                                    '{"item":{"name":"a","price":1.5}}', "text/plain")
+    check(not mbd12[0] and _has(mbd12[1][0], '"type":"missing"')
+          and _has(mbd12[1][0], '["body","item"]'),
+          "embed non-JSON CT -> missing [body,item] (raw string)")
+    var mbd13 = validate_body_schema(mbd, "POST", ParsedParams(), "")
+    check(not mbd13[0] and _has(mbd13[1][0], '"type":"missing"')
+          and _has(mbd13[1][0], '["body","item"]'), "embed no body -> missing [body,item]")
     print("Mojo body_schema (决策-38) test completed!")

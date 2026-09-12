@@ -53,3 +53,10 @@ def register_body_schema_routes(mut router: Router) raises:
     detail_h.set_data("message", "detail parity demo")
     detail_h.set_data("_body_schema", "s:str|len=2-4;n:int|ge=10,mo=3;f:float|mo=0.5;xs:int[]|items=1-2,mo=2;mode:str[fast,slow]")
     router.add_route("/bs/detail", "POST", detail_h)
+
+    # Decision-86 (ADR-0061): Body(embed=True) — 单 body 模型包裹在 <embed_key> 下.
+    var embed_h = Handler(KIND_ECHO(), "validate_embed")
+    embed_h.set_data("message", "embed body demo")
+    embed_h.set_data("_body_schema", "name:str;price:float")
+    embed_h.set_data("_body_embed", "item")
+    router.add_route("/validate/embed", "POST", embed_h)
