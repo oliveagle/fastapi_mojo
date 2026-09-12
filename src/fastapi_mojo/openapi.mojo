@@ -432,13 +432,125 @@ def generate_openapi(router: Router, title: String, version: String, description
     return sb.take()
 
 def swagger_ui_html(title: String, openapi_url: String) -> String:
-    """返回 Swagger UI 嵌入式 HTML (引用 unpkg CDN). 离线场景用户可替换为本地 swagger-ui-dist."""
+    """返回 Swagger UI 嵌入式 HTML (引用 unpkg CDN). 离线场景用户可替换为本地 swagger-ui-dist.
+    决策-76: 配置含 upstream `oauth2RedirectUrl` (指向内置 /docs/oauth2-redirect)."""
     return (
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>" +
         "<title>" + title + " - Swagger UI</title>" +
         "<link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\"/>" +
         "</head><body><div id=\"swagger-ui\"></div>" +
         "<script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\" crossorigin></script>" +
-        "<script>window.onload=()=>SwaggerUIBundle({url:\"" + openapi_url + "\",dom_id:\"#swagger-ui\"});</script>" +
+        "<script>window.onload=()=>SwaggerUIBundle({url:\"" + openapi_url + "\",dom_id:\"#swagger-ui\",oauth2RedirectUrl:window.location.origin+\"/docs/oauth2-redirect\"});</script>" +
         "</body></html>"
     )
+
+
+def redoc_html(title: String, openapi_url: String) -> String:
+    """决策-76 (ADR-0051): ReDoc HTML (引用 jsdelivr CDN).
+
+    对齐上游 FastAPI `get_redoc_html` 默认形态: `<redoc spec-url=...>` + standalone
+    bundle; 标题 = `"<title> - ReDoc"` (与 /openapi.json 同源 title)."""
+    return (
+        "<!DOCTYPE html>"
+        "<html>"
+        "<head>"
+        "<title>" + title + " - ReDoc</title>"
+        "<meta charset=\"utf-8\"/>"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<link rel=\"shortcut icon\" href=\"https://fastapi.tiangolo.com/img/favicon.png\">"
+        "<style>body {margin:0;padding:0;}</style>"
+        "</head>"
+        "<body>"
+        "<noscript>ReDoc requires Javascript to function. Please enable it to browse the documentation.</noscript>"
+        "<redoc spec-url=\"" + openapi_url + "\"></redoc>"
+        "<script src=\"https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js\"> </script>"
+        "</body>"
+        "</html>"
+    )
+
+
+def swagger_ui_oauth2_redirect_html() -> String:
+    """决策-76 (ADR-0051): Swagger UI OAuth2 redirect HTML.
+
+    逐字对齐上游 FastAPI `get_swagger_ui_oauth2_redirect_html`
+    (`/docs/oauth2-redirect`, 无参数, 仅浏览器端 JS 回调)."""
+    return """<!doctype html>
+<html lang="en-US">
+<head>
+    <title>Swagger UI: OAuth2 Redirect</title>
+</head>
+<body>
+<script>
+    'use strict';
+    function run () {
+        var oauth2 = window.opener.swaggerUIRedirectOauth2;
+        var sentState = oauth2.state;
+        var redirectUrl = oauth2.redirectUrl;
+        var isValid, qp, arr;
+
+        if (/code|token|error/.test(window.location.hash)) {
+            qp = window.location.hash.substring(1).replace('?', '&');
+        } else {
+            qp = location.search.substring(1);
+        }
+
+        arr = qp.split("&");
+        arr.forEach(function (v,i,_arr) { _arr[i] = '"' + v.replace('=', '":"') + '"';});
+        qp = qp ? JSON.parse('{' + arr.join() + '}',
+                function (key, value) {
+                    return key === "" ? value : decodeURIComponent(value);
+                }
+        ) : {};
+
+        isValid = qp.state === sentState;
+
+        if ((
+          oauth2.auth.schema.get("flow") === "accessCode" ||
+          oauth2.auth.schema.get("flow") === "authorizationCode" ||
+          oauth2.auth.schema.get("flow") === "authorization_code"
+        ) && !oauth2.auth.code) {
+            if (!isValid) {
+                oauth2.errCb({
+                    authId: oauth2.auth.name,
+                    source: "auth",
+                    level: "warning",
+                    message: "Authorization may be unsafe, passed state was changed in server. The passed state wasn't returned from auth server."
+                });
+            }
+
+            if (qp.code) {
+                delete oauth2.state;
+                oauth2.auth.code = qp.code;
+                oauth2.callback({auth: oauth2.auth, redirectUrl: redirectUrl});
+            } else {
+                let oauthErrorMsg;
+                if (qp.error) {
+                    oauthErrorMsg = "["+qp.error+"]: " +
+                        (qp.error_description ? qp.error_description+ ". " : "no accessCode received from the server. ") +
+                        (qp.error_uri ? "More info: "+qp.error_uri : "");
+                }
+
+                oauth2.errCb({
+                    authId: oauth2.auth.name,
+                    source: "auth",
+                    level: "error",
+                    message: oauthErrorMsg || "[Authorization failed]: no accessCode received from the server."
+                });
+            }
+        } else {
+            oauth2.callback({auth: oauth2.auth, token: qp, isValid: isValid, redirectUrl: redirectUrl});
+        }
+        window.close();
+    }
+
+    if (document.readyState !== 'loading') {
+        run();
+    } else {
+        document.addEventListener('DOMContentLoaded', function () {
+            run();
+        });
+    }
+</script>
+</body>
+</html>
+"""

@@ -22,7 +22,7 @@ from file_params import (validate_file_collect,
                          MpParts)
 from dep_cache import DepCache, inject_dep_calls
 from file_ops_ffi import snapshot_mp_parts, apply_file_ops
-from openapi import generate_openapi, swagger_ui_html
+from openapi import generate_openapi, swagger_ui_html, redoc_html, swagger_ui_oauth2_redirect_html
 from openapi_custom import check_openapi_specs  # 决策-52 (ADR-0027)
 from header_params import parse_header_entry, check_header_specs  # 决策-53 (ADR-0028)
 from std.os import getenv  # 决策-52: app 级 OPENAPI env (请求期读, 空 = 默认)
@@ -1444,6 +1444,44 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                 )
                 var duration_ms_d = mw_timing(mw_chain, start_ms)
                 _finish_request(mw_chain, req_id, method, path, query, "200 OK (docs)", duration_ms_d)
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
+                continue
+
+            elif effective_method == "GET" and path == "/redoc":
+                # 决策-76 (ADR-0051): ReDoc 内置页 (上游 FastAPI 默认路由 /redoc).
+                # 标题与 /openapi.json//docs 同源 (env FASTAPI_MOJO_OPENAPI_TITLE).
+                var r_title = "fastapi_mojo API"
+                var r_t = getenv("FASTAPI_MOJO_OPENAPI_TITLE")
+                if r_t != "":
+                    r_title = r_t
+                var r_html = redoc_html(r_title, "/openapi.json")
+                _ = external_call["send_html_response", Int](
+                    cfd,
+                    "200 OK".as_c_string_slice(),
+                    r_html.as_c_string_slice(),
+                )
+                var duration_ms_rd = mw_timing(mw_chain, start_ms)
+                _finish_request(mw_chain, req_id, method, path, query, "200 OK (redoc)", duration_ms_rd)
+                if external_call["get_close_after_response", Int]() != 0:
+                    external_call["conn_done", NoneType](cfd, False)
+                else:
+                    external_call["conn_done", NoneType](cfd, True)
+                continue
+
+            elif effective_method == "GET" and path == "/docs/oauth2-redirect":
+                # 决策-76 (ADR-0051): Swagger UI OAuth2 redirect (上游默认路由;
+                # /docs 的 oauth2RedirectUrl 指向此路径).
+                var o2_html = swagger_ui_oauth2_redirect_html()
+                _ = external_call["send_html_response", Int](
+                    cfd,
+                    "200 OK".as_c_string_slice(),
+                    o2_html.as_c_string_slice(),
+                )
+                var duration_ms_o2 = mw_timing(mw_chain, start_ms)
+                _finish_request(mw_chain, req_id, method, path, query, "200 OK (oauth2-redirect)", duration_ms_o2)
                 if external_call["get_close_after_response", Int]() != 0:
                     external_call["conn_done", NoneType](cfd, False)
                 else:

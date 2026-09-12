@@ -9,7 +9,7 @@
 #   - F1 类型化参数: int/bool/422 + detail 字段 (Goal-0002)
 #   - F2 声明式异常映射: _error_map + 统一 detail 错误体 (Goal-0002)
 #   - F3 Request/Response + 嵌套 JSON (__nested__: 前缀直通, 修复 405 body hang)
-#   - F4 OpenAPI 3.0 (/openapi.json + /docs Swagger UI)
+#   - F4 OpenAPI 3.0 (/openapi.json + /docs Swagger UI + /redoc + /docs/oauth2-redirect, 决策-76)
 #   - F5 Streaming/SSE (KIND_SSE 一次性推送 + format_sse_event 行切分合规)
 #   - SSE ServerSentEvent 字段 event/id/retry/comment (决策-72, SF-1..SF-5)
 #   - F6 /metrics 端点 (Prometheus 文本, requests_total/active_conns/uptime)
@@ -419,6 +419,20 @@ expect_body_contains "openapi.json /calc typed int" '"type":"integer"' "$BASE/op
 # /docs: Swagger UI 引导页.
 expect_code "docs -> 200" "200" "$BASE/docs"
 expect_body_contains "docs contains SwaggerUIBundle" "SwaggerUIBundle" "$BASE/docs"
+
+# /redoc + /docs/oauth2-redirect (决策-76, ADR-0051): FastAPI 默认内置文档路由.
+expect_code "DOC-1a redoc -> 200" "200" "$BASE/redoc"
+DOC_CT=$(curl -s -o /dev/null -m 5 -w '%{content_type}' "$BASE/redoc")
+if [[ "$DOC_CT" == "text/html; charset=utf-8" ]] && curl -sS -m 5 "$BASE/redoc" | grep -q 'spec-url="/openapi.json"'; then
+    pass "DOC-1b redoc text/html + spec-url=/openapi.json"
+else fail "DOC-1b redoc html" "ct=$DOC_CT"; fi
+if [[ "$(http_code "$BASE/docs/oauth2-redirect")" == "200" ]] && curl -sS -m 5 "$BASE/docs/oauth2-redirect" | grep -q 'swaggerUIRedirectOauth2'; then
+    pass "DOC-2 oauth2-redirect 200 + swaggerUIRedirectOauth2"
+else fail "DOC-2 oauth2-redirect" "code=$(http_code "$BASE/docs/oauth2-redirect")"; fi
+if [[ "$(curl -s -o /dev/null -m 5 -I "$BASE/redoc" -w '%{http_code}')" == "200" ]]; then pass "DOC-3 HEAD /redoc -> 200"
+else fail "DOC-3 HEAD /redoc" "code=$(curl -s -o /dev/null -m 5 -I "$BASE/redoc" -w '%{http_code}')"; fi
+if curl -sS -m 5 "$BASE/docs" | grep -Eq 'oauth2RedirectUrl.*docs/oauth2-redirect'; then pass "DOC-4 /docs oauth2RedirectUrl -> /docs/oauth2-redirect"
+else fail "DOC-4 /docs oauth2RedirectUrl" "body: $(curl -sS -m 5 "$BASE/docs" | tr -d '\n' | grep -o 'oauth2RedirectUrl[^,]*')"; fi
 
 echo "== streaming / SSE (Goal-0002 F5) =="
 # /sse: 一次性推送 + text/event-stream content-type + SSE 行切分合规 (FastAPI 0.140.12 修复参考).
