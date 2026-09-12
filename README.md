@@ -11,6 +11,7 @@
 - ✅ HTTP/2 prior-knowledge h2c 有界子集（HPACK + frame + buffered multiplex，无新增 FFI/依赖，ADR-0038）
 - ✅ 原生 TLS/HTTPS（opt-in rustls + 纯 Rust RustCrypto provider，TLS 1.3 / ALPN，FFI diff=0，ADR-0039）
 - ✅ 大响应 JSON 序列化 Rust 加速（opt-in，手写 std-only writer；escape 密集 1MiB 端到端 **+24.19%**，ADR-0041）
+- ✅ OAuth2 作用域（`Security(get_current_user, scopes=[...])` 等价：`_auth_scopes` gate → 403 + `WWW-Authenticate: Bearer scope="..."`；OpenAPI `type:oauth2` flows，ADR-0042）
 - ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
@@ -202,8 +203,8 @@ journalctl -u fastapi_mojo -f
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，527 项检查含 Rust JSON serializer、TLS/HTTPS、HTTP/2 h2c、
-# WebSocket 与 FastAPI 语义面，CI 可重复；工具链 fmtool = Rust, 零 Python）
+# 集成测试（单一 binary 端到端，535 项检查含 Rust JSON serializer、OAuth2 scopes、TLS/HTTPS、
+# HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；工具链 fmtool = Rust, 零 Python）
 ./scripts/e2e_test.sh
 ```
 

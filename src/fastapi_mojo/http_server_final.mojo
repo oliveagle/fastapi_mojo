@@ -811,6 +811,11 @@ def register_routes(mut router: Router) raises:
     tok_h.set_data("_auth_users", "admin:s3cret;user:pass123")
     tok_h.set_data("_jwt_secret", "probe-secret-key-42")
     tok_h.set_data("_jwt_ttl_sec", "3600")
+    # 决策-67: 签发 token 的 scope claim (RFC 6749 空格分隔; 声明用 ';')
+    tok_h.set_data("_jwt_scopes", "items:read;items:write")
+    # 决策-67: OAuth2PasswordBearer securityScheme 元数据 (scopes 描述 + tokenUrl)
+    tok_h.set_data("_oauth2_scopes", "items:read=Read items;items:write=Write items;admin=Admin only")
+    tok_h.set_data("_oauth2_token_url", "token")
     router.add_route("/token", "POST", tok_h)
 
     # /token-exp: 同 /token 但 ttl=-1 -> 签发即过期 (e2e: 过期 token 被 /secure-jwt 拒).
@@ -827,6 +832,21 @@ def register_routes(mut router: Router) raises:
     sjwt_h.set_data("_jwt_secret", "probe-secret-key-42")
     sjwt_h.set_data("message", "oauth2 jwt demo")
     router.add_route("/secure-jwt", "GET", sjwt_h)
+
+    # 决策-67: scope 保护路由 (Security(get_current_user, scopes=[...]) 等价).
+    # token (来自 /token) 含 items:read;items:write -> /secure-jwt/items 200;
+    # /secure-jwt/admin 需 admin -> 403 "Not enough permissions".
+    var sjwt_items_h = Handler(KIND_ECHO(), "secure_jwt_items")
+    sjwt_items_h.set_data("_auth", "oauth2")
+    sjwt_items_h.set_data("_jwt_secret", "probe-secret-key-42")
+    sjwt_items_h.set_data("_auth_scopes", "items:read")
+    router.add_route("/secure-jwt/items", "GET", sjwt_items_h)
+
+    var sjwt_admin_h = Handler(KIND_ECHO(), "secure_jwt_admin")
+    sjwt_admin_h.set_data("_auth", "oauth2")
+    sjwt_admin_h.set_data("_jwt_secret", "probe-secret-key-42")
+    sjwt_admin_h.set_data("_auth_scopes", "admin")
+    router.add_route("/secure-jwt/admin", "GET", sjwt_admin_h)
 
     # 决策-35/41 (Goal-0003): response_model 家族 demo (FastAPI 语义).
     # /profile: 模型 name/age/email/secret + exclude secret → 返回 name/age/email

@@ -204,11 +204,13 @@ struct JwtVerify:
     var ok: Bool
     var sub: String
     var detail: String
+    var scopes: String   # 决策-67: RFC 6749 `scope` claim (空格分隔; 缺失 = "")
 
     def __init__(out self):
         self.ok = False
         self.sub = ""
         self.detail = "Could not validate credentials"
+        self.scopes = ""
 
 
 def _check_claims(header_json: String, payload_json: String, now_s: Int) -> JwtVerify:
@@ -236,6 +238,7 @@ def _check_claims(header_json: String, payload_json: String, now_s: Int) -> JwtV
     r4.ok = True
     r4.sub = sub
     r4.detail = "ok"
+    r4.scopes = _json_field(payload_json, "scope")
     return r4^
 
 
@@ -279,6 +282,30 @@ def jwt_verify_hs256(token: String, secret: String, now_s: Int) -> JwtVerify:
         var r1 = JwtVerify()
         return r1^
     return cl^
+
+
+# ---------- OAuth2 作用域 (决策-67: SecurityScopes / Security(scopes=[...]) 等价) ----------
+
+def _scopes_of(spec: String) -> List[String]:
+    """声明串 -> scope list. `;` 分隔 (scope 名可含 `:`), 去空/trim. 空串 -> 空 list."""
+    if spec.byte_length() == 0:
+        return List[String]()
+    return _split_csv(spec, 59)
+
+
+def _has_scope(claim: String, scope: String) -> Bool:
+    """token `scope` claim (空格分隔, RFC 6749) 是否含 scope."""
+    var n = claim.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(claim[byte=i]) == 32)
+        if is_sep:
+            if i > start and String(claim[byte=start:i]) == scope:
+                return True
+            start = i + 1
+        i += 1
+    return False
 
 
 # ---------- OAuth2PasswordBearer + get_current_user 等价 (请求级 gate) ----------
@@ -331,11 +358,30 @@ def check_oauth2(handler: Handler) raises -> AuthResult:
     if "_jwt_secret" in handler.data:
         secret = handler.data["_jwt_secret"]
     var v = jwt_verify_hs256(param, secret, now_ms() // 1000)
+    # 决策-67: 声明 `_auth_scopes` 时, 教程 `authenticate_value` =
+    # `Bearer scope="<space-joined>"` (用于 401 坏 token / 403 缺 scope 两个分支).
+    var required = List[String]()
+    if "_auth_scopes" in handler.data:
+        required = _scopes_of(handler.data["_auth_scopes"])
+    var scoped_www = www
+    if len(required) > 0:
+        scoped_www = "Bearer scope=\"" + " ".join(required) + "\""
     if not v.ok:
         var f3 = AuthResult()
         f3.detail = "Could not validate credentials"
-        f3.www_authenticate = www
+        f3.www_authenticate = scoped_www
         return f3^
+
+    # 决策-67: token `scope` claim 必须覆盖全部声明 scope, 否则 403
+    # "Not enough permissions" (教程 get_current_user 等价).
+    if len(required) > 0:
+        for sc in required:
+            if not _has_scope(v.scopes, sc):
+                var f4 = AuthResult()
+                f4.status_line = "403 Forbidden"
+                f4.detail = "Not enough permissions"
+                f4.www_authenticate = scoped_www
+                return f4^
 
     var ok = AuthResult()
     ok.ok = True
@@ -415,9 +461,15 @@ def handle_oauth2_token(handler: Handler, body_str: String) raises -> Tuple[Stri
         secret = handler.data["_jwt_secret"]
     var ttl = _int_or(handler.data["_jwt_ttl_sec"], 3600) if "_jwt_ttl_sec" in handler.data else 3600
     var now = now_ms() // 1000
+    # 决策-67: 可选 `_jwt_scopes` (声明 `;` 分隔) -> RFC 6749 `scope` claim
+    # (空格分隔). 空/缺失 = 不签发 scope claim (既有 token 形态不变).
     var payload = "{\"sub\":\"" + json_escape(username) + "\",\"username\":\""
-    payload = payload + json_escape(username)
-    payload = payload + "\",\"iat\":" + String(now) + ",\"exp\":" + String(now + ttl) + "}"
+    payload = payload + json_escape(username) + "\""
+    if "_jwt_scopes" in handler.data:
+        var granted = _scopes_of(handler.data["_jwt_scopes"])
+        if len(granted) > 0:
+            payload = payload + ",\"scope\":\"" + " ".join(granted) + "\""
+    payload = payload + ",\"iat\":" + String(now) + ",\"exp\":" + String(now + ttl) + "}"
     var token = jwt_encode_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret)
     var d3 = Dict[String, String]()
     d3["access_token"] = token
@@ -493,5 +545,16 @@ def main() raises:
     f4["username"] = "u"
     f4["password"] = "p"
     check(_check_form(f4)[0] == 200, "form grant missing ok (0.141.1 permissive)")
+
+    # 决策-67 作用域 (纯逻辑)
+    var sr = _scopes_of("items:read; me ")
+    check(len(sr) == 2 and sr[0] == "items:read" and sr[1] == "me", "scopes_of split+trim")
+    check(len(_scopes_of("")) == 0 and len(_scopes_of(";;")) == 0, "scopes_of empty")
+    check(_has_scope("items:read me", "me") and _has_scope("items:read me", "items:read"), "has_scope hit")
+    check(not _has_scope("items:read", "me") and not _has_scope("", "me"), "has_scope miss")
+    check(not _has_scope("item", "it"), "has_scope no prefix match")
+    var cs = _check_claims(hdr_ok, "{\"sub\":\"a\",\"exp\":9999,\"scope\":\"items:read me\"}", 1000)
+    check(cs.ok and cs.scopes == "items:read me", "claims scope parsed")
+    check(_check_claims(hdr_ok, "{\"sub\":\"a\",\"exp\":9999}", 1000).scopes == "", "claims scope absent empty")
 
     print("Mojo security_jwt test completed!")

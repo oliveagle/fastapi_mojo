@@ -28,6 +28,7 @@
 #   - Body validation: _body_schema + Field 约束 + Enum + FastAPI 422 detail (决策-38, BS-1..BS-12)
 #   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
 #   - Rust JSON serializer opt-in: FASTAPI_MOJO_JSON_SERIALIZER=rust (决策-66, JR-1..JR-6)
+#   - OAuth2 scopes: _auth_scopes gate + oauth2 flows OpenAPI (决策-67, OT-24..OT-33)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
@@ -1482,16 +1483,47 @@ ot_probe "OT-23 issued-expired token 401" 401 "$OT23_TOK"
 
 # OT-24/25: OpenAPI securitySchemes + operation-level security
 OT_API=$(http_body "$BASE/openapi.json")
-if [[ "$OT_API" == *'"securitySchemes":{"OAuth2PasswordBearer":{"type":"http","scheme":"bearer","bearerFormat":"JWT"}}'* ]]; then
-    pass "OT-24 openapi securitySchemes OAuth2PasswordBearer"
+if [[ "$OT_API" == *'"securitySchemes":{"OAuth2PasswordBearer":{"type":"oauth2","flows":{"password":{"scopes":{"items:read":"Read items","items:write":"Write items","admin":"Admin only"},"tokenUrl":"token"}}}}'* ]]; then
+    pass "OT-24 openapi securitySchemes OAuth2 oauth2 (scopes+tokenUrl)"
 else
-    fail "OT-24 openapi securitySchemes OAuth2PasswordBearer" "missing in: ${OT_API:0:200}"
+    fail "OT-24 openapi securitySchemes OAuth2 oauth2 (scopes+tokenUrl)" "missing in: ${OT_API:0:200}"
 fi
-if [[ "$OT_API" == *'"security":[{"OAuth2PasswordBearer":[]}'* ]]; then
-    pass "OT-25 openapi operation security"
+if [[ "$OT_API" == *'"security":[{"OAuth2PasswordBearer":[]}'* && "$OT_API" == *'"security":[{"OAuth2PasswordBearer":["items:read"]}]'* ]]; then
+    pass "OT-25 openapi operation security (empty + scoped)"
 else
-    fail "OT-25 openapi operation security" "missing in: ${OT_API:0:200}"
+    fail "OT-25 openapi operation security (empty + scoped)" "missing in: ${OT_API:0:200}"
 fi
+
+# OT-26..33: OAuth2 作用域 (决策-67, SecurityScopes / Security(scopes=[...]) 等价)
+OT26_BODY=$(curl -s --max-time 5 -H "Authorization: Bearer $OT_TOK" "$BASE/secure-jwt/items")
+if [[ "$OT26_BODY" == *'"auth_user": "admin"'* ]]; then pass "OT-26 scoped route + scoped token -> 200"
+else fail "OT-26 scoped route + scoped token -> 200" "body: ${OT26_BODY:0:120}"; fi
+expect_code "OT-27 scoped route no auth -> 401" 401 "$BASE/secure-jwt/items"
+OT28_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/secure-jwt/items")
+if [[ "$OT28_HDR" == *'WWW-Authenticate: Bearer'* && "$OT28_HDR" != *'scope='* ]]; then
+    pass "OT-28 no-auth www = Bearer (no scope, framework parity)"
+else
+    fail "OT-28 no-auth www = Bearer (no scope, framework parity)" "hdr: ${OT28_HDR:0:200}"
+fi
+OT29_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Bearer $OT_TOK" "$BASE/secure-jwt/admin")
+if [[ "$OT29_CODE" == "403" ]]; then pass "OT-29 missing scope -> 403"
+else fail "OT-29 missing scope -> 403" "got $OT29_CODE"; fi
+OT30_BODY=$(curl -s --max-time 5 -H "Authorization: Bearer $OT_TOK" "$BASE/secure-jwt/admin")
+if [[ "$OT30_BODY" == *'"detail": "Not enough permissions"'* ]]; then pass "OT-30 403 detail Not enough permissions"
+else fail "OT-30 403 detail Not enough permissions" "body: ${OT30_BODY:0:160}"; fi
+OT31_HDR=$(curl -s -D - -o /dev/null --max-time 5 -H "Authorization: Bearer $OT_TOK" "$BASE/secure-jwt/admin")
+if [[ "$OT31_HDR" == *'WWW-Authenticate: Bearer scope="admin"'* ]]; then pass "OT-31 403 www Bearer scope=\"admin\""
+else fail "OT-31 403 www Bearer scope=\"admin\"" "hdr: ${OT31_HDR:0:200}"; fi
+OT32_HDR=$(curl -s -D - -o /dev/null --max-time 5 -H "Authorization: Bearer bad" "$BASE/secure-jwt/admin")
+if [[ "$OT32_HDR" == *'HTTP/1.1 401'* && "$OT32_HDR" == *'WWW-Authenticate: Bearer scope="admin"'* ]]; then
+    pass "OT-32 bad token www includes scope (401)"
+else
+    fail "OT-32 bad token www includes scope (401)" "hdr: ${OT32_HDR:0:200}"
+fi
+# OT_T1 = 有效 HS256 token (sub=admin, 无 scope claim, 与 demo 同 secret) -> 缺 scope 403
+OT33_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Bearer $OT_T1" "$BASE/secure-jwt/items")
+if [[ "$OT33_CODE" == "403" ]]; then pass "OT-33 valid token without scope claim -> 403"
+else fail "OT-33 valid token without scope claim -> 403" "got $OT33_CODE"; fi
 
 # --- Form 多值 + 422 parity (决策-45, ADR-0020, P2 矩阵 #5) -------------------------
 # FastAPI 0.141.1 实测: list 多值 (全部 occurrence) / 标量 last-wins / alias (wire
