@@ -269,11 +269,13 @@ fn do_request(
             });
         }
     };
-    // build request line
+    // build request line — Host 对齐真实客户端/httpx: 非默认端口带端口
+    // (决策-71 支撑修复; 此前只发 host, 使 redirect_slashes 的绝对 Location 丢端口).
+    let host_hdr = if parts.port == 80 { parts.host.clone() } else { parts.addr() };
     let mut req = format!(
         "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n",
         parts.path,
-        parts.host,
+        host_hdr,
         UA
     );
     for (k, v) in headers {

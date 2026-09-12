@@ -46,6 +46,7 @@ from request_state import apply_state_set, inject_request_state, check_state_spe
 from param_constraints import (check_param_constraints, get_param_constraints,
                                get_header_types, parse_reads_headers)
 from param_constraints_run import validate_headers_collect, validate_implicit_constraints
+from redirect_slashes import alt_slash_path, build_redirect_location  # 决策-71 (ADR-0046)
 
 
 def inject_request_cookies(mut params: Dict[String, String], cookie_names_csv: String) raises:
@@ -740,6 +741,16 @@ def register_routes(mut router: Router) raises:
     redirf_h.set_data("_redirect_url", "/health")
     router.add_route("/redirect/health", "GET", redirf_h)
 
+    # 决策-71 (ADR-0046): Starlette redirect_slashes 等价 demo.
+    # /slash/ (带尾斜杠) <- GET /slash 会 307 -> /slash/; /slashpost (无尾斜杠)
+    # <- POST/GET /slashpost/ 会 307 -> /slashpost (method 无关, 上游 PARTIAL 同型).
+    var slash_h = Handler(KIND_ECHO(), "slash_demo")
+    slash_h.set_data("message", "slash demo")
+    router.add_route("/slash/", "GET", slash_h)
+    var slashpost_h = Handler(KIND_ECHO(), "slashpost_demo")
+    slashpost_h.set_data("message", "slashpost demo")
+    router.add_route("/slashpost", "POST", slashpost_h)
+
     # F10 (v0.5.1): Cookie 参数注入 demo. _reads_cookies = 声明读取的 cookie 名;
     # dispatch 从 Cookie 头解析 (RFC 6265: ';' 分隔 '=' 切) 注入 params["cookie_<name>"].
     var cookie_h = Handler(KIND_ECHO(), "cookies")
@@ -1422,6 +1433,33 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         status_line = "405 Method Not Allowed"
                         resp_data = build_error_response("405", "Method not allowed")
                     else:
+                        # 决策-71 (ADR-0046): Starlette `redirect_slashes` 等价 ——
+                        # 无路由匹配时, 若尾部斜杠取反后的路径存在 (method 无关) -> 307
+                        # 重定向到绝对 URL (scheme://host<alt>?<query>); 否则 404.
+                        var alt = alt_slash_path(path)
+                        var alt_ok = False
+                        if alt != "":
+                            alt_ok = len(router.methods_for_path(alt)) > 0
+                        if alt_ok:
+                            var rscheme = "http"
+                            if (getenv("FASTAPI_MOJO_TLS_CERT").byte_length() > 0
+                                    and getenv("FASTAPI_MOJO_TLS_KEY").byte_length() > 0):
+                                rscheme = "https"
+                            var rhost = _get_header("Host")
+                            if rhost == "":
+                                rhost = "127.0.0.1:" + String(external_call["get_configured_port", Int]())
+                            var rloc = build_redirect_location(rscheme, rhost, alt, query)
+                            _ = external_call["send_redirect_response", Int](
+                                cfd, "307 Temporary Redirect".as_c_string_slice(),
+                                rloc.as_c_string_slice())
+                            var sdur = mw_timing(mw_chain, start_ms)
+                            _finish_request(mw_chain, req_id, method, path, query,
+                                            "307 Temporary Redirect (slash-redirect)", sdur)
+                            if external_call["get_close_after_response", Int]() != 0:
+                                external_call["conn_done", NoneType](cfd, False)
+                            else:
+                                external_call["conn_done", NoneType](cfd, True)
+                            continue
                         status_line = "404 Not Found"
                         resp_data = build_error_response("404", "Route not found")
                 else:

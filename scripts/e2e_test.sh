@@ -32,6 +32,7 @@
 #   - HTTPDigest runtime + OpenAPI securitySchemes (basic/bearer/digest/apiKey) (决策-69, DG-1..6 / SO-1..5)
 #   - OpenIdConnect + OAuth2AuthorizationCodeBearer (runtime + OpenAPI) (决策-70, OI-1..4 / AC-1..7)
 #   - RedirectResponse: _redirect_url + _redirect_status 307/303/301/308 + URL quote (决策-68, RD-1..RD-10)
+#   - redirect_slashes (Starlette 默认尾斜杠 307) (决策-71, SL-1..SL-10)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
@@ -1637,6 +1638,46 @@ RD10_OUT=$("$FMTOOL" testclient http GET "$BASE/redirect/health" --json-out 2>&1
 if [[ "$RD10_RC" == "0" && "$RD10_OUT" == *'"status_code":200'* && "$RD10_OUT" == *'healthy'* ]]; then
     pass "RD-10 testclient follow 307 -> 200 /health"
 else fail "RD-10 testclient follow 307 -> 200 /health" "rc=$RD10_RC out=$RD10_OUT"; fi
+
+# --- SL-1..SL-10: Starlette redirect_slashes (决策-71, ADR-0046) ----------------------
+# 上游默认 redirect_slashes=True: 无匹配时, 尾部斜杠取反的 alt 路径若存在 (method
+# 无关) -> 307 绝对 URL (scheme://host<alt>?<query>); rstrip 去掉全部尾斜杠; 否则 404.
+echo "== redirect_slashes (决策-71) =="
+SL1_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/slash")
+if [[ "$SL1_HDR" == *'HTTP/1.1 307 Temporary Redirect'* && "$SL1_HDR" == *"Location: $BASE/slash/"* ]]; then
+    pass "SL-1 GET /slash -> 307 absolute Location /slash/"
+else fail "SL-1 GET /slash -> 307 absolute Location" "hdr: ${SL1_HDR:0:240}"; fi
+SL2_LEN=$(http_body "$BASE/slash" | wc -c | tr -d ' ')
+if [[ "$SL1_HDR" != *'Content-Type'* && "$SL1_HDR" == *'Content-Length: 0'* && "$SL2_LEN" == "0" ]]; then
+    pass "SL-2 slash-redirect no Content-Type + CL:0 + empty body"
+else fail "SL-2 slash-redirect headers" "hdr=${SL1_HDR:0:160} len=$SL2_LEN"; fi
+SL3_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/slash?x=1&y=2")
+if [[ "$SL3_HDR" == *"Location: $BASE/slash/?x=1&y=2"* ]]; then pass "SL-3 query string preserved in Location"
+else fail "SL-3 query preserved" "hdr: ${SL3_HDR:0:240}"; fi
+SL4_HDR=$(curl -s -D - -o /dev/null --max-time 5 -X POST "$BASE/slashpost/")
+if [[ "$SL4_HDR" == *'HTTP/1.1 307 Temporary Redirect'* && "$SL4_HDR" == *"Location: $BASE/slashpost"* ]]; then
+    pass "SL-4 POST /slashpost/ -> 307 Location /slashpost"
+else fail "SL-4 POST /slashpost/ -> 307" "hdr: ${SL4_HDR:0:240}"; fi
+SL5_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$BASE/slashpost/")
+if [[ "$SL5_CODE" == "307" ]]; then pass "SL-5 GET /slashpost/ -> 307 (method-independent, upstream PARTIAL)"
+else fail "SL-5 GET /slashpost/ -> 307" "got $SL5_CODE"; fi
+SL6_BODY=$(http_body "$BASE/slash/")
+if [[ "$SL6_BODY" == *'"message": "slash demo"'* ]]; then pass "SL-6 GET /slash/ -> 200 (direct match)"
+else fail "SL-6 GET /slash/ -> 200" "body: ${SL6_BODY:0:120}"; fi
+SL7_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$BASE/slash//")
+if [[ "$SL7_CODE" == "404" ]]; then pass "SL-7 GET /slash// -> 404 (rstrip removes all trailing)"
+else fail "SL-7 GET /slash// -> 404" "got $SL7_CODE"; fi
+SL8_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$BASE/nope/")
+if [[ "$SL8_CODE" == "404" ]]; then pass "SL-8 GET /nope/ -> 404 (no alt route)"
+else fail "SL-8 GET /nope/ -> 404" "got $SL8_CODE"; fi
+SL9_HDR=$(curl -s -I --max-time 5 "$BASE/slash")
+if [[ "$SL9_HDR" == *'HTTP/1.1 307 Temporary Redirect'* && "$SL9_HDR" == *"Location: $BASE/slash/"* ]]; then
+    pass "SL-9 HEAD /slash -> 307 (HEAD maps to GET)"
+else fail "SL-9 HEAD /slash -> 307" "hdr: ${SL9_HDR:0:240}"; fi
+SL10_OUT=$("$FMTOOL" testclient http GET "$BASE/slash" --json-out 2>&1); SL10_RC=$?
+if [[ "$SL10_RC" == "0" && "$SL10_OUT" == *'"status_code":200'* && "$SL10_OUT" == *'slash demo'* ]]; then
+    pass "SL-10 testclient follow 307 -> 200 /slash/"
+else fail "SL-10 testclient follow 307 -> 200" "rc=$SL10_RC out=$SL10_OUT"; fi
 
 # --- Form 多值 + 422 parity (决策-45, ADR-0020, P2 矩阵 #5) -------------------------
 # FastAPI 0.141.1 实测: list 多值 (全部 occurrence) / 标量 last-wins / alias (wire

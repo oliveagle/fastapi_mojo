@@ -15,6 +15,7 @@
 - ✅ RedirectResponse（`_redirect_url` / `_redirect_status`，307/303/301/308 + `Location`（上游 safe set 编码）+ `Content-Length: 0`，无 Content-Type，ADR-0043）
 - ✅ 安全 OpenAPI schemes（HTTPBasic/HTTPBearer/HTTPDigest/APIKey header·query·cookie → `components.securitySchemes` + operation `security`，上游逐字段对齐）+ HTTPDigest 运行时（401 + `WWW-Authenticate: Digest` 无 realm，ADR-0044）
 - ✅ OpenIdConnect（`_auth=openid`，只校验 Authorization 头存在，401 + `WWW-Authenticate: Bearer`）+ OAuth2AuthorizationCodeBearer（`_auth=authcode`，Bearer 提取 + `authorizationCode` flow，ADR-0045）
+- ✅ Starlette `redirect_slashes`（默认路由行为：`/a/b` ↔ `/a/b/` 未命中 → 307 绝对 `Location`，method 无关，ADR-0046）
 - ✅ **单一二进制**：`./build_single.sh` 产出 `build/fastapi_mojo`，`ldd` 动态依赖仅 libc（外加系统 vdso/ld-linux 内核组件；无 libm/libstdc++/libgcc_s/Python）
 - ✅ 干净环境验证：`env -i ./build/fastapi_mojo` 直接启动服务（无 Python、无 LD_LIBRARY_PATH）
 - ✅ 性能：单核顺序 ~300 rps（curl 进程开销），hey 16 并发 ~20k rps（GET /health）
@@ -206,7 +207,7 @@ journalctl -u fastapi_mojo -f
 cd src/fastapi_mojo
 for f in json params_query params_json router string_builder test_all; do mojo run $f.mojo; done
 
-# 集成测试（单一 binary 端到端，567 项检查含 Rust JSON serializer、OAuth2 scopes、RedirectResponse、HTTPDigest/securitySchemes、OpenIdConnect/AuthorizationCode、TLS/HTTPS、
+# 集成测试（单一 binary 端到端，577 项检查含 Rust JSON serializer、OAuth2 scopes、RedirectResponse/redirect_slashes、HTTPDigest/securitySchemes、OpenIdConnect/AuthorizationCode、TLS/HTTPS、
 # HTTP/2 h2c、WebSocket 与 FastAPI 语义面，CI 可重复；工具链 fmtool = Rust, 零 Python）
 ./scripts/e2e_test.sh
 ```
