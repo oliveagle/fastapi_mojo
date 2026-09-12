@@ -49,13 +49,21 @@ def _bstr(s: String, start: Int, end: Int) -> String:
     return String(s[byte=a:b])
 
 
+def _bt(s: String, i: Int) -> Int:
+    """字节安全取值 (决策-84/ADR-0059): Mojo 1.0.0 `s[byte=i]` 要求 i 落在
+    码点边界, 原始 wire 头 (多字节) 逐字节扫描会 assert -> server 崩溃."""
+    return Int(s.as_bytes()[i])
+
+
 def _starts_with(s: String, p: String) -> Bool:
     """s 是否以 p 开头 (按字节)."""
     if s.byte_length() < p.byte_length():
         return False
+    var sb = s.as_bytes()
+    var pb = p.as_bytes()
     var i = 0
     while i < p.byte_length():
-        if s[byte=i] != p[byte=i]:
+        if Int(sb[i]) != Int(pb[i]):
             return False
         i += 1
     return True
@@ -64,15 +72,20 @@ def _starts_with(s: String, p: String) -> Bool:
 # ---------- base64 解码 (纯 Mojo, HTTPBasic 需要) ----------
 
 def _eq_ci(s: String, lower: String) -> Bool:
-    """s 与全小写字面量 lower 的大小写不敏感相等 (ASCII)."""
+    """s 与全小写字面量 lower 的大小写不敏感相等 (ASCII).
+
+    决策-83/ADR-0058: 全字节安全 (原始 Authorization scheme 值含多字节时,
+    lower[byte=i] 续字节下标曾 assert)."""
     if s.byte_length() != lower.byte_length():
         return False
+    var ab = s.as_bytes()
+    var lb = lower.as_bytes()
     var i = 0
     while i < s.byte_length():
-        var a = ord(s[byte=i])
+        var a = Int(ab[i])
         if a >= 65 and a <= 90:
             a += 32
-        if a != ord(lower[byte=i]):
+        if a != Int(lb[i]):
             return False
         i += 1
     return True
@@ -106,7 +119,7 @@ def b64_decode(s: String) -> String:
     var bits = 0
     var n = s.byte_length()
     for i in range(n):
-        var c = ord(s[byte=i])
+        var c = _bt(s, i)
         if c == 61:            # '=' padding
             break
         if c == 13 or c == 10 or c == 32 or c == 9:   # 跳过空白
@@ -177,15 +190,15 @@ def _split_csv(s: String, sep: Int) -> List[String]:
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(s[byte=i]) == sep)
+        var is_sep = (i == n) or (_bt(s, i) == sep)
         if is_sep:
             if i > start:
                 var seg = _bstr(s, start, i)
                 var b = 0
                 var e = seg.byte_length()
-                while b < e and (ord(seg[byte=b]) == 32 or ord(seg[byte=b]) == 9):
+                while b < e and (_bt(seg, b) == 32 or _bt(seg, b) == 9):
                     b += 1
-                while e > b and (ord(seg[byte=e-1]) == 32 or ord(seg[byte=e-1]) == 9):
+                while e > b and (_bt(seg, e-1) == 32 or _bt(seg, e-1) == 9):
                     e -= 1
                 if e > b:
                     out.append(_bstr(seg, b, e))
@@ -198,9 +211,9 @@ def _trim(s: String) -> String:
     """去首尾空白 (空格/tab)."""
     var b = 0
     var e = s.byte_length()
-    while b < e and (ord(s[byte=b]) == 32 or ord(s[byte=b]) == 9):
+    while b < e and (_bt(s, b) == 32 or _bt(s, b) == 9):
         b += 1
-    while e > b and (ord(s[byte=e-1]) == 32 or ord(s[byte=e-1]) == 9):
+    while e > b and (_bt(s, e-1) == 32 or _bt(s, e-1) == 9):
         e -= 1
     return _bstr(s, b, e)
 
@@ -247,7 +260,7 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
         var cn = cred.byte_length()
         while ci < cn:
             var cl = next_codepoint_len(cred, ci)
-            if ord(cred[byte=ci]) == 58:  # ':' (ASCII, 不会是 UTF-8 续字节)
+            if _bt(cred, ci) == 58:  # ':' (ASCII, 不会是 UTF-8 续字节)
                 colon_byte = ci
                 found_colon = True
                 break
@@ -317,7 +330,7 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
         var rest = _bstr(auth_spec, 7, auth_spec.byte_length())   # "<pos>:<name>"
         var ci = -1
         for k in range(rest.byte_length()):
-            if ord(rest[byte=k]) == 58:  # ':'
+            if _bt(rest, k) == 58:  # ':'
                 ci = k
                 break
         if ci < 0:
@@ -341,7 +354,7 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
                     var ps = String(p)
                     var eq = -1
                     for m in range(ps.byte_length()):
-                        if ord(ps[byte=m]) == 61:
+                        if _bt(ps, m) == 61:
                             eq = m
                             break
                     if eq > 0:
@@ -377,7 +390,7 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
         var creds3 = ""
         var sp = -1
         for k in range(authz3.byte_length()):
-            if ord(authz3[byte=k]) == 32:  # ' '
+            if _bt(authz3, k) == 32:  # ' '
                 sp = k
                 break
         if sp > 0:
@@ -402,7 +415,7 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
         var authz4 = _get_header("Authorization")
         var sp4 = -1
         for k in range(authz4.byte_length()):
-            if ord(authz4[byte=k]) == 32:  # ' '
+            if _bt(authz4, k) == 32:  # ' '
                 sp4 = k
                 break
         var scheme4 = authz4

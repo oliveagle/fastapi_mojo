@@ -26,6 +26,12 @@ from json import json_escape
 from middleware import now_ms
 
 
+def _bt(s: String, i: Int) -> Int:
+    """字节安全取值 (决策-84/ADR-0059): Mojo 1.0.0 `s[byte=i]` 要求 i 落在
+    码点边界, 不可信 token/claim (多字节) 逐字节扫描会 assert -> server 崩溃."""
+    return Int(s.as_bytes()[i])
+
+
 # ---------- base64url 编码 (RFC 7515 §2.1, 纯 Mojo; 解码复用 security.b64_decode) ----------
 
 def _b64url_char(v: Int) -> Int:
@@ -47,13 +53,13 @@ def b64url_encode(s: String) -> String:
     var n = s.byte_length()
     var i = 0
     while i < n:
-        var b0 = ord(s[byte=i])
+        var b0 = _bt(s, i)
         var b1 = 0
         var b2 = 0
         if i + 1 < n:
-            b1 = ord(s[byte=i + 1])
+            b1 = _bt(s, i + 1)
         if i + 2 < n:
-            b2 = ord(s[byte=i + 2])
+            b2 = _bt(s, i + 2)
         var t = (b0 << 16) | (b1 << 8) | b2
         sb.append_byte(_b64url_char((t >> 18) & 63))
         sb.append_byte(_b64url_char((t >> 12) & 63))
@@ -75,7 +81,7 @@ def _jwt_parts(token: String) -> Tuple[Bool, List[String]]:
     var i = 0
     var ok = True
     while i <= n:
-        var is_sep = (i == n) or (ord(token[byte=i]) == 46)  # '.'
+        var is_sep = (i == n) or (_bt(token, i) == 46)  # '.'
         if is_sep:
             if i > start:
                 parts.append(String(token[byte=start:i]))
@@ -100,31 +106,33 @@ def _json_field(obj: String, key: String) -> String:
     var i = 0
     while i + kn <= n:
         var matched = True
+        var ob = obj.as_bytes()
+        var kb = kq.as_bytes()
         for j in range(kn):
-            if obj[byte=i + j] != kq[byte=j]:
+            if Int(ob[i + j]) != Int(kb[j]):
                 matched = False
                 break
         if matched:
             if i > 0:
-                var prev = ord(obj[byte=i - 1])
+                var prev = _bt(obj, i - 1)
                 if prev != 123 and prev != 44:  # '{' / ','
                     matched = False
             if matched:
                 var k = i + kn
-                while k < n and (ord(obj[byte=k]) == 32 or ord(obj[byte=k]) == 9):
+                while k < n and (_bt(obj, k) == 32 or _bt(obj, k) == 9):
                     k += 1
-                if k < n and ord(obj[byte=k]) == 58:  # ':'
+                if k < n and _bt(obj, k) == 58:  # ':'
                     k += 1
-                    while k < n and (ord(obj[byte=k]) == 32 or ord(obj[byte=k]) == 9):
+                    while k < n and (_bt(obj, k) == 32 or _bt(obj, k) == 9):
                         k += 1
-                    if k < n and ord(obj[byte=k]) == 34:  # 字符串
+                    if k < n and _bt(obj, k) == 34:  # 字符串
                         var m = k + 1
                         var raw = List[Int]()
                         while m < n:
-                            var cm = ord(obj[byte=m])
+                            var cm = _bt(obj, m)
                             if cm == 92:  # '\\' escape
                                 if m + 1 < n:
-                                    var cn = ord(obj[byte=m + 1])
+                                    var cn = _bt(obj, m + 1)
                                     if cn == 34:
                                         raw.append(34)
                                     elif cn == 92:
@@ -152,7 +160,7 @@ def _json_field(obj: String, key: String) -> String:
                     else:  # number / true / false / null: 读到 , } ] 或空白
                         var m2 = k
                         while m2 < n:
-                            var c2 = ord(obj[byte=m2])
+                            var c2 = _bt(obj, m2)
                             if c2 == 44 or c2 == 125 or c2 == 93 or c2 == 32:
                                 break
                             m2 += 1
@@ -167,14 +175,14 @@ def _int_or(s: String, default: Int) -> Int:
         return default
     var neg = False
     var i = 0
-    if ord(s[byte=0]) == 45:  # '-'
+    if _bt(s, 0) == 45:  # '-'
         neg = True
         i = 1
     if i >= s.byte_length():
         return default
     var v = 0
     while i < s.byte_length():
-        var c = ord(s[byte=i])
+        var c = _bt(s, i)
         if c < 48 or c > 57:
             return default
         v = v * 10 + (c - 48)
@@ -185,15 +193,25 @@ def _int_or(s: String, default: Int) -> Int:
 
 
 def _lower(s: String) -> String:
-    """小写化 (A-Z -> a-z; 其它原样). scheme 比较大小写不敏感 (0.141.1)."""
+    """小写化 (A-Z -> a-z; 其它原样). scheme 比较大小写不敏感 (0.141.1).
+
+    决策-83/ADR-0058: 全字节安全 (append_byte 会把 >=0x80 变成 U+FFFD; 改为
+    非 ASCII 码点整体 append, 续字节跳过)."""
     var sb = StringBuilder()
     var n = s.byte_length()
-    for i in range(n):
+    var ab = s.as_bytes()
+    var i = 0
+    while i < n:
+        var b = Int(ab[i])
+        if b >= 0x80 and b < 0xC0:
+            i += 1
+            continue
         var c = ord(s[byte=i])
         if c >= 65 and c <= 90:
-            sb.append_byte(c + 32)
+            sb.append(chr(c + 32))
         else:
-            sb.append_byte(c)
+            sb.append(chr(c))
+        i += 1
     return sb.take()
 
 
@@ -299,7 +317,7 @@ def _has_scope(claim: String, scope: String) -> Bool:
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(claim[byte=i]) == 32)
+        var is_sep = (i == n) or (_bt(claim, i) == 32)
         if is_sep:
             if i > start and String(claim[byte=start:i]) == scope:
                 return True
@@ -337,7 +355,7 @@ def check_oauth2(handler: Handler) raises -> AuthResult:
     var sp = -1
     var i = 0
     while i < n:
-        if ord(authz[byte=i]) == 32:  # 首个空格
+        if _bt(authz, i) == 32:  # 首个空格
             sp = i
             break
         i += 1

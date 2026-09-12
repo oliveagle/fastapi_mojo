@@ -14,6 +14,7 @@
 #   mw_logging(chain, ...)         -> after:  [req_id] METHOD path?query → status Nms
 
 from std.ffi import external_call
+from string_builder import StringBuilder, next_codepoint_len
 
 
 struct Middleware:
@@ -78,25 +79,38 @@ def _hex2(v: Int) -> String:
 
 
 def _json_escape(s: String) -> String:
-    """JSON 字符串转义 (\\/"/\n/\r/\t/控制字符) — F7 access log."""
-    var out = String("")
-    for i in range(s.byte_length()):
-        var b = ord(s[byte=i])
+    """JSON 字符串转义 (\\/"/\n/\r/\t/控制字符) — F7 access log.
+
+    决策-83/ADR-0058: 全字节安全 (原始 multibyte path/query 的续字节下标曾
+    assert; 非 ASCII 码点整体透传, 仅 ASCII 需要转义).
+    """
+    var out = StringBuilder()
+    var ab = s.as_bytes()
+    var i = 0
+    var n = s.byte_length()
+    while i < n:
+        var b = Int(ab[i])
+        if b >= 0x80:
+            var cl = next_codepoint_len(s, i)
+            out.append(String(s[byte=i:i + cl]))
+            i += cl
+            continue
         if b == 34:  # '"'
-            out += '\\"'
+            out.append('\\"')
         elif b == 92:  # '\\'
-            out += '\\\\'
+            out.append("\\\\")
         elif b == 10:  # '\\n'
-            out += '\\n'
+            out.append("\\n")
         elif b == 13:  # '\\r'
-            out += '\\r'
+            out.append("\\r")
         elif b == 9:   # '\\t'
-            out += '\\t'
+            out.append("\\t")
         elif b < 32:
-            out += '\\u00' + _hex2(b)
+            out.append("\\u00" + _hex2(b))
         else:
-            out += String(s[byte=i])
-    return out
+            out.append(String(s[byte=i:i + 1]))
+        i += 1
+    return out.take()
 
 
 def mw_logging(chain: MiddlewareChain, req_id: String, method: String,

@@ -60,14 +60,23 @@ def _starts(s: String, pre: String) -> Bool:
 
 
 def _lower(s: String) -> String:
-    """ASCII 小写 (字节级; 非 ASCII 原样)."""
+    """ASCII 小写 (非 ASCII 码点整体透传; 续字节跳过).
+
+    决策-83/ADR-0058: 全字节安全 (bof 取原始字节, 续字节不单独 chr())."""
     var out = String()
-    for i in range(s.byte_length()):
-        var c = bof(s, i)
+    var i = 0
+    var n = s.byte_length()
+    while i < n:
+        var b = bof(s, i)
+        if b >= 0x80 and b < 0xC0:
+            i += 1
+            continue
+        var c = ord(s[byte=i])
         if c >= 65 and c <= 90:
             out += chr(c + 32)
         else:
             out += chr(c)
+        i += 1
     return out^
 
 

@@ -96,8 +96,11 @@ def _hexval(s: String, i: Int) -> Int:
     Lookup table is "0-9" (k=0..9), "a-f" (k=10..15), "A-F" (k=16..21);
     uppercase maps via k-6, not k%16 (which would give 0..5)."""
     var h = "0123456789abcdefABCDEF"
+    # 决策-83/ADR-0058: 字节安全 (原始多字节 path/query 的续字节下标曾 assert).
+    var b = Int(s.as_bytes()[i])
+    var hb = h.as_bytes()
     for k in range(h.byte_length()):
-        if s[byte=i] == h[byte=k]:
+        if b == Int(hb[k]):
             if k <= 15:
                 return k
             return k - 6
@@ -159,17 +162,18 @@ def url_decode_path(s: String) -> String:
     literal `%`, matching `url_decode`)."""
     var bs = List[Int]()
     var n = s.byte_length()
+    var sb = s.as_bytes()  # 决策-83/ADR-0058: 字节安全 (原始多字节 path 续字节下标曾 assert)
     var i = 0
     while i < n:
-        var c = s[byte=i]
-        if c == '%' and i + 2 < n:
+        var c = Int(sb[i])
+        if c == 37 and i + 2 < n:  # '%'
             var hi = _hexval(s, i + 1)
             var lo = _hexval(s, i + 2)
             if hi >= 0 and lo >= 0:
                 bs.append(hi * 16 + lo)
                 i += 3
                 continue
-        bs.append(ord(c))  # literal byte (ASCII or a raw UTF-8 continuation)
+        bs.append(c)  # literal byte (ASCII or a raw UTF-8 continuation)
         i += 1
     return decode_utf8_bytes(bs)
 

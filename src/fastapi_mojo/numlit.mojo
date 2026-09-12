@@ -78,14 +78,24 @@ def is_float_literal(s: String) -> Bool:
 
 
 def _lower_ascii(s: String) -> String:
-    """ASCII lowercase (only A-Z folded; other bytes copied verbatim)."""
+    """ASCII lowercase (only A-Z folded; other bytes copied verbatim).
+
+    决策-83/ADR-0058: 全字节安全 (非 ASCII 码点整体透传, 续字节跳过)."""
     var out = String("")
-    for i in range(s.byte_length()):
+    var ab = s.as_bytes()
+    var i = 0
+    var n = s.byte_length()
+    while i < n:
+        var b = Int(ab[i])
+        if b >= 0x80 and b < 0xC0:
+            i += 1
+            continue
         var c = ord(s[byte=i])
         if c >= 65 and c <= 90:
             out += chr(c + 32)
         else:
             out += chr(c)
+        i += 1
     return out^
 
 

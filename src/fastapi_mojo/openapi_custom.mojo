@@ -81,11 +81,18 @@ def default_operation_id(name: String, path: String, method: String) -> String:
 
 
 def _lower_ascii(s: String) -> String:
-    """小写化 (form_params.lower_ascii 同语义, 避免跨模块耦合)."""
+    """小写化 (form_params.lower_ascii 同语义, 避免跨模块耦合).
+
+    决策-83/ADR-0058: 全字节安全 (非 ASCII 码点整体透传, 续字节跳过)."""
     var out = String("")
     var n = s.byte_length()
+    var ab = s.as_bytes()
     var i = 0
     while i < n:
+        var b = Int(ab[i])
+        if b >= 0x80 and b < 0xC0:
+            i += 1
+            continue
         var c = ord(s[byte=i])
         if c >= 65 and c <= 90:
             c += 32

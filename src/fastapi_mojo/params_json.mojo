@@ -15,8 +15,10 @@ from params_query import ParsedParams, _hexval
 
 
 def _is_ws(s: String, i: Int) -> Bool:
-    var c = s[byte=i]
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+    """字节安全空白判定 (决策-84/ADR-0059): s[byte=i] 在续字节下标会 assert,
+    原始 JSON body 逐字节扫描需用 as_bytes() 原始字节."""
+    var c = Int(s.as_bytes()[i])
+    return c == 32 or c == 9 or c == 10 or c == 13
 
 
 def _skip_ws(s: String, i: Int) -> Int:
@@ -188,8 +190,8 @@ def _parse_value_raw(s: String, i: Int) -> Tuple[String, String, Int]:
     # scalar (number/true/false/null): scan to delimiter, do not consume it
     var start = j
     while j < n:
-        var cc = s[byte=j]
-        if cc == ',' or cc == '}' or cc == ']' or _is_ws(s, j):
+        var cc = Int(s.as_bytes()[j])
+        if cc == 44 or cc == 125 or cc == 93 or _is_ws(s, j):
             break
         j += 1
     var raw = String(s[byte=start : j])
@@ -198,9 +200,10 @@ def _parse_value_raw(s: String, i: Int) -> Tuple[String, String, Int]:
     if raw == "null":
         return (raw, "null", j)
     var is_float = False
+    var rb = raw.as_bytes()
     for k in range(raw.byte_length()):
-        var ch = raw[byte=k]
-        if ch == '.' or ch == 'e' or ch == 'E':
+        var ch = Int(rb[k])  # 字节安全 (决策-84/ADR-0059): 未加引号多字节标量
+        if ch == 46 or ch == 101 or ch == 69:
             is_float = True
             break
     if is_float:

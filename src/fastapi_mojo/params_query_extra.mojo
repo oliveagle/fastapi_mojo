@@ -151,23 +151,27 @@ def list_default_csv(spec: String) -> String:
 
 
 def split_csv(s: String) raises -> List[String]:
-    """CSV 切分 + trim (声明值用; 无空项)."""
+    """CSV 切分 + trim (声明值 + raw header CSV; 无空项).
+
+    决策-84/ADR-0059: 全字节安全 (typed list header 的 raw 值可含多字节)."""
     var out = List[String]()
     if s == "":
         return out^
     var n = s.byte_length()
+    var sa = s.as_bytes()
     var start = 0
     var i = 0
     while i <= n:
-        var is_sep = (i == n) or (ord(s[byte=i]) == 44)
+        var is_sep = (i == n) or (Int(sa[i]) == 44)
         if is_sep:
             if i > start:
                 var piece = String(s[byte=start:i])
+                var pb = piece.as_bytes()
                 var b = 0
                 var e = piece.byte_length()
-                while b < e and (ord(piece[byte=b]) == 32 or ord(piece[byte=b]) == 9):
+                while b < e and (Int(pb[b]) == 32 or Int(pb[b]) == 9):
                     b += 1
-                while e > b and (ord(piece[byte=e-1]) == 32 or ord(piece[byte=e-1]) == 9):
+                while e > b and (Int(pb[e-1]) == 32 or Int(pb[e-1]) == 9):
                     e -= 1
                 if e > b:
                     out.append(String(piece[byte=b:e]))

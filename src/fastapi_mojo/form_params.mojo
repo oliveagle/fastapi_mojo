@@ -368,14 +368,25 @@ def _openapi_form_field_schema(name: String, spec: String, desc: String) raises 
 
 
 def lower_ascii(s: String) -> String:
-    """ASCII 小写 (Mojo 1.0.0 String 无 .lower(); security_jwt._lower 同款)."""
+    """ASCII 小写 (Mojo 1.0.0 String 无 .lower(); security_jwt._lower 同款).
+
+    决策-83/ADR-0058: 全字节安全 — 只折叠 ASCII A-Z, 非 ASCII 码点整体透传
+    (原始 Content-Type 头 "…urlencoded; café" 的续字节下标曾 assert)."""
     var out = String("")
-    for i in range(s.byte_length()):
+    var ab = s.as_bytes()
+    var i = 0
+    var n = s.byte_length()
+    while i < n:
+        var b = Int(ab[i])
+        if b >= 0x80 and b < 0xC0:
+            i += 1  # UTF-8 续字节: 已随首字节整体输出
+            continue
         var c = ord(s[byte=i])
         if c >= 65 and c <= 90:
             out += chr(c + 32)
         else:
             out += chr(c)
+        i += 1
     return out
 
 def form_openapi_schema(handler: Handler, method: String) raises -> String:

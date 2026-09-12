@@ -69,12 +69,17 @@ struct StringBuilder:
 
 
 def trim_spaces(s: String) -> String:
-    """Trim ASCII space (0x20) from both ends (byte-wise, boundary-safe)."""
+    """Trim ASCII space (0x20) from both ends.
+
+    决策-83/ADR-0058: 全字节安全 — Mojo 1.0.0 `s[byte=i]` 在码点内部下标会
+    assert; 原始 wire 数据 (如 WS 子协议 offer "café") 的尾字节是续字节.
+    """
     var a = 0
     var b = s.byte_length()
-    while a < b and s[byte=a] == ' ':
+    var ab = s.as_bytes()
+    while a < b and Int(ab[a]) == 32:
         a += 1
-    while b > a and s[byte=b - 1] == ' ':
+    while b > a and Int(ab[b - 1]) == 32:
         b -= 1
     return String(s[byte=a:b])
 
@@ -82,15 +87,18 @@ def trim_spaces(s: String) -> String:
 def next_codepoint_len(s: String, i: Int) -> Int:
     """UTF-8 byte length of the codepoint starting at byte index i.
 
-    i must lie on a codepoint boundary (Mojo strings are valid UTF-8, and
-    callers advance by whole codepoints). Needed because indexing a
-    continuation byte (s[byte=j] mid-character) aborts the process."""
-    var cp = ord(s[byte=i])
-    if cp < 0x80:
+    Byte-safe (决策-83/ADR-0058): classification uses the raw lead byte from
+    `as_bytes()`, never `s[byte=i]` (which asserts mid-codepoint). Off-boundary
+    continuation bytes (0x80..0xBF) yield 1 so byte-wise callers advance past
+    them instead of aborting."""
+    var b = Int(s.as_bytes()[i])
+    if b < 0x80:
         return 1
-    if cp < 0x800:
+    if b < 0xC0:
+        return 1
+    if b < 0xE0:
         return 2
-    if cp < 0x10000:
+    if b < 0xF0:
         return 3
     return 4
 
@@ -233,6 +241,11 @@ def span_to_str(bs: Span[UInt8, _, address_space=AddressSpace.GENERIC]) -> Strin
     if all_ascii:
         return String(unsafe_from_utf8=bs)
 
+    # Robust UTF-8 decode (决策-84/ADR-0059): mirror decode_utf8_bytes with
+    # full bounds + continuation checks. The C bridge NUL-terminates its slices
+    # (决策-36), but a lone invalid lead byte (0xFF / truncated run) previously
+    # read past the span end -> Assert Error -> server crash. Invalid sequences
+    # degrade to U+FFFD instead.
     var sb = StringBuilder()
     var i = 0
     while i < n:
@@ -241,15 +254,33 @@ def span_to_str(bs: Span[UInt8, _, address_space=AddressSpace.GENERIC]) -> Strin
             sb.append_byte(b)
             i += 1
         elif b < 0xC0:
-            sb.append_codepoint(0xFFFD)
+            sb.append_codepoint(0xFFFD)   # stray continuation byte
             i += 1
         elif b < 0xE0:
-            sb.append_codepoint((b & 0x1F) * 64 + (Int(bs[i + 1]) & 0x3F))
+            if i + 1 >= n or (Int(bs[i + 1]) & 0xC0) != 0x80:
+                sb.append_codepoint(0xFFFD)
+                i += 1
+                continue
+            var cp2 = ((b & 0x1F) << 6) | (Int(bs[i + 1]) & 0x3F)
+            sb.append_codepoint(0xFFFD if cp2 < 0x80 else cp2)  # overlong
             i += 2
         elif b < 0xF0:
-            sb.append_codepoint((b & 0x0F) * 4096 + (Int(bs[i + 1]) & 0x3F) * 64 + (Int(bs[i + 2]) & 0x3F))
+            if i + 2 >= n or (Int(bs[i + 1]) & 0xC0) != 0x80 or (Int(bs[i + 2]) & 0xC0) != 0x80:
+                sb.append_codepoint(0xFFFD)
+                i += 1
+                continue
+            var cp3 = ((b & 0x0F) << 12) | ((Int(bs[i + 1]) & 0x3F) << 6) | (Int(bs[i + 2]) & 0x3F)
+            sb.append_codepoint(0xFFFD if (cp3 < 0x800 or (cp3 >= 0xD800 and cp3 <= 0xDFFF)) else cp3)
             i += 3
-        else:
-            sb.append_codepoint((b & 0x07) * 262144 + (Int(bs[i + 1]) & 0x3F) * 4096 + (Int(bs[i + 2]) & 0x3F) * 64 + (Int(bs[i + 3]) & 0x3F))
+        elif b < 0xF5:
+            if i + 3 >= n or (Int(bs[i + 1]) & 0xC0) != 0x80 or (Int(bs[i + 2]) & 0xC0) != 0x80 or (Int(bs[i + 3]) & 0xC0) != 0x80:
+                sb.append_codepoint(0xFFFD)
+                i += 1
+                continue
+            var cp4 = ((b & 0x07) << 18) | ((Int(bs[i + 1]) & 0x3F) << 12) | ((Int(bs[i + 2]) & 0x3F) << 6) | (Int(bs[i + 3]) & 0x3F)
+            sb.append_codepoint(0xFFFD if cp4 < 0x10000 else cp4)  # overlong
             i += 4
+        else:
+            sb.append_codepoint(0xFFFD)   # invalid lead (0xF5..0xFF)
+            i += 1
     return sb.take()

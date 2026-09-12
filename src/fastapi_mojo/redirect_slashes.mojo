@@ -28,9 +28,11 @@ def alt_slash_path(path: String) -> String:
     if path == "" or path == "/":
         return ""
     var n = path.byte_length()
-    if ord(path[byte=n - 1]) == 47:  # '/'
+    # 决策-83/ADR-0058: 字节安全 (Mojo 1.0.0 String[byte=i] 在码点内部 assert;
+    # 原始多字节 path (如 /café) 尾字节是续字节 -> 崩溃).
+    if Int(path.as_bytes()[n - 1]) == 47:  # '/'
         var e = n
-        while e > 0 and ord(path[byte=e - 1]) == 47:
+        while e > 0 and Int(path.as_bytes()[e - 1]) == 47:
             e -= 1
         return String(path[byte=0:e])
     return path + "/"

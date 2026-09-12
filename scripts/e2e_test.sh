@@ -802,6 +802,49 @@ expect_raw_status "chunked -> 411 Length Required" "411 Length Required" "$CHUNK
 CHUNKED_LC_HEX=$(printf_to_hex $'POST /items HTTP/1.1\r\nHost: x\r\ntransfer-encoding: chunked\r\n\r\n')
 expect_raw_status "chunked (lowercase header) -> 411" "411 Length Required" "$CHUNKED_LC_HEX"
 
+# --- 多字节 (raw wire) 字节安全回归 (决策-84/ADR-0059) --------------------------
+# Mojo 1.0.0 `String[byte=i]` 要求 i 落在 codepoint 边界; 原始 (未经 curl 重编码)
+# 的多字节 / 非法字节 wire 输入曾让 server Assert Error 崩溃 (path / header /
+# auth / WS subprotocol / body). 用 fmtool raw (精确字节) 覆盖全链, 末尾存活断言.
+echo "== multibyte raw-wire byte safety (MB) =="
+
+MB_PATH_HEX=$(printf_to_hex $'GET /items/caf\xc3\xa9 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-1 /items/café matched -> 200" "200 OK" "$MB_PATH_HEX"
+MB_SLASH_HEX=$(printf_to_hex $'GET /items/caf\xc3\xa9/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-2 /items/café/ -> 307 redirect" "307 Temporary Redirect" "$MB_SLASH_HEX"
+MB_404_HEX=$(printf_to_hex $'GET /caf\xc3\xa9 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-3 unmatched /café -> 404" "404 Not Found" "$MB_404_HEX"
+MB_404S_HEX=$(printf_to_hex $'GET /caf\xc3\xa9/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-4 unmatched /café/ -> 404" "404 Not Found" "$MB_404S_HEX"
+
+MB_Q_HEX=$(printf_to_hex $'GET /echo?q=caf\xc3\xa9 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-5 raw multibyte query -> 200" "200 OK" "$MB_Q_HEX"
+
+MB_CT_HEX=$(printf_to_hex $'GET /health HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded; caf\xc3\xa9\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-6 multibyte Content-Type -> 200" "200 OK" "$MB_CT_HEX"
+MB_FFHDR_HEX=$(printf_to_hex $'GET /health HTTP/1.1\r\nHost: x\r\nContent-Type: \xff\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-7 invalid-lead-byte header -> 200" "200 OK" "$MB_FFHDR_HEX"
+
+MB_BASIC_HEX=$(printf_to_hex $'GET /basic HTTP/1.1\r\nHost: x\r\nAuthorization: Basic caf\xc3\xa9\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-8 Basic café -> 401" "401 Unauthorized" "$MB_BASIC_HEX"
+MB_BEARER_HEX=$(printf_to_hex $'GET /secure HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer caf\xc3\xa9\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-9 Bearer café -> 401" "401 Unauthorized" "$MB_BEARER_HEX"
+MB_DIGEST_HEX=$(printf_to_hex $'GET /digest HTTP/1.1\r\nHost: x\r\nAuthorization: Digest caf\xc3\xa9\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-10 Digest café -> 200 (scheme ok)" "200 OK" "$MB_DIGEST_HEX"
+MB_JWT_HEX=$(printf_to_hex $'GET /secure-jwt HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer caf\xc3\xa9\r\nConnection: close\r\n\r\n')
+expect_raw_status "MB-11 Bearer café JWT -> 401" "401 Unauthorized" "$MB_JWT_HEX"
+
+MB_WS_HEX=$(printf_to_hex $'GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: caf\xc3\xa9\r\n\r\n')
+expect_raw_status "MB-12 WS subprotocol café -> 101" "101 Switching Protocols" "$MB_WS_HEX"
+MB_WSCHAT_HEX=$(printf_to_hex $'GET /ws/chat HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: caf\xc3\xa9\r\n\r\n')
+expect_raw_status "MB-13 WS /ws/chat café -> 400" "400 Bad Request" "$MB_WSCHAT_HEX"
+
+MB_BODY_HEX=$(printf_to_hex $'POST /bs/detail HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{"s":caf\xc3\xa9}')
+expect_raw_status "MB-14 unquoted multibyte JSON scalar -> 422" "422 Unprocessable Entity" "$MB_BODY_HEX"
+
+expect_code "MB-15 server alive after multibyte sweep -> 200" 200 "$BASE/health"
+
+
 # --- HEAD / OPTIONS ----------------------------------------------------------
 
 echo "== HEAD / OPTIONS =="
@@ -985,6 +1028,20 @@ if [[ "$ACL_READY" == 1 ]]; then
 else
     fail "F7 access log: second server did not start" "see $ACL_LOG"
 fi
+    # 决策-84/ADR-0059: JSON access log 中原始多字节 path 不得崩溃 (middleware._json_escape)
+    MB_ACL_HEX=$(printf_to_hex $'GET /items/caf\xc3\xa9 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+    MB_ACL_RESP=$("$FMTOOL" raw "$ACL_PORT" "$MB_ACL_HEX")
+    if [[ "$MB_ACL_RESP" == *"200 OK"* ]]; then
+        pass "MB-16 json access log multibyte path -> 200"
+    else
+        fail "MB-16 json access log multibyte path -> 200" "resp: $MB_ACL_RESP"
+    fi
+    sleep 0.2
+    if grep -qF '"path":"/items/café"' "$ACL_LOG"; then
+        pass "MB-17 json log emits multibyte path verbatim"
+    else
+        fail "MB-17 json log emits multibyte path verbatim" "log: $(tail -3 "$ACL_LOG")"
+    fi
 kill -TERM "$ACL_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$ACL_PID" 2>/dev/null
