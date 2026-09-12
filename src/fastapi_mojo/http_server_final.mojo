@@ -27,7 +27,7 @@ from openapi_custom import check_openapi_specs  # 决策-52 (ADR-0027)
 from header_params import parse_header_entry, check_header_specs  # 决策-53 (ADR-0028)
 from std.os import getenv  # 决策-52: app 级 OPENAPI env (请求期读, 空 = 默认)
 from streaming import build_sse_body, sse_event_count
-from handler import KIND_SSE, KIND_FILE
+from handler import KIND_SSE, KIND_FILE, KIND_REDIRECT
 from handler import KIND_DEPENDENCY
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from mw_spec import MWSpec, parse_mw_spec, check_mw_spec, mw_plan_request
@@ -708,6 +708,37 @@ def register_routes(mut router: Router) raises:
     var streamempty_h = Handler(KIND_SSE(), "stream_empty_demo")
     streamempty_h.set_data("_stream_body", "")
     router.add_route("/stream-empty", "GET", streamempty_h)
+
+    # 决策-68 (ADR-0043): RedirectResponse demo (KIND_REDIRECT).
+    # 307 默认 (上游 RedirectResponse(url=...) 默认)；URL 按上游 safe set 编码。
+    var redir_h = Handler(KIND_REDIRECT(), "redirect_demo")
+    redir_h.set_data("_redirect_url", "/target")
+    router.add_route("/redirect", "GET", redir_h)
+
+    var redir303_h = Handler(KIND_REDIRECT(), "redirect_303_demo")
+    redir303_h.set_data("_redirect_url", "https://ex.com/x")
+    redir303_h.set_data("_redirect_status", "303 See Other")
+    router.add_route("/redirect/303", "GET", redir303_h)
+
+    var redir301_h = Handler(KIND_REDIRECT(), "redirect_301_demo")
+    redir301_h.set_data("_redirect_url", "/t2")
+    redir301_h.set_data("_redirect_status", "301 Moved Permanently")
+    router.add_route("/redirect/301", "GET", redir301_h)
+
+    var redir308_h = Handler(KIND_REDIRECT(), "redirect_308_demo")
+    redir308_h.set_data("_redirect_url", "/t3")
+    redir308_h.set_data("_redirect_status", "308 Permanent Redirect")
+    router.add_route("/redirect/308", "GET", redir308_h)
+
+    # URL quoting: 空格 -> %20 (safe 集保留 :/%#?=@[]!$&'()*+,;)。
+    var redirq_h = Handler(KIND_REDIRECT(), "redirect_quote_demo")
+    redirq_h.set_data("_redirect_url", "/p a th?x=1&y=2#frag")
+    router.add_route("/redirect/quote", "GET", redirq_h)
+
+    # follow 语义 demo: 307 -> /health (fmtool testclient follow 得 200)。
+    var redirf_h = Handler(KIND_REDIRECT(), "redirect_follow_demo")
+    redirf_h.set_data("_redirect_url", "/health")
+    router.add_route("/redirect/health", "GET", redirf_h)
 
     # F10 (v0.5.1): Cookie 参数注入 demo. _reads_cookies = 声明读取的 cookie 名;
     # dispatch 从 Cookie 头解析 (RFC 6265: ';' 分隔 '=' 切) 注入 params["cookie_<name>"].
@@ -1715,6 +1746,30 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                     var fdur = mw_timing(mw_chain, start_ms)
                                     _finish_request(mw_chain, req_id, method, path, query,
                                                fstatus + " (file)", fdur)
+                                    if external_call["get_close_after_response", Int]() != 0:
+                                        external_call["conn_done", NoneType](cfd, False)
+                                    else:
+                                        external_call["conn_done", NoneType](cfd, True)
+                                    continue
+
+                                # 决策-68 (ADR-0043): RedirectResponse 等价
+                                # (上游 Starlette: 无 Content-Type + Content-Length: 0 +
+                                # Location 头; URL 按上游 safe set 百分号编码).
+                                # 声明 _redirect_url + 可选 _redirect_status
+                                # (默认 "307 Temporary Redirect"; 303/301/308 同型).
+                                if route_result.handler.kind == KIND_REDIRECT():
+                                    var rurl = ""
+                                    if "_redirect_url" in route_result.handler.data:
+                                        rurl = route_result.handler.data["_redirect_url"]
+                                    var rstatus = "307 Temporary Redirect"
+                                    if "_redirect_status" in route_result.handler.data:
+                                        rstatus = route_result.handler.data["_redirect_status"]
+                                    _ = external_call["send_redirect_response", Int](
+                                        cfd, rstatus.as_c_string_slice(),
+                                        rurl.as_c_string_slice())
+                                    var rdur = mw_timing(mw_chain, start_ms)
+                                    _finish_request(mw_chain, req_id, method, path, query,
+                                               rstatus + " (redirect)", rdur)
                                     if external_call["get_close_after_response", Int]() != 0:
                                         external_call["conn_done", NoneType](cfd, False)
                                     else:

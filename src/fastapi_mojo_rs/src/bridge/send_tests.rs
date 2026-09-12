@@ -494,3 +494,68 @@ fn send_response_identity_when_client_no_gzip() {
     assert_eq!(b, &body[..], "body must be untouched");
     reset_request_fields();
 }
+
+// ---------- 决策-68 (ADR-0043): RedirectResponse ----------
+
+/// 上游 Starlette `quote(url, safe=":/%#?=@[]!$&'()*+,;")` 等价:
+/// alnum + `_.-~` + safe set 保留; 空格 / 引号 / 非 ASCII -> %XX (大写).
+#[test]
+fn redirect_quote_matches_starlette_safe_set() {
+    assert_eq!(redirect_quote("/target"), "/target");
+    assert_eq!(redirect_quote("/p a th?x=1&y=2#frag"), "/p%20a%20th?x=1&y=2#frag");
+    assert_eq!(redirect_quote("https://ex.com/x"), "https://ex.com/x");
+    // 保留字面: safe 集含 % # ? = @ [ ] ! $ & ' ( ) * + , ; : /
+    assert_eq!(redirect_quote("/a%2Fb#c?d=e@f[g]!$&'()*+,;"), "/a%2Fb#c?d=e@f[g]!$&'()*+,;");
+    // 不安全: 空格 %20 / 双引号 %22 / 反斜杠 %5C / 尖括号 / 反引号 / 花括号 / 竖线
+    assert_eq!(redirect_quote("a b"), "a%20b");
+    assert_eq!(redirect_quote("\"<>\\`{}|"), "%22%3C%3E%5C%60%7B%7D%7C");
+    // 非 ASCII (UTF-8 逐字节)
+    assert_eq!(redirect_quote("中"), "%E4%B8%AD");
+    // 波浪号 / 下划线 / 点 / 连字符 恒安全
+    assert_eq!(redirect_quote("~_.-"), "~_.-");
+}
+
+/// 头装配: 无 Content-Type, Content-Length: 0, Location, 空 body。
+#[test]
+fn build_redirect_headers_no_content_type() {
+    let h = build_redirect_headers("307 Temporary Redirect", "/target", false, &[]);
+    let text = String::from_utf8(h).unwrap();
+    assert!(text.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"));
+    assert!(text.contains("Content-Length: 0\r\n"));
+    assert!(text.contains("Connection: close\r\n"));
+    assert!(text.contains("Location: /target\r\n"));
+    assert!(!text.contains("Content-Type"), "redirect must not set Content-Type");
+    assert!(text.ends_with("\r\n\r\n"), "header block must terminate with blank line");
+}
+
+/// 真 socket: send_redirect_response 写出正确字节 + 无 body。reset 后默认
+/// close_after_response = true -> Connection: close; 无 Origin -> 无 CORS 行。
+#[test]
+fn send_redirect_response_writes_location_and_no_body() {
+    reset_request_fields();
+    let mut cp = ConnPair::new();
+    let rc = send_redirect_response(cp.b, "307 Temporary Redirect", "/p a th");
+    assert_eq!(rc, 0);
+    let resp = recv_all(&mut cp);
+    let text = String::from_utf8_lossy(&resp);
+    assert!(text.contains("Location: /p%20a%20th"), "text: {text}");
+    assert!(!text.contains("Content-Type"), "no content-type: {text}");
+    let b = body_after_headers(&resp);
+    assert!(b.is_empty(), "redirect body must be empty, got {b:?}");
+    reset_request_fields();
+}
+
+/// 303/301/308 状态行透传 (上游 status_code 参数等价)。
+#[test]
+fn send_redirect_response_passes_status_through() {
+    reset_request_fields();
+    for st in ["303 See Other", "301 Moved Permanently", "308 Permanent Redirect"] {
+        let mut cp = ConnPair::new();
+        assert_eq!(send_redirect_response(cp.b, st, "/x"), 0);
+        let resp = recv_all(&mut cp);
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with(&format!("HTTP/1.1 {st}\r\n")), "text: {text}");
+        assert!(text.contains("Location: /x\r\n"));
+    }
+    reset_request_fields();
+}

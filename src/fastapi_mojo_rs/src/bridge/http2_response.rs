@@ -92,6 +92,19 @@ pub fn send_preflight(fd: c_int, status: &str, extra: &str, body: &[u8]) -> c_in
     )
 }
 
+/// 决策-68: RedirectResponse (header-only, 空 body). 无 content-type,
+/// `content-length: 0`, 可选 `location` (extra 行), END_STREAM 直接落在 HEADERS.
+pub fn send_redirect(fd: c_int, status: &str, extra: &str) -> c_int {
+    let extra = combined_extra(if extra.is_empty() { None } else { Some(extra) });
+    let Some(stream) = reserve_stream(fd, 0) else {
+        return -1;
+    };
+    let Some(frames) = header_frames(stream, status, None, Some(0), true, &extra) else {
+        return -1;
+    };
+    send_frames(fd, status, &frames)
+}
+
 fn reserve_stream(fd: c_int, body_len: usize) -> Option<u32> {
     if body_len > MAX_RESPONSE_BODY {
         return None;

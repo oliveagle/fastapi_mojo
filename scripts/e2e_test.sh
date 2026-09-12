@@ -29,6 +29,7 @@
 #   - GZip 中间件: FASTAPI_MOJO_GZIP env 声明式 (决策-40, GZ-1..GZ-5)
 #   - Rust JSON serializer opt-in: FASTAPI_MOJO_JSON_SERIALIZER=rust (决策-66, JR-1..JR-6)
 #   - OAuth2 scopes: _auth_scopes gate + oauth2 flows OpenAPI (决策-67, OT-24..OT-33)
+#   - RedirectResponse: _redirect_url + _redirect_status 307/303/301/308 + URL quote (决策-68, RD-1..RD-10)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
@@ -1524,6 +1525,42 @@ fi
 OT33_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Bearer $OT_T1" "$BASE/secure-jwt/items")
 if [[ "$OT33_CODE" == "403" ]]; then pass "OT-33 valid token without scope claim -> 403"
 else fail "OT-33 valid token without scope claim -> 403" "got $OT33_CODE"; fi
+
+# RD-1..RD-10: RedirectResponse (决策-68, ADR-0043; 上游 Starlette 等价) ---------------
+# 上游: media_type=None -> 无 Content-Type; content-length: 0; Location 经
+# quote(url, safe=":/%#?=@[]!$&'()*+,;"); 默认 status 307; 303/301/308 同型.
+RD1_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/redirect")
+if [[ "$RD1_HDR" == *'HTTP/1.1 307 Temporary Redirect'* ]]; then pass "RD-1 /redirect default 307 Temporary Redirect"
+else fail "RD-1 /redirect default 307 Temporary Redirect" "hdr: ${RD1_HDR:0:200}"; fi
+if [[ "$RD1_HDR" == *$'Location: /target'* ]]; then pass "RD-2 Location: /target"
+else fail "RD-2 Location: /target" "hdr: ${RD1_HDR:0:200}"; fi
+if [[ "$RD1_HDR" != *'Content-Type'* ]]; then pass "RD-3 no Content-Type (media_type=None quirk)"
+else fail "RD-3 no Content-Type (media_type=None quirk)" "hdr: ${RD1_HDR:0:200}"; fi
+RD4_LEN=$(http_body "$BASE/redirect" | wc -c | tr -d ' ')
+if [[ "$RD1_HDR" == *'Content-Length: 0'* && "$RD4_LEN" == "0" ]]; then pass "RD-4 Content-Length: 0 + empty body"
+else fail "RD-4 Content-Length: 0 + empty body" "hdr=${RD1_HDR:0:120} body_len=$RD4_LEN"; fi
+RD5_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/redirect/303")
+if [[ "$RD5_HDR" == *'HTTP/1.1 303 See Other'* && "$RD5_HDR" == *'Location: https://ex.com/x'* ]]; then
+    pass "RD-5 /redirect/303 -> 303 See Other + absolute Location"
+else fail "RD-5 /redirect/303 -> 303 See Other + absolute Location" "hdr: ${RD5_HDR:0:200}"; fi
+RD6_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/redirect/301")
+if [[ "$RD6_HDR" == *'HTTP/1.1 301 Moved Permanently'* ]]; then pass "RD-6 /redirect/301 -> 301 Moved Permanently"
+else fail "RD-6 /redirect/301 -> 301 Moved Permanently" "hdr: ${RD6_HDR:0:200}"; fi
+RD7_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/redirect/308")
+if [[ "$RD7_HDR" == *'HTTP/1.1 308 Permanent Redirect'* ]]; then pass "RD-7 /redirect/308 -> 308 Permanent Redirect"
+else fail "RD-7 /redirect/308 -> 308 Permanent Redirect" "hdr: ${RD7_HDR:0:200}"; fi
+RD8_HDR=$(curl -s -D - -o /dev/null --max-time 5 "$BASE/redirect/quote")
+if [[ "$RD8_HDR" == *'Location: /p%20a%20th?x=1&y=2#frag'* ]]; then pass "RD-8 URL quote space -> %20 (safe set preserved)"
+else fail "RD-8 URL quote space -> %20 (safe set preserved)" "hdr: ${RD8_HDR:0:200}"; fi
+# RD-9/10: fmtool testclient follow 语义 (307 保留 method; --no-follow 见原始 307).
+RD9_OUT=$("$FMTOOL" testclient http GET "$BASE/redirect" --no-follow --json-out 2>&1); RD9_RC=$?
+if [[ "$RD9_RC" == "0" && "$RD9_OUT" == *'"status_code":307'* && "$RD9_OUT" == *'/target'* ]]; then
+    pass "RD-9 testclient --no-follow 307 + location"
+else fail "RD-9 testclient --no-follow 307 + location" "rc=$RD9_RC out=$RD9_OUT"; fi
+RD10_OUT=$("$FMTOOL" testclient http GET "$BASE/redirect/health" --json-out 2>&1); RD10_RC=$?
+if [[ "$RD10_RC" == "0" && "$RD10_OUT" == *'"status_code":200'* && "$RD10_OUT" == *'healthy'* ]]; then
+    pass "RD-10 testclient follow 307 -> 200 /health"
+else fail "RD-10 testclient follow 307 -> 200 /health" "rc=$RD10_RC out=$RD10_OUT"; fi
 
 # --- Form 多值 + 422 parity (决策-45, ADR-0020, P2 矩阵 #5) -------------------------
 # FastAPI 0.141.1 实测: list 多值 (全部 occurrence) / 标量 last-wins / alias (wire

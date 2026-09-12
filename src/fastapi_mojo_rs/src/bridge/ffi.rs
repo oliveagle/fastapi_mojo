@@ -66,6 +66,7 @@ use super::send::{
     send_head_response as send_send_head_response,
     send_html_response as send_send_html_response,
     send_preflight_response as send_send_preflight_response,
+    send_redirect_response as send_send_redirect_response,
     send_simple_response as send_send_simple_response,
     send_simple_response_allow as send_send_simple_response_allow,
     send_static_file as send_send_static_file,
@@ -530,6 +531,20 @@ pub extern "C" fn send_streaming_response(
     let m = unsafe { c_str_lossy(media_type) };
     let e = unsafe { c_str_lossy(extra) };
     send_send_streaming_response(fd, &st, &b, &m, &e)
+}
+
+/// 决策-68: RedirectResponse (无 Content-Type / Content-Length: 0 / Location 头).
+/// `status` 形如 "307 Temporary Redirect"; `location` 为原始 URL (bridge 内
+/// 按上游 safe set 百分号编码)。
+#[no_mangle]
+pub extern "C" fn send_redirect_response(
+    fd: c_int,
+    status: *const c_char,
+    location: *const c_char,
+) -> c_long {
+    let st = unsafe { c_str_lossy(status) };
+    let loc = unsafe { c_str_lossy(location) };
+    send_send_redirect_response(fd, &st, &loc)
 }
 
 #[no_mangle]

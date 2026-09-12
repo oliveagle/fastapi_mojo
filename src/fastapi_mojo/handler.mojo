@@ -56,10 +56,7 @@ def KIND_RUN_CMD() -> Int:
     """执行 data["cmd"] shell 命令, 捕获 stdout/stderr + 进程退出码 + timeout.
     返回 JSON: {"rc":N,"ok":bool,"out":"..","err":"..","timeout":bool}.
     data["timeout_ms"] 可选 (默认 15000). cmd 中的 {key} 由 path/query 参数填充;
-    缺失参数 -> 占位符保留为字面量 (方便上层 debug).
-
-    用于运营面板 (cron 重启 / 配置切换 / 子进程调用 / SSH 包装脚本) 等
-    "HTTP 路由 = 一次 shell 命令" 的场景. run_command_json 在 C 桥实现."""
+    缺失参数 -> 占位符保留为字面量 (方便 debug). run_command_json 在 Rust bridge."""
     return 6
 
 
@@ -67,9 +64,8 @@ def KIND_DEPENDENCY() -> Int:
     """F-DI (Depends, 决策-33): 依赖注入. handler.data["_depends"] = "dep1;dep2"
     声明依赖; dispatch 在调用 run_handler 前解析 (resolve_depends): 逐个按名找
     已注册依赖 handler, 递归解析其 own _depends, 通过 run_handler 派发得 resp_data,
-    注入 req_params (前缀 depname_outputkey). 依赖本身也是 KIND_DEPENDENCY:
-    run_handler 返回其 data 非 '_' 前缀字段作为输出.
-    用于 FastAPI Depends() 语义: 可复用计算 / 共享状态 / 鉴权前置."""
+    注入 req_params (前缀 depname_outputkey). FastAPI Depends() 语义: 可复用计算 /
+    共享状态 / 鉴权前置."""
     return 7
 
 
@@ -88,8 +84,7 @@ def KIND_WS_COUNTER() -> Int:
 
 
 def KIND_WS_GREET() -> Int:
-    """WS 问候 (ADR-0009 {param} 路由演示): 回复 "hello {name}: {msg}",
-    name 来自路由 {name} 参数 (缺失 -> world)."""
+    """WS 问候 (ADR-0009 {param} 演示): 回复 "hello {name}: {msg}" (缺失 -> world)."""
     return 102
 
 
@@ -97,10 +92,8 @@ def KIND_SSE() -> Int:
     """F5: SSE 流式响应. handler.data["_stream_events"] = "msg1|msg2|msg3" 声明要推送的事件.
     dispatch 一次性按 SSE spec 推送所有事件后关连接 (不维护长连接).
     参考 FastAPI 0.140.12 修复: format_sse_event 按行切分 (data 字段内换行 -> 多个 data: 行).
-    F9 (v0.5.1) 可选声明:
-      - data["_stream_status"] = "201 Created" 自定义 status_code (对齐上游 0.140.13).
-      - data["_response_headers"] = "Cache-Control: no-cache" 自定义响应头.
-    """
+    F9 (v0.5.1) 可选: data["_stream_status"] (自定义 status) +
+    data["_response_headers"] (自定义响应头, 对齐上游 0.140.13)."""
     return 200
 
 
@@ -116,12 +109,17 @@ def KIND_FILE() -> Int:
     """决策-48 (Goal-0003 矩阵 #10): FileResponse / Range 通用响应.
     完整协议 (stat/Range/206 单段与 multipart/etag/CD/charset/If-Range/HEAD/
     400/416/500) 在 Rust bridge file_serve (WS 协议原语同层; ADR-0023).
-    声明: _file_path (静态目录相对/绝对) / _file_media (空=guess, octet-stream
-    fallback, text/* +charset) / _file_name (→CD, 非ASCII→filename*) /
-    _file_cdt (默认 attachment) / _file_status (默认 200 OK) /
-    _response_headers (额外头; CT/ETag 不可覆盖 — ADR-0023 §3.5).
-    真实逻辑在 dispatch send_file_response (SSE 同型特例); 此分支只占位."""
+    声明: _file_path / _file_media (空=guess) / _file_name (→CD) / _file_cdt
+    (默认 attachment) / _file_status (默认 200 OK) / _response_headers
+    (CT/ETag 不可覆盖 — ADR-0023 §3.5). 真实逻辑在 dispatch send_file_response."""
     return 300
+
+
+def KIND_REDIRECT() -> Int:
+    """决策-68 (ADR-0043): RedirectResponse 等价 (307/303/301/308 + Location,
+    无 Content-Type). 声明 _redirect_url + 可选 _redirect_status.
+    真实逻辑在 dispatch send_redirect_response (SSE/FILE 同型特例)."""
+    return 400
 
 
 # ---------- Handler 类型 ----------
@@ -381,6 +379,12 @@ def run_handler(handler: Handler,
         var respf = Dict[String, String]()
         respf["message"] = "file response"
         return ("200 OK", respf^)
+
+    # REDIRECT (决策-68): 占位; dispatch 检测到此 kind 后调 send_redirect_response.
+    elif handler.kind == KIND_REDIRECT():
+        var respr = Dict[String, String]()
+        respr["message"] = "redirect response"
+        return ("307 Temporary Redirect", respr^)
 
     else:
         var resp = Dict[String, String]()

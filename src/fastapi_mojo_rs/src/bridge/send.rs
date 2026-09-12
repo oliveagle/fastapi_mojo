@@ -286,6 +286,86 @@ pub fn send_streaming_response(
     0
 }
 
+/// 决策-68 (ADR-0043): 上游 Starlette `RedirectResponse` 的 URL 百分号编码.
+///
+/// Starlette: `quote(str(url), safe=":/%#?=@[]!$&'()*+,;")` — safe set 之外的
+/// 字节按 UTF-8 byte 编成 `%XX` (大写 hex); `urllib.parse.quote` 恒安全集
+/// (alnum + `_.-~`) 亦保留。实测: `"/p a th?x=1&y=2#frag"` ->
+/// `"/p%20a%20th?x=1&y=2#frag"`。
+pub fn redirect_quote(url: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(url.len());
+    for &b in url.as_bytes() {
+        let safe = matches!(b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'_' | b'.' | b'-' | b'~'
+            | b':' | b'/' | b'%' | b'#' | b'?' | b'=' | b'@'
+            | b'[' | b']' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
+            | b'*' | b'+' | b',' | b';');
+        if safe {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// 决策-68: RedirectResponse 头装配 (纯函数, 便于单测).
+///
+/// 上游 Starlette `RedirectResponse` (media_type=None): **无 Content-Type**,
+/// `Content-Length: 0`, `Location: <url>`, 空 body。`location` 应已由
+/// `redirect_quote` 编码; CORS 行由调用方给出 (读请求全局)。
+pub fn build_redirect_headers(
+    status: &str,
+    location: &str,
+    keep_alive: bool,
+    cors_lines: &[String],
+) -> Vec<u8> {
+    let conn = if keep_alive { "keep-alive" } else { "close" };
+    let mut s = String::with_capacity(128 + status.len() + location.len());
+    s.push_str("HTTP/1.1 ");
+    s.push_str(status);
+    s.push_str("\r\nContent-Length: 0\r\nConnection: ");
+    s.push_str(conn);
+    s.push_str("\r\n");
+    for line in cors_lines {
+        s.push_str(line);
+        s.push_str("\r\n");
+    }
+    if !location.is_empty() {
+        s.push_str("Location: ");
+        s.push_str(location);
+        s.push_str("\r\n");
+    }
+    s.push_str("\r\n");
+    s.into_bytes()
+}
+
+/// 决策-68 (ADR-0043): RedirectResponse (307/303/301/308) — 空 body +
+/// `Content-Length: 0` + `Location` 头, 无 Content-Type (上游 media_type=None
+/// quirk)。location 按上游 safe set 百分号编码; HTTP/2 走 header-only 帧。
+pub fn send_redirect_response(fd: c_int, status: &str, location: &str) -> c_long {
+    let location = redirect_quote(location);
+    if http2_response::is_h2(fd) {
+        let extra = if location.is_empty() {
+            String::new()
+        } else {
+            format!("Location: {location}")
+        };
+        return http2_response::send_redirect(fd, status, &extra) as c_long;
+    }
+    let cors_lines = cors::normal_cors_lines(current_origin().as_deref());
+    let hdr = build_redirect_headers(status, &location, !get_close_after_response(), &cors_lines);
+    set_last_status(status.as_bytes());
+    if send_all(fd, &hdr) != 0 {
+        return -1;
+    }
+    0
+}
+
 /// F3b: JSON 响应携带自定义头 (端口 C `send_simple_response` 变体).
 /// extra 为 "\r\n" 分隔的 "Name: value" 行, 末尾不带 CRLF (build_response_headers 内部追加).
 /// 空 extra -> 与 send_simple_response 等价.
