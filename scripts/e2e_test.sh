@@ -1121,6 +1121,76 @@ if [[ "$LF12" == *'multiple of 0.5'* ]]; then
 else fail "LF-12 constraint msg fmt" "got ${LF12:0:240}"; fi
 
 
+
+# 决策-88 (ADR-0063): body 422 detail `input` 的 CPython/Starlette 反序列化-重序列化
+# 规范化. 上游 JSONResponse = json.dumps(ensure_ascii=False, separators=(",",":"));
+# pydantic error 的 input 是**已反序列化对象**, 故重新序列化: 去空白 / 数字规范化
+# (1.50->1.5, 1e2->100.0, -0->0) / 字符串解码重编码 ("\u0041"->"A", caf\u00e9->café).
+# 本实现此前回显原始 JSON span (形态差异). 新叶模块 json_canon.mojo.
+echo "== body input CPython re-serialization (JC) =="
+
+JC1=$(http_body "$BASE/validate/cross" POST '[1, 2, 3]')
+if [[ "$JC1" == *'"input":[1,2,3]'* ]]; then
+    pass "JC-1 top-level array input -> compact [1,2,3]"
+else fail "JC-1 top-level array compact" "got ${JC1:0:220}"; fi
+
+JC2=$(http_body "$BASE/validate/cross" POST '[ "a" , "b" ]')
+if [[ "$JC2" == *'"input":["a","b"]'* ]]; then
+    pass "JC-2 array string ws -> [\"a\",\"b\"]"
+else fail "JC-2 array string ws" "got ${JC2:0:220}"; fi
+
+JC3=$(ct_post 'application/json' "$BASE/validate/cross" '1e2')
+if [[ "$JC3" == *'"input":100.0'* ]]; then
+    pass "JC-3 top-level 1e2 -> 100.0"
+else fail "JC-3 1e2 -> 100.0" "got ${JC3:0:220}"; fi
+
+JC4=$(ct_post 'application/json' "$BASE/validate/cross" '1.50')
+if [[ "$JC4" == *'"input":1.5'* ]]; then
+    pass "JC-4 top-level 1.50 -> 1.5"
+else fail "JC-4 1.50 -> 1.5" "got ${JC4:0:220}"; fi
+
+JC5=$(ct_post 'application/json' "$BASE/validate/cross" '"caf\u00e9"')
+if [[ "$JC5" == *'"input":"café"'* ]]; then
+    pass "JC-5 top-level string \\u00e9 -> café (decoded)"
+else fail "JC-5 string unicode decoded" "got ${JC5:0:220}"; fi
+
+JC6=$(ct_post 'application/json' "$BASE/validate/cross" '"\u0041"')
+if [[ "$JC6" == *'"input":"A"'* ]]; then
+    pass "JC-6 top-level \\u0041 -> A"
+else fail "JC-6 \\u0041 -> A" "got ${JC6:0:220}"; fi
+
+JC7=$(http_body "$BASE/validate/cross" POST '{ "i" : 1 }')
+if [[ "$JC7" == *'"input":{"i":1}'* ]]; then
+    pass "JC-7 nested missing input -> compact {\"i\":1}"
+else fail "JC-7 nested missing compact" "got ${JC7:0:220}"; fi
+
+JC8=$(http_body "$BASE/validate/cross" POST '{"i":[1, 2],"f":1,"b":1}')
+if [[ "$JC8" == *'"type":"int_type"'* && "$JC8" == *'"input":[1,2]'* ]]; then
+    pass "JC-8 field int_type array input -> [1,2]"
+else fail "JC-8 field array compact" "got ${JC8:0:240}"; fi
+
+JC9=$(http_body "$BASE/validate/cross" POST '{"i":{"a": 1},"f":1,"b":1}')
+if [[ "$JC9" == *'"type":"int_type"'* && "$JC9" == *'"input":{"a":1}'* ]]; then
+    pass "JC-9 field int_type object input -> {\"a\":1}"
+else fail "JC-9 field object compact" "got ${JC9:0:240}"; fi
+
+JC10=$(http_body "$BASE/bs/detail" POST '{"s":"\b","n":12,"f":0.5,"xs":[2],"mode":"fast"}')
+if [[ "$JC10" == *'"input":"\b"'* ]]; then
+    pass "JC-10 string field control char -> short escape \"\\b\""
+else fail "JC-10 control char short escape" "got ${JC10:0:240}"; fi
+
+# 合法请求 (含冗余空白) 仍 200 (回归), 且 detail 恒为合法 JSON
+JC11=$(http_body "$BASE/validate/cross" POST '{ "i" : 1 , "f" : 2.5 , "b" : true }')
+if [[ "$JC11" == *'"body_i": "1"'* && "$JC11" == *'"body_f": "2.5"'* && "$JC11" == *'"body_b": "true"'* ]]; then
+    pass "JC-11 valid request with ws -> 200 (regression)"
+else fail "JC-11 valid ws regression" "got ${JC11:0:220}"; fi
+
+curl -s --max-time 10 -X POST -H 'Content-Type: application/json' --data '[1, 2, 3]' "$BASE/validate/cross" > "$TMP/jc12.json"
+if "$FMTOOL" jsoncheck "$TMP/jc12.json" >/dev/null 2>&1; then
+    pass "JC-12 non-canonical input detail is valid JSON"
+else fail "JC-12 detail valid JSON" "jsoncheck failed"; fi
+
+
 # --- HEAD / OPTIONS ----------------------------------------------------------
 
 echo "== HEAD / OPTIONS =="

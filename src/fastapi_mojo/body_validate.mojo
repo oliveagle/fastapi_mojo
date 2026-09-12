@@ -13,6 +13,7 @@ from body_coerce import _coerce_body_scalar, _elem_type_err, _elem_json_type
 from body_json import validate_body_json, content_type_is_json
 from body_constraints import (_json_input_frag, _json_input_frag_typed,
                               _apply_constraints, _apply_elem_constraints)
+from json_canon import canon_json, json_string_literal
 from handler import Handler
 from router import Router
 from params_query import ParsedParams
@@ -117,7 +118,8 @@ def _body_input(raw_body: String) -> String:
     空 body -> null). 合法 JSON body 原文即对象字面量, 原样嵌入."""
     if raw_body == "":
         return "null"
-    return raw_body
+    # 决策-88 (ADR-0063): CPython/Starlette 反序列化-重序列化 (去空白等)。
+    return canon_json(raw_body)
 
 
 def _strip_quotes(v: String) -> String:
@@ -378,7 +380,7 @@ def validate_body_schema(handler: Handler, method: String,
         errs.append(err_obj("[\"body\"]",
                             "Input should be a valid dictionary or object to extract fields from",
                             "model_attributes_type",
-                            "\"" + json_escape(body_str) + "\""))
+                            json_string_literal(body_str)))
         return (False, errs^, ok_vals^)
     var scan = validate_body_json(body_str)
     if not scan.ok:

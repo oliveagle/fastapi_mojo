@@ -8,6 +8,7 @@
 from body_schema import (FieldSpec, err_obj_ctx, fmt_num, _split_top, _trim,
                          _find_eq, _parse_f64, _parse_range, _is_int_lit, _is_num_lit)
 from json import json_escape
+from json_canon import canon_json, json_string_literal
 from std.ffi import external_call, CStringSlice
 
 
@@ -19,16 +20,20 @@ def _body_rgx_match(pattern: String, s: String) -> Int:
 
 
 def _json_input_frag(v: String) raises -> String:
-    """值 -> 合法 JSON 片段: 引号/括号/number/bool/null 开头 -> 原样;
-    其它 (裸 token, 如坏元素 zz) -> 转义字符串 (保 detail JSON 合法)."""
+    """值 (合法 JSON 值 span) -> detail `input` 片段.
+
+    决策-88 (ADR-0063): 对合法 JSON 值走 `canon_json` (CPython/Starlette
+    `json.dumps(ensure_ascii=False, separators=(",",":"))` 等价: 去空白 / 数字
+    规范化 / 字符串解码重编码)。无法识别的裸 token (如坏元素 zz) -> 转义字符串
+    (保 detail JSON 合法)。`canon_json` 解析失败时原样返回 (安全回退)。"""
     var n = v.byte_length()
     if n == 0:
         return "null"
     var c0 = ord(v[byte=0])
     if c0 == 34 or c0 == 123 or c0 == 91:
-        return v
+        return canon_json(v)
     if _is_num_lit(v) or _is_int_lit(v):
-        return v
+        return canon_json(v)
     if v == "true" or v == "false" or v == "null":
         return v
     return "\"" + json_escape(v) + "\""
@@ -38,9 +43,11 @@ def _json_input_frag_typed(json_type: String, v: String) raises -> String:
 
     上游 pydantic input 保留原 JSON 类型: JSON 字符串 "123"/"1e1" 报错时
     input 是字符串 (带引号), 而非数字。原 `_json_input_frag` 仅按字面形状猜测,
-    把 "123" 误渲染为裸 123 (parity bug, 实测上游 string_too_short input="1")."""
+    把 "123" 误渲染为裸 123 (parity bug, 实测上游 string_too_short input="1").
+
+    决策-88: string 分支走 `json_string_literal` (CPython 转义: \b/\f 短转义)。"""
     if json_type == "string":
-        return "\"" + json_escape(v) + "\""
+        return json_string_literal(v)
     return _json_input_frag(v)
 
 def _item_word(n: Int) -> String:
