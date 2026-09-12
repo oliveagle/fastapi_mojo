@@ -81,15 +81,33 @@ pub fn send_streaming(fd: c_int, status: &str, body: &str, media_type: &str, ext
     send_frames(fd, status, &frames)
 }
 
+/// 决策-73 (ADR-0048): 预检响应 — 直接走 `header_frames`（**不**注入
+/// `normal_cors_lines`; 预检头已在 extra 中）; 非空 body → `text/plain;
+/// charset=utf-8`（上游 PlainTextResponse）, 空 body (204 通配超集) → 无 CT。
 pub fn send_preflight(fd: c_int, status: &str, extra: &str, body: &[u8]) -> c_int {
-    send_response(
-        fd,
+    let include_body = !body.is_empty();
+    let Some(stream) = reserve_stream(fd, body.len()) else {
+        return -1;
+    };
+    let ct = if include_body {
+        Some(apply_charset_rule("text/plain"))
+    } else {
+        None
+    };
+    let Some(mut frames) = header_frames(
+        stream,
         status,
-        "application/json",
-        body,
-        !body.is_empty(),
-        Some(extra),
-    )
+        ct.as_deref(),
+        Some(body.len()),
+        !include_body,
+        extra,
+    ) else {
+        return -1;
+    };
+    if include_body {
+        frames.push(frame(DATA, END_STREAM, stream, body));
+    }
+    send_frames(fd, status, &frames)
 }
 
 /// 决策-68: RedirectResponse (header-only, 空 body). 无 content-type,

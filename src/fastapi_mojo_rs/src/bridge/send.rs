@@ -8,7 +8,7 @@
 //!   - `send_simple_response`    §1490-1493 (application/json)
 //!   - `send_simple_response_allow` §1495-1503 (RFC 7231 Allow 头)
 //!   - `send_head_response`      §1505-1508 (仅头无体)
-//!   - `send_preflight_response` §1517-1526 (固定 204; 字节串在 response.rs)
+//!   - `send_preflight_response` §1517-1526 (决策-73: 返回值=状态码; 字节串在 response.rs)
 //!   - `serve_static_file`       §1530-1582 (realpath 防穿越 + O_NOFOLLOW +
 //!     1MB 上限 + Range-free)
 //!   - `send_static_file` / `send_static_file_head` §1584-1591
@@ -29,8 +29,8 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
 use super::request::{
-    current_accepts_gzip, current_cors_request, current_origin, get_close_after_response,
-    set_last_status,
+    current_accepts_gzip, current_cors_request, current_origin, current_pna,
+    get_close_after_response, set_last_status,
 };
 use super::http2_response;
 use super::cors;
@@ -387,24 +387,33 @@ pub fn send_head_response(fd: c_int, status: &str, body: &[u8]) -> c_long {
     send_response(fd, status, "application/json", body, false, None) as c_long
 }
 
-/// OPTIONS 预检 (端口 C `send_preflight_response` §1517-1526, 字节串在
+/// OPTIONS 预检 (决策-42 → 决策-73 ADR-0048; H1 字节串在
 /// response.rs::build_preflight_response)。
+///
+/// 返回值 = HTTP 状态码 (204/200/400, 供 dispatch 写 access log); -1 = 发送失败。
 pub fn send_preflight_response(fd: c_int) -> c_long {
-    if http2_response::is_h2(fd) {
-        let (acrm, achr) = current_cors_request();
-        let (status, lines, err) = cors::preflight_build(
-            current_origin().as_deref(), acrm.as_deref(), achr.as_deref(),
-        );
-        let body = err.map(|message| {
-            let escaped = String::from_utf8_lossy(&json_escape(message.as_bytes())).into_owned();
-            format!("{{\"error\":\"{escaped}\",\"status\":\"{status}\"}}").into_bytes()
-        });
-        return http2_response::send_preflight(
-            fd, status, &lines.join("\r\n"), body.as_deref().unwrap_or_default(),
-        ) as c_long;
+    let origin = current_origin();
+    let (acrm, achr) = current_cors_request();
+    let pna = current_pna();
+    let (status, lines, body) = cors::preflight_build(
+        origin.as_deref(),
+        acrm.as_deref(),
+        achr.as_deref(),
+        pna.as_deref(),
+    );
+    let rc = if http2_response::is_h2(fd) {
+        http2_response::send_preflight(fd, status, &lines.join("\r\n"), body.as_bytes())
+    } else {
+        let resp = build_preflight_response();
+        send_all(fd, &resp)
+    };
+    if rc != 0 {
+        return -1;
     }
-    let resp = build_preflight_response();
-    send_all(fd, &resp) as c_long
+    status.split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<c_long>().ok())
+        .unwrap_or(0)
 }
 
 /// 原始 HTML 响应 (端口 C `send_html_response` §1600-1604)。

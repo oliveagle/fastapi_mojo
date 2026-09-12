@@ -34,7 +34,7 @@
 #   - OpenIdConnect + OAuth2AuthorizationCodeBearer (runtime + OpenAPI) (决策-70, OI-1..4 / AC-1..7)
 #   - RedirectResponse: _redirect_url + _redirect_status 307/303/301/308 + URL quote (决策-68, RD-1..RD-10)
 #   - redirect_slashes (Starlette 默认尾斜杠 307) (决策-71, SL-1..SL-10)
-#   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42, CRS-1..CRS-8)
+#   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42/73, CRS-1..CRS-9 + CRS2-1..4)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
 #   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
 #     (决策-45, FM-1..FM-20; OpenAPI JSON 合法性 jsoncheck 门禁)
@@ -1352,39 +1352,36 @@ kill -TERM "$GZ_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$GZ_PID" 2>/dev/null
 
-# --- CORS 完整配置 (决策-42, ADR-0017, Goal-0003 P2 矩阵 #15) -------------------
-# Starlette CORSMiddleware 声明式 env 等价形态:
-#   FASTAPI_MOJO_CORS_ORIGINS (CSV 或 *, 默认 * = 通配) / _METHODS (默认 7 方法) /
-#   _HEADERS (CSV 或 *, 默认 Content-Type, Authorization) / _CREDENTIALS (默认 false) /
-#   _MAX_AGE (默认 600 = Starlette; C 时代 86400 已对齐上游).
-# 普通响应: 仅请求带被允许 Origin 时输出 (通配 → *, 白名单/credentials → 回显;
-#   credentials → + Allow-Credentials: true; 不被允许 → 不带任何 CORS 头).
-# 预检 (OPTIONS): origin 不允许 / ACRM 越界 / ACHR 越界 → 400 JSON; 通过 → 204 +
-#   动态头集; 裸 OPTIONS (无 Origin) → 204 通配超集 (C 时代行为, 浏览器无差异).
+# --- CORS 完整配置 (决策-42 ADR-0017 → 决策-73 ADR-0048 上游对齐) ---------------
+# Starlette 1.6.0 CORSMiddleware 声明式 env 等价:
+#   _ORIGINS (CSV 或 *) / _ORIGIN_REGEX (re.fullmatch) / _METHODS (* → ALL_METHODS) /
+#   _HEADERS (CSV 或 * → 预检镜像请求头) / _CREDENTIALS / _MAX_AGE /
+#   _EXPOSE_HEADERS / _PRIVATE_NETWORK.
+# 普通响应: simple_headers 恒发 (ACAO */Credentials/Expose-Headers); 命中 echo
+#   (全通配+credentials, 或白名单/regex 命中) → 回显 origin + `Vary: Origin`.
+# 真预检 (Origin + ACRM): 通过 → 200 + text/plain "OK" + 完整头集; 失败 → 400 +
+#   text/plain "Disallowed CORS <origin,method,headers,private-network>";
+#   裸 OPTIONS / 无 ACRM → 204 通配超集 (文档化偏差, ADR-0048 §7).
 # 零 python3 (Track B 决策-22): curl -D 抓头 + grep.
-echo "== CORS (决策-42) =="
-CRS_PORT=$((PORT + 102))
-CRS_LOG="$TMP/cors.log"
-( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
-    FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
-    FASTAPI_MOJO_CORS_ORIGINS="http://a.com,http://b.com" \
-    FASTAPI_MOJO_CORS_CREDENTIALS=true \
-    FASTAPI_MOJO_CORS_MAX_AGE=120 \
-    "$BIN" --port "$CRS_PORT" \
-    > "$CRS_LOG" 2>&1 ) &
-CRS_PID=$!
-# 决策-50 (ADR-0025 §3.5-7): 新 bind 后 ~2s 内的首连接可能被本机透明代理
-# 劫持 (Caddy :80 假空 200, 真 server 收不到) — 就绪探针前先等端口稳定,
-# 且用 body 校验 (含 'healthy'; Caddy 假响应 body 为空) 防假 ready.
-# 干净环境 (CI) 无害: 仅多等 5s.
-sleep 5
-CRS_READY=0
-for _ in $(seq 1 30); do
-    if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$CRS_PORT/health" 2>/dev/null)" == *healthy* ]]; then
-        CRS_READY=1; break
-    fi
-    sleep 0.3
-done
+echo "== CORS (决策-73) =="
+crs_boot() { # port logfile [env...]
+    local port="$1" log="$2"; shift 2
+    ( cd "$SRC" && exec env FASTAPI_MOJO_STATIC_DIR="$SRC/static" \
+        FASTAPI_MOJO_RECV_TIMEOUT=2 FASTAPI_MOJO_IDLE_TIMEOUT=2 \
+        "$@" "$BIN" --port "$port" > "$log" 2>&1 ) &
+    echo $!
+}
+crs_wait() { # port
+    local port="$1"
+    sleep 5
+    for _ in $(seq 1 30); do
+        if [[ "$(curl -s --max-time 1 "http://127.0.0.1:$port/health" 2>/dev/null)" == *healthy* ]]; then
+            return 0
+        fi
+        sleep 0.3
+    done
+    return 1
+}
 # 发一次请求, 头/体分别落盘, 打印 http code (\r 已剥, grep 大小写不敏感)
 crs_req() { # [curl args...]
     curl -s --max-time 5 -D "$TMP/crs_hdr" -o "$TMP/crs_body" "$@" >/dev/null 2>&1
@@ -1394,9 +1391,15 @@ crs_req() { # [curl args...]
 crs_has_hdr() { # pattern (grep -Ei 对 crs_hdr_c)
     grep -Eiq "$1" "$TMP/crs_hdr_c"
 }
-if [[ "$CRS_READY" == 1 ]]; then
+CRS_PORT=$((PORT + 102))
+CRS_LOG="$TMP/cors.log"
+CRS_PID=$(crs_boot "$CRS_PORT" "$CRS_LOG" \
+    FASTAPI_MOJO_CORS_ORIGINS="http://a.com,http://b.com" \
+    FASTAPI_MOJO_CORS_CREDENTIALS=true \
+    FASTAPI_MOJO_CORS_MAX_AGE=120)
+if crs_wait "$CRS_PORT"; then
     CRS_BASE="http://127.0.0.1:$CRS_PORT"
-    # CRS-1: 裸 OPTIONS / (主 server 默认通配, 无 Origin) → 204 + ACAO * (C 时代回归)
+    # CRS-1: 裸 OPTIONS / (主 server 默认通配, 无 Origin) → 204 + ACAO * (通配超集)
     code=$(crs_req -X OPTIONS "$BASE/")
     if [[ "$code" == "204" ]] && crs_has_hdr '^access-control-allow-origin: *\*$'; then
         pass "CRS-1 bare OPTIONS → 204 + ACAO *"
@@ -1410,58 +1413,73 @@ if [[ "$CRS_READY" == 1 ]]; then
     else
         fail "CRS-2 wildcard config + Origin → ACAO *"
     fi
-    # CRS-3: 白名单命中 + credentials → 回显 origin + Allow-Credentials: true
+    # CRS-3: 白名单命中 + credentials → 回显 + credentials + Vary: Origin
     crs_req -H 'Origin: http://a.com' "$CRS_BASE/health" >/dev/null
-    if crs_has_hdr '^access-control-allow-origin: *http://a\.com$' && crs_has_hdr '^access-control-allow-credentials: *true$'; then
-        pass "CRS-3 allowed origin → echo + credentials"
+    if crs_has_hdr '^access-control-allow-origin: *http://a\.com$' \
+        && crs_has_hdr '^access-control-allow-credentials: *true$' \
+        && crs_has_hdr '^vary: *Origin$'; then
+        pass "CRS-3 allowed origin → echo + credentials + Vary"
     else
-        fail "CRS-3 allowed origin → echo + credentials"
+        fail "CRS-3 allowed origin → echo + credentials + Vary"
     fi
-    # CRS-4: 白名单未命中 → 不带任何 CORS 头
+    # CRS-4: 白名单未命中 → 无 ACAO (上游仍发静态 simple_headers: credentials), 无 Vary
     crs_req -H 'Origin: http://evil.com' "$CRS_BASE/health"
-    if crs_has_hdr 'access-control'; then
-        fail "CRS-4 disallowed origin → no CORS headers" "server emitted CORS for evil.com"
+    if ! crs_has_hdr '^access-control-allow-origin' && ! crs_has_hdr '^vary:'; then
+        pass "CRS-4 disallowed origin → no ACAO/Vary"
     else
-        pass "CRS-4 disallowed origin → no CORS headers"
+        fail "CRS-4 disallowed origin → no ACAO/Vary" "headers: $(cat "$TMP/crs_hdr_c")"
     fi
-    # CRS-5: 预检通过 → 204 + 回显 + credentials + methods + headers + Max-Age 120
+    # CRS-5: 真预检通过 → 200 + text/plain "OK" + 完整头集 (Vary/echo/creds/methods/safelist headers/Max-Age)
     code=$(crs_req -X OPTIONS -H 'Origin: http://a.com' \
         -H 'Access-Control-Request-Method: POST' \
         -H 'Access-Control-Request-Headers: Content-Type' "$CRS_BASE/health")
-    if [[ "$code" == "204" ]] \
+    if [[ "$code" == "200" ]] \
+        && [[ "$(cat "$TMP/crs_body")" == "OK" ]] \
+        && crs_has_hdr '^content-type: *text/plain; charset=utf-8$' \
+        && crs_has_hdr '^vary: *Origin$' \
         && crs_has_hdr '^access-control-allow-origin: *http://a\.com$' \
         && crs_has_hdr '^access-control-allow-credentials: *true$' \
         && crs_has_hdr '^access-control-allow-methods: *GET, POST, PUT, DELETE, HEAD, OPTIONS$' \
-        && crs_has_hdr '^access-control-allow-headers: *Content-Type, Authorization$' \
+        && crs_has_hdr '^access-control-allow-headers: *Accept, Accept-Language, Authorization, Content-Language, Content-Type$' \
         && crs_has_hdr '^access-control-max-age: *120$'; then
-        pass "CRS-5 preflight allowed → 204 + full header set (Max-Age 120)"
+        pass "CRS-5 preflight allowed → 200 OK + full header set"
     else
-        fail "CRS-5 preflight allowed → 204 + full header set" "code=$code"
+        fail "CRS-5 preflight allowed → 200 OK + full header set" "code=$code body=$(cat "$TMP/crs_body")"
     fi
-    # CRS-6: ACRM 越界 (PATCH 不在默认 7 方法) → 400 JSON
+    # CRS-6: ACRM 越界 (PATCH 不在默认方法集) → 400 Disallowed CORS method
     code=$(crs_req -X OPTIONS -H 'Origin: http://a.com' \
         -H 'Access-Control-Request-Method: PATCH' "$CRS_BASE/health")
-    if [[ "$code" == "400" ]] && grep -q '"error":"method not allowed"' "$TMP/crs_body"; then
-        pass "CRS-6 preflight ACRM out of allow_methods → 400"
+    if [[ "$code" == "400" ]] && [[ "$(cat "$TMP/crs_body")" == "Disallowed CORS method" ]]; then
+        pass "CRS-6 preflight ACRM out of allow_methods → 400 method"
     else
-        fail "CRS-6 preflight ACRM out of allow_methods → 400" "code=$code body=$(cat "$TMP/crs_body")"
+        fail "CRS-6 preflight ACRM out of allow_methods → 400 method" "code=$code body=$(cat "$TMP/crs_body")"
     fi
-    # CRS-7: origin 不在白名单 → 400 JSON
+    # CRS-7: origin 不在白名单 → 400 Disallowed CORS origin (仍带 preflight 头集)
     code=$(crs_req -X OPTIONS -H 'Origin: http://evil.com' \
         -H 'Access-Control-Request-Method: GET' "$CRS_BASE/health")
-    if [[ "$code" == "400" ]] && grep -q '"error":"origin not allowed"' "$TMP/crs_body"; then
-        pass "CRS-7 preflight origin not allowed → 400"
+    if [[ "$code" == "400" ]] && [[ "$(cat "$TMP/crs_body")" == "Disallowed CORS origin" ]] \
+        && crs_has_hdr '^access-control-allow-methods:'; then
+        pass "CRS-7 preflight origin not allowed → 400 origin + header set"
     else
-        fail "CRS-7 preflight origin not allowed → 400" "code=$code body=$(cat "$TMP/crs_body")"
+        fail "CRS-7 preflight origin not allowed → 400 origin + header set" "code=$code body=$(cat "$TMP/crs_body")"
     fi
-    # CRS-8: ACHR 越界 (X-Nope 不在默认头集) → 400 JSON
+    # CRS-8: ACHR 越界 (X-Nope 不在 safelist∪默认头集) → 400 Disallowed CORS headers
     code=$(crs_req -X OPTIONS -H 'Origin: http://a.com' \
         -H 'Access-Control-Request-Method: GET' \
         -H 'Access-Control-Request-Headers: X-Nope' "$CRS_BASE/health")
-    if [[ "$code" == "400" ]] && grep -q '"error":"requested header not allowed"' "$TMP/crs_body"; then
-        pass "CRS-8 preflight ACHR out of allow_headers → 400"
+    if [[ "$code" == "400" ]] && [[ "$(cat "$TMP/crs_body")" == "Disallowed CORS headers" ]]; then
+        pass "CRS-8 preflight ACHR out of allow_headers → 400 headers"
     else
-        fail "CRS-8 preflight ACHR out of allow_headers → 400" "code=$code body=$(cat "$TMP/crs_body")"
+        fail "CRS-8 preflight ACHR out of allow_headers → 400 headers" "code=$code body=$(cat "$TMP/crs_body")"
+    fi
+    # CRS-9: PNA 未放行 → 400 Disallowed CORS private-network
+    code=$(crs_req -X OPTIONS -H 'Origin: http://a.com' \
+        -H 'Access-Control-Request-Method: GET' \
+        -H 'Access-Control-Request-Private-Network: true' "$CRS_BASE/health")
+    if [[ "$code" == "400" ]] && [[ "$(cat "$TMP/crs_body")" == "Disallowed CORS private-network" ]]; then
+        pass "CRS-9 preflight PNA disabled → 400 private-network"
+    else
+        fail "CRS-9 preflight PNA disabled → 400 private-network" "code=$code body=$(cat "$TMP/crs_body")"
     fi
 else
     fail "CRS side server did not start" "see $CRS_LOG"
@@ -1469,6 +1487,61 @@ fi
 kill -TERM "$CRS_PID" 2>/dev/null
 sleep 0.3
 kill -9 "$CRS_PID" 2>/dev/null
+
+# --- CORS 精化: regex / expose_headers / PNA / `*` 镜像 (决策-73, ADR-0048) -----
+CRS2_PORT=$((PORT + 103))
+CRS2_LOG="$TMP/cors2.log"
+CRS2_PID=$(crs_boot "$CRS2_PORT" "$CRS2_LOG" \
+    FASTAPI_MOJO_CORS_ORIGINS=" " \
+    FASTAPI_MOJO_CORS_ORIGIN_REGEX='https://.*\.example\.com' \
+    FASTAPI_MOJO_CORS_HEADERS="*" \
+    FASTAPI_MOJO_CORS_METHODS="*" \
+    FASTAPI_MOJO_CORS_EXPOSE_HEADERS="X-Total,X-Page" \
+    FASTAPI_MOJO_CORS_PRIVATE_NETWORK=true)
+if crs_wait "$CRS2_PORT"; then
+    CRS2_BASE="http://127.0.0.1:$CRS2_PORT"
+    # CRS2-1: regex 命中 → echo + Vary + Expose-Headers
+    crs_req -H 'Origin: https://a.example.com' "$CRS2_BASE/health" >/dev/null
+    if crs_has_hdr '^access-control-allow-origin: *https://a\.example\.com$' \
+        && crs_has_hdr '^vary: *Origin$' \
+        && crs_has_hdr '^access-control-expose-headers: *X-Total, X-Page$'; then
+        pass "CRS2-1 regex origin → echo + Vary + expose-headers"
+    else
+        fail "CRS2-1 regex origin → echo + Vary + expose-headers" "headers: $(cat "$TMP/crs_hdr_c")"
+    fi
+    # CRS2-2: regex 不命中 → 无 ACAO (仍发 expose-headers 静态 simple_headers)
+    crs_req -H 'Origin: https://evil.com' "$CRS2_BASE/health" >/dev/null
+    if ! crs_has_hdr '^access-control-allow-origin' && crs_has_hdr '^access-control-expose-headers:'; then
+        pass "CRS2-2 regex nonmatch → no ACAO (expose still emitted)"
+    else
+        fail "CRS2-2 regex nonmatch → no ACAO" "headers: $(cat "$TMP/crs_hdr_c")"
+    fi
+    # CRS2-3: preflight: `*` methods → ALL_METHODS, `*` headers → 镜像请求头
+    code=$(crs_req -X OPTIONS -H 'Origin: https://a.example.com' \
+        -H 'Access-Control-Request-Method: PATCH' \
+        -H 'Access-Control-Request-Headers: X-Q, X-R' "$CRS2_BASE/health")
+    if [[ "$code" == "200" ]] \
+        && crs_has_hdr '^access-control-allow-methods: *DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT$' \
+        && crs_has_hdr '^access-control-allow-headers: *X-Q, X-R$'; then
+        pass "CRS2-3 preflight * methods → ALL_METHODS + mirror headers"
+    else
+        fail "CRS2-3 preflight * methods/mirror" "code=$code headers: $(cat "$TMP/crs_hdr_c")"
+    fi
+    # CRS2-4: PNA 放行 → 200 + Allow-Private-Network: true
+    code=$(crs_req -X OPTIONS -H 'Origin: https://a.example.com' \
+        -H 'Access-Control-Request-Method: GET' \
+        -H 'Access-Control-Request-Private-Network: true' "$CRS2_BASE/health")
+    if [[ "$code" == "200" ]] && crs_has_hdr '^access-control-allow-private-network: *true$'; then
+        pass "CRS2-4 preflight PNA enabled → Allow-Private-Network: true"
+    else
+        fail "CRS2-4 preflight PNA enabled" "code=$code headers: $(cat "$TMP/crs_hdr_c")"
+    fi
+else
+    fail "CRS2 side server did not start" "see $CRS2_LOG"
+fi
+kill -TERM "$CRS2_PID" 2>/dev/null
+sleep 0.3
+kill -9 "$CRS2_PID" 2>/dev/null
 
 # --- Query 精化 (决策-43, ADR-0018, Goal-0003 P2 矩阵 #3) -----------------------
 # /query-extra: tag:str[]= / nums:int[]= / level alias=lvl / limit alias=lmt.

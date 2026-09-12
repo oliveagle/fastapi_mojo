@@ -5,7 +5,7 @@
 //!   - `json_escape_cstr`      §1452-1474 (JSON 字符串转义)
 //!   - `send_response` 的头装配 §1495-1520 (本模块 `build_response_headers`)
 //!   - `send_preflight_response` §1517-1526 (本模块 `build_preflight_response`;
-//!     决策-42 起动态: env 配置 + 请求 Origin/ACRM/ACHR, 204/400)
+//!     决策-73: 真预检 200 OK / 400 Disallowed CORS text/plain; 裸 OPTIONS 204)
 //!   - CORS 头: C 时代固定常量 `CORS_HEADERS` 已删 — 决策-42 起
 //!     `cors::normal_cors_lines` 按请求 Origin + env 配置动态生成
 //!     (Starlette CORSMiddleware 对齐; 无 Origin 不带任何 CORS 头)
@@ -94,42 +94,38 @@ pub fn build_response_headers(
     s.into_bytes()
 }
 
-/// OPTIONS 预检响应 (决策-42 动态版, FFI 签名不变).
-/// 读 request 全局 (Origin/ACRM/ACHR) + cors config:
-///   - 通过 → 204 + 动态 CORS 头 (Allow-Origin 回显/`*` / [Credentials] /
-///     [Allow-Methods] / [Allow-Headers] / Max-Age); 裸 OPTIONS (无 Origin)
-///     走通配超集 (C 端口既有行为, e2e 守护)
-///   - origin 不允许 / ACRM 越界 / ACHR 越界 → 400 + JSON 错误体 (Starlette
-///     `_build_pre_response` 400 语义)
+/// OPTIONS 预检响应 (决策-42 → 决策-73 ADR-0048 上游对齐, FFI 签名不变).
+/// 读 request 全局 (Origin/ACRM/ACHR/PNA) + cors config:
+///   - 真预检（Origin + ACRM）通过 → **200 + text/plain `OK`** + 完整头集;
+///     失败 → **400 + text/plain `Disallowed CORS …`** + 完整头集 (上游同款);
+///   - 裸 OPTIONS / 无 ACRM → 204 + 动态 CORS 头 (既有通配超集, 文档化偏差).
 pub fn build_preflight_response() -> Vec<u8> {
     let origin = request::current_origin();
     let (acrm, achr) = request::current_cors_request();
-    let (status, lines, err) =
-        cors::preflight_build(origin.as_deref(), acrm.as_deref(), achr.as_deref());
+    let pna = request::current_pna();
+    let (status, lines, body) = cors::preflight_build(
+        origin.as_deref(),
+        acrm.as_deref(),
+        achr.as_deref(),
+        pna.as_deref(),
+    );
     let mut s = String::with_capacity(256);
     s.push_str("HTTP/1.1 ");
     s.push_str(status);
     s.push_str("\r\n");
-    if err.is_some() {
-        // 400: JSON 错误体 (与 send_error_json 同一 schema)
-        let msg = err.unwrap_or("preflight rejected");
-        let em = String::from_utf8_lossy(&json_escape(msg.as_bytes())).into_owned();
-        let es = String::from_utf8_lossy(&json_escape(status.as_bytes())).into_owned();
-        let b = format!("{{\"error\":\"{em}\",\"status\":\"{es}\"}}");
-        s.push_str("Content-Type: application/json\r\n");
-        s.push_str(&format!("Content-Length: {}\r\n", b.len()));
-        s.push_str("Connection: close\r\n\r\n");
-        s.push_str(&b);
-        return s.into_bytes();
-    }
-    // 204
     for line in &lines {
         s.push_str(line);
         s.push_str("\r\n");
     }
-    s.push_str("Content-Length: 0\r\n");
+    if body.is_empty() {
+        s.push_str("Content-Length: 0\r\n");
+    } else {
+        s.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+        s.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
     s.push_str("Connection: close\r\n");
     s.push_str("\r\n");
+    s.push_str(&body);
     s.into_bytes()
 }
 

@@ -47,6 +47,8 @@ struct HTTPExceptionSpec:
 
 def standard_status_line(code: Int) -> String:
     """常见 HTTP 状态码 -> "NNN Reason Phrase". 未知码 -> 通用 "NNN Error"."""
+    if code == 200: return "200 OK"
+    if code == 204: return "204 No Content"
     if code == 400: return "400 Bad Request"
     if code == 401: return "401 Unauthorized"
     if code == 403: return "403 Forbidden"

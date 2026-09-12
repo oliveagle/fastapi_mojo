@@ -141,10 +141,11 @@ fn response_headers_cors_dynamic() {
     assert!(s.contains("Access-Control-Allow-Origin: http://b.com"));
     assert!(s.contains("Access-Control-Allow-Credentials: true"));
 
-    // 4) 白名单未命中 → 0 行（浏览器自行拦截, 上游同款）
+    // 4) 白名单未命中 → 无 Allow-Origin（上游仍发静态 simple_headers: credentials）
     super::request::set_cors_request(Some(b"http://evil.com"), None, None);
     let s = String::from_utf8(build_response_headers("200 OK", "x", 0, true, None)).unwrap();
-    assert!(!s.contains("Access-Control"));
+    assert!(!s.contains("Access-Control-Allow-Origin"));
+    assert!(s.contains("Access-Control-Allow-Credentials: true"));
 
     // cleanup: 不泄漏到后续测试
     super::request::reset_request_fields();
@@ -179,7 +180,8 @@ fn preflight_bare_options_default() {
 }
 
 #[test]
-fn preflight_204_with_acrm_achr_max_age() {
+fn preflight_200_ok_full_headers() {
+    // 决策-73 (ADR-0048): 真预检通过 → 200 + text/plain `OK` + 完整头集。
     cors_env_clear();
     std::env::set_var("FASTAPI_MOJO_CORS_ORIGINS", "http://a.com");
     std::env::set_var("FASTAPI_MOJO_CORS_MAX_AGE", "120");
@@ -187,18 +189,24 @@ fn preflight_204_with_acrm_achr_max_age() {
     super::request::reset_request_fields();
     super::request::set_cors_request(Some(b"http://a.com"), Some(b"POST"), Some(b"Content-Type, Authorization"));
     let s = String::from_utf8(build_preflight_response()).unwrap();
-    assert!(s.starts_with("HTTP/1.1 204 No Content\r\n"));
+    assert!(s.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(s.contains("Vary: Origin\r\n"));
     assert!(s.contains("Access-Control-Allow-Origin: http://a.com\r\n"));
     assert!(s.contains("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"));
-    assert!(s.contains("Access-Control-Allow-Headers: Content-Type, Authorization\r\n"));
+    assert!(s.contains(
+        "Access-Control-Allow-Headers: Accept, Accept-Language, Authorization, Content-Language, Content-Type\r\n"
+    ));
     assert!(s.contains("Access-Control-Max-Age: 120\r\n"));
-    assert!(s.contains("Content-Length: 0\r\n"));
+    assert!(s.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+    assert!(s.contains("Content-Length: 2\r\n"));
+    assert!(s.ends_with("\r\n\r\nOK"));
     super::request::reset_request_fields();
     cors_env_clear();
 }
 
 #[test]
 fn preflight_400_origin_not_allowed() {
+    // 决策-73: 失败 → 400 + text/plain `Disallowed CORS origin` + preflight 头集。
     cors_env_clear();
     std::env::set_var("FASTAPI_MOJO_CORS_ORIGINS", "http://a.com");
     super::cors::__test_reset_config();
@@ -206,9 +214,9 @@ fn preflight_400_origin_not_allowed() {
     super::request::set_cors_request(Some(b"http://evil.com"), Some(b"POST"), Some(b"Content-Type"));
     let s = String::from_utf8(build_preflight_response()).unwrap();
     assert!(s.starts_with("HTTP/1.1 400 Bad Request\r\n"));
-    assert!(s.contains("Content-Type: application/json\r\n"));
-    assert!(s.contains(r#""error":"origin not allowed""#));
-    assert!(s.contains(r#""status":"400 Bad Request""#));
+    assert!(s.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+    assert!(s.contains("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\n"));
+    assert!(s.ends_with("\r\n\r\nDisallowed CORS origin"));
     super::request::reset_request_fields();
     cors_env_clear();
 }

@@ -59,6 +59,9 @@ pub struct CurrentRequest {
     pub acrm_len: usize,
     pub achr: [u8; 256],
     pub achr_len: usize,
+    /// 决策-73 (ADR-0048): Access-Control-Request-Private-Network (PNA 预检).
+    pub pna: [u8; 16],
+    pub pna_len: usize,
     /// F3a: 最近一次按名查询的请求 header 值 (NUL 结尾, 供 get_request_header_slice 读).
     /// 在 conn.rs::extract_header_value_to_current 写入; 多次查询会覆盖, 串行调用安全.
     pub hdr_value: [u8; 512],
@@ -103,6 +106,8 @@ impl CurrentRequest {
             acrm_len: 0,
             achr: [0u8; 256],
             achr_len: 0,
+            pna: [0u8; 16],
+            pna_len: 0,
             hdr_value: [0u8; 512],
             hdr_value_len: 0,
             range: [0u8; 1024],
@@ -224,6 +229,8 @@ pub fn reset_request_fields() {
     g.origin_len = 0;
     g.acrm_len = 0;
     g.achr_len = 0;
+    g.pna_len = 0;
+    g.pna = [0u8; 16];
     g.hdr_value_len = 0;
     g.hdr_value = [0u8; 512];
     g.range_len = 0;
@@ -271,6 +278,18 @@ pub fn current_origin() -> Option<String> {
 pub fn current_cors_request() -> (Option<String>, Option<String>) {
     let g = lock_current();
     (field_str(&g.acrm, g.acrm_len), field_str(&g.achr, g.achr_len))
+}
+
+/// 决策-73 (ADR-0048): 记录 Access-Control-Request-Private-Network (io.rs 解析).
+pub fn set_cors_pna(pna: Option<&[u8]>) {
+    let mut g = lock_current();
+    g.pna_len = copy_field(&mut g.pna, pna);
+}
+
+/// 决策-73: 当前请求 PNA 头 (无 = None).
+pub fn current_pna() -> Option<String> {
+    let g = lock_current();
+    field_str(&g.pna, g.pna_len)
 }
 
 /// 决策-40: 记录当前请求 Accept-Encoding 是否含 gzip (io.rs 解析完 header 时调用).

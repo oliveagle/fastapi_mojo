@@ -5,7 +5,7 @@
 #   2. ldd 断言：仅 libc + 内核组件（禁 libstdc++/libgcc_s/libm/Python/运行时 .so）
 #   3. 干净环境（env -i）启动断言：无 Python / 无 LD_LIBRARY_PATH 即可服务
 #   4. 单元测试（各 .mojo 自检）
-#   5. e2e 集成测试（scripts/e2e_test.sh，582 项检查含 SSE ServerSentEvent 字段 SF-1..SF-5（ADR-0047） + OAuth2 作用域 OT-24..OT-33（ADR-0042） + RedirectResponse RD-1..RD-10（ADR-0043） + redirect_slashes SL-1..SL-10（ADR-0046） + 安全 OpenAPI securitySchemes + HTTPDigest DG-1..DG-6/SO-1..SO-5（ADR-0044） + OpenIdConnect/OAuth2AuthorizationCodeBearer OI-1..4/AC-1..7（ADR-0045） + opt-in Rust JSON serializer JR-1..6（ADR-0041） 与 opt-in TLS/HTTPS TLS-0..9（ADR-0039）+ HTTP/2 prior-knowledge h2c H2（ADR-0038）+ WebSocket（含 ADR-0007 增强 / ADR-0008 并发 / ADR-0009 精化 / ADR-0034 permessage-deflate / ADR-0035 WS 子协议矩阵）+ 嵌套 JSON Schema JS（ADR-0036）+ 阶段化 OTel traces OT（ADR-0037）+ 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）+ TestClient TC（ADR-0031），CI 可重复）
+#   5. e2e 集成测试（scripts/e2e_test.sh，587 项检查含 SSE ServerSentEvent 字段 SF-1..SF-5（ADR-0047） + CORS 全量等价 CRS-1..9/CRS2-1..4（ADR-0048） + OAuth2 作用域 OT-24..OT-33（ADR-0042） + RedirectResponse RD-1..RD-10（ADR-0043） + redirect_slashes SL-1..SL-10（ADR-0046） + 安全 OpenAPI securitySchemes + HTTPDigest DG-1..DG-6/SO-1..SO-5（ADR-0044） + OpenIdConnect/OAuth2AuthorizationCodeBearer OI-1..4/AC-1..7（ADR-0045） + opt-in Rust JSON serializer JR-1..6（ADR-0041） 与 opt-in TLS/HTTPS TLS-0..9（ADR-0039）+ HTTP/2 prior-knowledge h2c H2（ADR-0038）+ WebSocket（含 ADR-0007 增强 / ADR-0008 并发 / ADR-0009 精化 / ADR-0034 permessage-deflate / ADR-0035 WS 子协议矩阵）+ 嵌套 JSON Schema JS（ADR-0036）+ 阶段化 OTel traces OT（ADR-0037）+ 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）+ TestClient TC（ADR-0031），CI 可重复）
 #
 # 依赖：Mojo 1.0.0（pip install "mojo==1.0.0"，装出 site-packages/modular/ namespace 包）、gcc、binutils、curl、openssl（TLS e2e fixture）
 name: CI
@@ -167,7 +167,7 @@ jobs:
           # 的 JIT 会话加载不了 Rust staticlib → "Symbols not found"（本机与
           # CI 同款失败，pre-existing at HEAD，实测）。test_all 的 assert 本就是
           # compile-smoke（Mojo assert no-op, 决策-38）；真实行为覆盖 = e2e
-          # 套件（下方 582 项）+ Build single binary 全量编译，故此处移出。
+          # 套件（下方 587 项）+ Build single binary 全量编译，故此处移出。
           # 决策-54 (ADR-0029): params_typed import param_constraints —
           # check_str_constraints -> check_str_pattern -> FFI regex_match;
           # Mojo JIT 按"调用可达"闭包 materialize external_call 符号（含条件
@@ -211,5 +211,5 @@ jobs:
           cargo build --release
           ./target/release/fmtool --help >/dev/null
 
-      - name: Run e2e suite (582 checks incl. SSE ServerSentEvent fields SF-1..SF-5 (ADR-0047) + OAuth2 scopes OT-24..OT-33 (ADR-0042) + RedirectResponse RD-1..RD-10 (ADR-0043) + redirect_slashes SL-1..SL-10 (ADR-0046) + security OpenAPI schemes + HTTPDigest DG-1..DG-6/SO-1..SO-5 (ADR-0044) + OpenIdConnect/OAuth2AuthorizationCodeBearer OI-1..4/AC-1..7 (ADR-0045) + opt-in Rust JSON serializer JR-1..6 (ADR-0041) + opt-in TLS/HTTPS TLS-0..9 (ADR-0039) + WebSocket enhancements/concurrency/refinements/permessage-deflate/app-subprotocols + nested JSON schemas + param constraint surface CP + user middleware MW + TestClient TC + staged OTel traces OT (ADR-0037) + prior-knowledge h2c H2 (ADR-0038), CI-repeatable)
+      - name: Run e2e suite (587 checks incl. SSE ServerSentEvent fields SF-1..SF-5 (ADR-0047) + CORS full parity CRS-1..9/CRS2-1..4 (ADR-0048) + OAuth2 scopes OT-24..OT-33 (ADR-0042) + RedirectResponse RD-1..RD-10 (ADR-0043) + redirect_slashes SL-1..SL-10 (ADR-0046) + security OpenAPI schemes + HTTPDigest DG-1..DG-6/SO-1..SO-5 (ADR-0044) + OpenIdConnect/OAuth2AuthorizationCodeBearer OI-1..4/AC-1..7 (ADR-0045) + opt-in Rust JSON serializer JR-1..6 (ADR-0041) + opt-in TLS/HTTPS TLS-0..9 (ADR-0039) + WebSocket enhancements/concurrency/refinements/permessage-deflate/app-subprotocols + nested JSON schemas + param constraint surface CP + user middleware MW + TestClient TC + staged OTel traces OT (ADR-0037) + prior-knowledge h2c H2 (ADR-0038), CI-repeatable)
         run: ./scripts/e2e_test.sh

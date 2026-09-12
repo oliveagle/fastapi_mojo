@@ -225,12 +225,16 @@ fn send_text_response_status_default_500_parity() {
 
 #[test]
 fn send_preflight_response_exact_bytes() {
+    // 决策-73 (ADR-0048): 返回值 = HTTP 状态码 (裸 OPTIONS → 204)。
+    super::request::reset_request_fields();
+    super::cors::__test_clear_env();
     let mut cp = ConnPair::new();
     let rc = send_preflight_response(cp.b);
-    assert_eq!(rc, 0);
+    assert_eq!(rc, 204);
     let resp = recv_all(&mut cp);
     let expected = super::response::build_preflight_response();
     assert_eq!(resp, expected);
+    super::request::reset_request_fields();
 }
 
 // ---------- 静态文件 (安全语义) ----------

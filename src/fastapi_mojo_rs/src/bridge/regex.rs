@@ -483,6 +483,14 @@ pub fn rgx_match(pattern: &str, s: &str) -> i32 {
     0
 }
 
+/// 决策-73 (ADR-0048): Python `re.fullmatch` 语义 (整串匹配).
+/// 实现 = 包裹 `^(<pattern>)$` 后走 search (本引擎 `^`=串首 / `$`=串尾或尾
+/// `\n` 前; origin 无尾 `\n`, 等价 fullmatch). 1/0/-1 同 rgx_match.
+pub fn rgx_fullmatch(pattern: &str, s: &str) -> i32 {
+    let anchored = format!("^({pattern})$");
+    rgx_match(&anchored, s)
+}
+
 /// 仅编译校验 (注册期 check 用). true = 可编译.
 pub fn rgx_compile_ok(pattern: &str) -> bool {
     let mut p = Parser::new(pattern);

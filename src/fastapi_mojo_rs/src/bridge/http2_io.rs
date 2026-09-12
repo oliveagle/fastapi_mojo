@@ -7,7 +7,7 @@ use super::http2::{H2Connection, H2Request, H2_PHASE, H2_PREFACE};
 use super::io::sys_recv;
 use super::parse as bridge_parse;
 use super::request::{
-    set_accepts_gzip, set_cors_request, set_http2, set_http_fields, set_range_headers,
+    set_accepts_gzip, set_cors_pna, set_cors_request, set_http2, set_http_fields, set_range_headers,
 };
 use super::send::send_all;
 use super::time_util::now_ms;
@@ -78,6 +78,7 @@ fn set_h2_request_globals(c: &Conn, request: &H2Request) {
         request.header_value(b"access-control-request-method"),
         request.header_value(b"access-control-request-headers"),
     );
+    set_cors_pna(request.header_value(b"access-control-request-private-network"));
     set_range_headers(
         request.header_value(b"range"),
         request.header_value(b"if-range"),

@@ -1266,8 +1266,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
         # Handle OPTIONS preflight (CORS)
         if method == "OPTIONS":
             var duration_ms = mw_timing(mw_chain, start_ms)
-            _ = external_call["send_preflight_response", Int](cfd)
-            _finish_request(mw_chain, req_id, method, path, query, "204 No Content", duration_ms)
+            # 决策-73 (ADR-0048): FFI 返回值 = HTTP 状态码 (200 真预检 / 204 通配
+            # 超集 / 400 Disallowed CORS), 供 access log 记录真实状态.
+            var pf_code = external_call["send_preflight_response", Int](cfd)
+            _finish_request(mw_chain, req_id, method, path, query, standard_status_line(pf_code), duration_ms)
             external_call["conn_done", NoneType](cfd, False)  # preflight response announces Connection: close
         elif external_call["is_ws_upgrade", Int]() == 1:
             # WebSocket upgrade (RFC 6455, ADR-0006/0007/0008): WS route lookup +
