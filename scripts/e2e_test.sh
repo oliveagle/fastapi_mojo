@@ -36,6 +36,7 @@
 #   - redirect_slashes (Starlette 默认尾斜杠 307) (决策-71, SL-1..SL-10)
 #   - CORS 完整配置: FASTAPI_MOJO_CORS_* env 声明式 (决策-42/73, CRS-1..CRS-9 + CRS2-1..4)
 #   - response_model exclude/exclude_none (决策-41, RM-5..RM-7)
+#   - jsonable_encoder filters (决策-92, JE-1..JE-2a)
 #   - Form 多值/alias/desc + 422 parity: input/"Field required"/collect-all
 #     (决策-45, FM-1..FM-20; OpenAPI JSON 合法性 jsoncheck 门禁)
 #   - UploadFile 对象 API: _file_types file/bytes + 422 (U2 value_error / U3 string_type /
@@ -3904,6 +3905,44 @@ if [[ "$TLS_INVALID_HUNG" == 0 && "$TLS_INVALID_EXIT" -ne 0 ]] && grep -q 'TLS c
     pass "TLS-9 invalid config fails closed"
 else
     fail "TLS-9 invalid config fails closed" "hung=$TLS_INVALID_HUNG exit=$TLS_INVALID_EXIT log=$(tail -3 "$TLS_INVALID_LOG")"
+fi
+
+
+# --- jsonable_encoder include/exclude tests (ADR-0066 §8 #2) ----------------
+echo "== jsonable_encoder filters (JE) =="
+
+# JE-1: /encoder/basic - exclude_none and sqlalchemy_safe
+JE1=$(curl -sS -m 5 "$BASE/encoder/basic")
+if [[ "$JE1" == *'"message": "jsonable_encoder basic demo"'* && "$JE1" == *'"value1": "hello"'* && "$JE1" == *'"value3": "42.000000"'* ]]; then
+    pass "JE-1 exclude_none + sqlalchemy_safe (basic)"
+else
+    fail "JE-1 exclude_none + sqlalchemy_safe" "body: ${JE1:0:200}"
+fi
+# Verify _sa_internal is removed by sqlalchemy_safe
+if [[ "$JE1" != *'_sa_internal'* ]]; then
+    pass "JE-1a sqlalchemy_safe removes _sa_internal"
+else
+    fail "JE-1a sqlalchemy_safe should remove _sa_internal" "body: ${JE1:0:200}"
+fi
+# Verify value2 ("null") is removed by exclude_none
+if [[ "$JE1" != *'"value2"'* ]]; then
+    pass "JE-1b exclude_none removes null values"
+else
+    fail "JE-1b exclude_none should remove null values" "body: ${JE1:0:200}"
+fi
+
+# JE-2: /encoder/exclude - exclude=hide_this
+JE2=$(curl -sS -m 5 "$BASE/encoder/exclude")
+if [[ "$JE2" == *'"message": "jsonable_encoder exclude demo"'* && "$JE2" == *'"keep_this": "visible"'* ]]; then
+    pass "JE-2 exclude=hide_this"
+else
+    fail "JE-2 exclude=hide_this" "body: ${JE2:0:200}"
+fi
+# Verify hide_this is actually excluded
+if [[ "$JE2" != *'"hide_this"'* ]]; then
+    pass "JE-2a exclude removes specified field"
+else
+    fail "JE-2a exclude should remove hide_this" "body: ${JE2:0:200}"
 fi
 
 # --- summary ---------------------------------------------------------------------

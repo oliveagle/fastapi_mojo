@@ -340,8 +340,8 @@ def dispatch_dep(router: Router,
             if nested.name != "":
                 # 子依赖输出并入 runtime (dep 自身的 runtime), 使其 run_handler 可见.
                 # 默认 cached 引用 (upstream use_cache=True).
-                dispatch_dep(router, nested, runtime, info, query, body,
-                             child_visited, False, cache, teardowns)
+                _ = dispatch_dep(router, nested, runtime, info, query, body,
+                              child_visited, False, cache, teardowns)
             i += 1
     if "_depends_nocache" in runtime:
         var names_nc = _split_depends(runtime["_depends_nocache"])
@@ -350,8 +350,8 @@ def dispatch_dep(router: Router,
             var nested_nc = router.find_handler_by_name(names_nc[j])
             if nested_nc.name != "":
                 # nocache 引用 (upstream use_cache=False).
-                dispatch_dep(router, nested_nc, runtime, info, query, body,
-                             child_visited, True, cache, teardowns)
+                _ = dispatch_dep(router, nested_nc, runtime, info, query, body,
+                              child_visited, True, cache, teardowns)
             j += 1
 
     # memo 查找 (仅 cached 引用; P9-3: nocache 派发的结果同样入库).

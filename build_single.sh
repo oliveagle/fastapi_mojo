@@ -15,6 +15,8 @@
 #                (default: <python site-packages>/modular/lib)
 
 set -euo pipefail
+set -E
+trap 'rc=$?; echo "ERROR: build_single.sh failed at line ${LINENO} (rc=${rc})" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$ROOT/src/fastapi_mojo"
@@ -45,22 +47,28 @@ find_modular_lib() {
         "${XDG_DATA_HOME:-$HOME/.local/share}/python3.12/site-packages" \
         "${XDG_DATA_HOME:-$HOME/.local/share}/python3.11/site-packages" \
         "${XDG_DATA_HOME:-$HOME/.local/share}/python3.10/site-packages" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/python3.9/site-packages" \
         "$HOME/.local/lib/python3.13/site-packages" \
         "$HOME/.local/lib/python3.12/site-packages" \
         "$HOME/.local/lib/python3.11/site-packages" \
         "$HOME/.local/lib/python3.10/site-packages" \
+        "$HOME/.local/lib/python3.9/site-packages" \
         /usr/local/lib/python3.13/dist-packages \
         /usr/local/lib/python3.12/dist-packages \
         /usr/local/lib/python3.11/dist-packages \
         /usr/local/lib/python3.10/dist-packages \
+        /usr/local/lib/python3.9/dist-packages \
         /usr/local/lib/python3.13/site-packages \
         /usr/local/lib/python3.12/site-packages \
         /usr/local/lib/python3.11/site-packages \
         /usr/local/lib/python3.10/site-packages \
+        /usr/local/lib/python3.9/site-packages \
         /usr/lib/python3.13/dist-packages \
         /usr/lib/python3.12/dist-packages \
         /opt/conda/lib/python3.13/site-packages \
         /opt/conda/lib/python3.12/site-packages \
+        /opt/conda/lib/python3.9/site-packages \
+        /usr/lib/python3.9/dist-packages \
     ; do
         d="$base/modular/lib"
         [[ -d "$d" && -f "$d/libKGENCompilerRTShared.so" ]] && { echo "$d"; return 0; }

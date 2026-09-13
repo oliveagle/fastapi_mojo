@@ -266,4 +266,6 @@ def register_jsonable_encoder_routes(mut router: Router) raises:
     enc_excl.set_data("message", "jsonable_encoder exclude demo")
     enc_excl.set_data("keep_this", "visible")
     enc_excl.set_data("hide_this", "invisible")
+    enc_excl.set_data("_response_model", "message,keep_this,hide_this")
+    enc_excl.set_data("_response_exclude", "hide_this")
     router.add_route("/encoder/exclude", "GET", enc_excl)

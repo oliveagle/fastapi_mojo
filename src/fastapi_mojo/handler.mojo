@@ -348,15 +348,15 @@ def run_handler(handler: Handler,
         resp["cmd"] = final_cmd
         return ("200 OK", resp^)
 
+    # F-DI (Depends, 决策-33): 依赖注入. 返回 handler.data 中非 '_' 前缀字段
+    # 作为依赖输出 (递归解析时合并的嵌套依赖输出也在此, 因它们不带 '_' 前缀).
+    # dispatch 在派发主 handler 前调用 resolve_depends 解析 _depends 并注入.
+    #
+    # base 依赖 (无 _depends): data 里声明的"返回值"字段 (如 items/message).
+    # 递归依赖: _depends 指向的其他依赖, 其输出被合并进派发数据后一并返回.
+    #
+    # 用于 FastAPI Depends() 语义: 可复用计算 / 共享状态 / 鉴权前置.
     elif handler.kind == KIND_DEPENDENCY():
-        """F-DI (Depends, 决策-33): 依赖注入. 返回 handler.data 中非 '_' 前缀字段
-        作为依赖输出 (递归解析时合并的嵌套依赖输出也在此, 因它们不带 '_' 前缀).
-        dispatch 在派发主 handler 前调用 resolve_depends 解析 _depends 并注入.
-
-        base 依赖 (无 _depends): data 里声明的"返回值"字段 (如 items/message).
-        递归依赖: _depends 指向的其他依赖, 其输出被合并进派发数据后一并返回.
-
-        用于 FastAPI Depends() 语义: 可复用计算 / 共享状态 / 鉴权前置."""
         var resp = Dict[String, String]()
         for k in handler.data:
             if k.startswith("_"):   # _depends / _prefix 为内部配置, 不作为依赖输出

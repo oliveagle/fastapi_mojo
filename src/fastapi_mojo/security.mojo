@@ -251,8 +251,9 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
             f1.www_authenticate = "Basic" + _realm_part(realm)
             return f1^
         var cred = b64_decode(_bstr(authz, 6, authz.byte_length()))
-        # 按第一个 ':' 切 user:pass (按 codepoint 边界找 ':', 防 multi-byte UTF-8 边界崩溃)
-        var us = ""
+        # 按第一个 ':' 切 user:pass (按 codepoint 边界找 ':', 防 multi-byte UTF-8 边界崩溃).
+        # us 缺省 = 整段 cred (无 ':' 分隔时与原 else 分支同语义), ps = 空串.
+        var us = cred
         var ps = ""
         var found_colon = False
         var colon_byte = -1
@@ -268,8 +269,6 @@ def check_auth(handler: Handler, query_values: Dict[String, String]) raises -> A
         if found_colon:
             us = _bstr(cred, 0, colon_byte)
             ps = _bstr(cred, colon_byte + 1, cn)   # colon+1 = next codepoint 起点
-        else:
-            us = cred
         var ok_user = False
         for u in _split_csv(users_csv, 59):
             var sub = u.split(":")

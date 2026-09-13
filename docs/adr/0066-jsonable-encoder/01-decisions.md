@@ -45,7 +45,7 @@ ADR-0064 §8 列出 P1/P2 缺口 #5：`fastapi.encoders.jsonable_encoder`。
 
 ## 4. 测试
 
-- **e2e**：859/859 全绿（无回归）
+- **e2e**：864/864 全绿（决策-92 后新增 JE-1..JE-2a 过滤断言）
 - **手工验证**：`/encoder/basic` 返回 200，`_sa_internal` 键被过滤
 
 ## 5. 已知偏差
@@ -70,7 +70,7 @@ ADR-0064 §8 列出 P1/P2 缺口 #5：`fastapi.encoders.jsonable_encoder`。
 
 ## 7. 验收
 
-- e2e **859/859** 全绿
+- e2e **864/864** 全绿（决策-92 后新增 JE-1..JE-2a 过滤断言）
 - bridge `cargo test --release -- --test-threads=1` 通过
 - `ldd build/fastapi_mojo` 仅 libc.so.6
 - binary 构建成功，127 routes
