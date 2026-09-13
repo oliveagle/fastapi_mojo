@@ -15,13 +15,17 @@
 from router import Router
 from handler import Handler, KIND_ECHO
 
-class CustomSerializerError:
-    field_name: String
-    message: String
+struct CustomSerializerError:
+    var field_name: String
+    var message: String
 
-    init(field: String, msg: String):
+    def __init__(out self, field: String, msg: String):
         self.field_name = field
         self.message = msg
+
+
+def custom_serializer_error_to_string(e: CustomSerializerError) -> String:
+    return e.field_name + ": " + e.message
 
 def apply_serializer(value: String, serializer_type: String, field_name: String) raises -> String:
     """Apply a custom serializer to a value.
@@ -41,36 +45,40 @@ def apply_serializer(value: String, serializer_type: String, field_name: String)
     elif serializer_type == "reverse":
         var result = ""
         for i in range(value.byte_length() - 1, -1, -1):
-            result += value[i]
+            result += value[byte=i:i+1]
         return result^
     elif serializer_type == "trim":
         # Remove leading/trailing whitespace
         var start = 0
         var end = value.byte_length()
-        while start < end and value[byte=start] == " ":
+        while start < end and value[byte=start] == " ":  # ASCII space is 32
             start += 1
         while end > start and value[byte=end - 1] == " ":
             end -= 1
         return String(value[byte=start:end])^
     elif serializer_type == "capitalize":
         if value.byte_length() == 0:
-            return value^
-        var first_upper = value[byte=0].upper()
+            return value
+        var first_upper = String(value[byte=0:1]).upper()
         var rest = String(value[byte=1:value.byte_length()])
-        return String(first_upper) + rest^
+        return first_upper + rest^
     elif serializer_type == "base64":
         # Simplified base64-like encoding (not standard base64)
         var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         var result = ""
         for i in range(value.byte_length()):
             var c = value[byte=i]
-            var idx = (c - "A") % 64
-            if idx < 0 or idx >= 64:
-                idx = 0
-            result += chars[byte=idx]
+            # Get index by comparing single char string to table
+            var idx = 0
+            for j in range(chars.byte_length()):
+                if c == chars[byte=j:j+1]:
+                    idx = j
+                    break
+            result += String(chars[byte=idx:idx+1])
         return result^
     
-    raise CustomSerializerError(field_name, "Unknown serializer: " + serializer_type)^
+    var _err = CustomSerializerError(field_name, "Unknown serializer: " + serializer_type)
+    raise Error(custom_serializer_error_to_string(_err))
 
 def apply_serializers_to_data(
     data: Dict[String, String],

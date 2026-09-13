@@ -25,17 +25,30 @@ from handler import Handler, KIND_ECHO
 
 # ---------- Enum Validation Error ----------
 
-class EnumValidationError:
-    field_name: String
-    invalid_value: String
-    allowed_values: String
+struct EnumValidationError:
+    var field_name: String
+    var invalid_value: String
+    var allowed_values: String
 
-    init(field: String, invalid: String, allowed: String):
+    def __init__(out self, field: String, invalid: String, allowed: String):
         self.field_name = field
         self.invalid_value = invalid
         self.allowed_values = allowed
 
 # ---------- Enum validation ----------
+
+def join_list(lst: List[String], sep: String) -> String:
+    var s = ""
+    for i in range(len(lst)):
+        if i > 0:
+            s = s + sep
+        s = s + lst[i]
+    return s
+
+
+
+def enum_validation_error_to_string(e: EnumValidationError) -> String:
+    return e.field_name + ": invalid value " + e.invalid_value + ", allowed: " + e.allowed_values
 
 def validate_enum_value(field_name: String, value: String, enum_values_csv: String) raises -> Bool:
     """Validate that value is in the enum list.
@@ -50,7 +63,8 @@ def validate_enum_value(field_name: String, value: String, enum_values_csv: Stri
         var p = String(part.strip())
         if p == value:
             return True
-    raise EnumValidationError(field_name, value, enum_values_csv)
+    var _err = EnumValidationError(    field_name, value, enum_values_csv)
+    raise Error(enum_validation_error_to_string(_err))
 
 def get_allowed_values(enum_values_csv: String) -> List[String]:
     """Return list of allowed enum values."""
@@ -70,7 +84,7 @@ def enum_error_to_422(e: EnumValidationError) -> Dict[String, String]:
     var loc_list = List[String]()
     loc_list.append("body")
     loc_list.append(e.field_name)
-    error_dict["loc"] = loc_list.join(",")
+    error_dict["loc"] = join_list(loc_list, ",")
     error_dict["msg"] = "Input should be " + e.allowed_values + ", invalid input was '" + e.invalid_value + "'"
     error_dict["type"] = "enum_invalid_value"
     return error_dict^

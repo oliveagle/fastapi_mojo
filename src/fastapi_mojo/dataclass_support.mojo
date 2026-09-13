@@ -24,15 +24,28 @@ from handler import Handler, KIND_ECHO
 
 # ---------- Dataclass Validation Error ----------
 
-class DataclassValidationError:
-    field_name: String
-    message: String
+struct DataclassValidationError:
+    var field_name: String
+    var message: String
 
-    init(field: String, msg: String):
+    def __init__(out self, field: String, msg: String):
         self.field_name = field
         self.message = msg
 
 # ---------- Dataclass helpers ----------
+
+def join_list(lst: List[String], sep: String) -> String:
+    var s = ""
+    for i in range(len(lst)):
+        if i > 0:
+            s = s + sep
+        s = s + lst[i]
+    return s
+
+
+
+def dataclass_validation_error_to_string(e: DataclassValidationError) -> String:
+    return e.field_name + ": " + e.message
 
 def create_dataclass_from_schema(schema_str: String) raises -> Dict[String, String]:
     """Create a dataclass-like structure from schema string.
@@ -42,7 +55,7 @@ def create_dataclass_from_schema(schema_str: String) raises -> Dict[String, Stri
     """
     var result = Dict[String, String]()
     if schema_str.byte_length() == 0:
-        return result
+        return result^
     
     var parts = schema_str.split(";")
     for part in parts:
@@ -78,7 +91,8 @@ def validate_dataclass_fields(
     
     for fname in spec.keys():
         if fname not in data:
-            raise DataclassValidationError(fname, "Field is required")
+            var _err = DataclassValidationError(            fname, "Field is required")
+            raise Error(dataclass_validation_error_to_string(_err))
         result[fname] = data[fname]
     
     return result^
@@ -89,7 +103,7 @@ def error_to_422(e: DataclassValidationError) -> Dict[String, String]:
     var loc_list = List[String]()
     loc_list.append("body")
     loc_list.append(e.field_name)
-    error_dict["loc"] = loc_list.join(",")
+    error_dict["loc"] = join_list(loc_list, ",")
     error_dict["msg"] = e.message
     error_dict["type"] = "missing" if e.message == "Field is required" else "value_error"
     return error_dict^

@@ -18,13 +18,13 @@
 from router import Router
 from handler import Handler, KIND_ECHO
 
-class ResponseType:
-    name: String
-    content_type: String
-    is_json: Bool
-    needs_json_escape: Bool
+struct ResponseType:
+    var name: String
+    var content_type: String
+    var is_json: Bool
+    var needs_json_escape: Bool
 
-    init(name: String, ct: String, json: Bool, escape: Bool):
+    def __init__(out self, name: String, ct: String, json: Bool, escape: Bool):
         self.name = name
         self.content_type = ct
         self.is_json = json

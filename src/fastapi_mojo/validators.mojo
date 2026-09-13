@@ -27,19 +27,32 @@ from handler import Handler, KIND_ECHO
 
 # ---------- Validation Error ----------
 
-class ValidationError:
-    field_name: String
-    message: String
-    constraint: String
+struct ValidationError:
+    var field_name: String
+    var message: String
+    var constraint: String
 
-    init(field: String, msg: String, constraint_name: String):
+    def __init__(out self, field: String, msg: String, constraint_name: String):
         self.field_name = field
         self.message = msg
         self.constraint = constraint_name
 
 # ---------- Numeric Helpers ----------
 
-def _to_f64(s: String) -> Float64 raises:
+def join_list(lst: List[String], sep: String) -> String:
+    var s = ""
+    for i in range(len(lst)):
+        if i > 0:
+            s = s + sep
+        s = s + lst[i]
+    return s
+
+
+
+def validation_error_to_string(e: ValidationError) -> String:
+    return e.field_name + ": " + e.message + " (" + e.constraint + ")"
+
+def _to_f64(s: String) raises -> Float64:
     """Parse string to Float64, raises on failure."""
     var n = s.byte_length()
     if n == 0:
@@ -155,9 +168,8 @@ def _validator_gt(field: String, v: String, arg: String) raises -> String:
     var min_val = Float64(arg)
     var val = Float64(v)
     if val <= min_val:
-        raise ValidationError(field, 
-            "Input should be greater than " + arg,
-            "greater_than")
+        var _err = ValidationError(        field,             "Input should be greater than " + arg,            "greater_than")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_ge(field: String, v: String, arg: String) raises -> String:
@@ -165,9 +177,8 @@ def _validator_ge(field: String, v: String, arg: String) raises -> String:
     var min_val = Float64(arg)
     var val = Float64(v)
     if val < min_val:
-        raise ValidationError(field,
-            "Input should be greater than or equal to " + arg,
-            "greater_than_or_equal")
+        var _err = ValidationError(        field,            "Input should be greater than or equal to " + arg,            "greater_than_or_equal")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_lt(field: String, v: String, arg: String) raises -> String:
@@ -175,9 +186,8 @@ def _validator_lt(field: String, v: String, arg: String) raises -> String:
     var max_val = Float64(arg)
     var val = Float64(v)
     if val >= max_val:
-        raise ValidationError(field,
-            "Input should be less than " + arg,
-            "less_than")
+        var _err = ValidationError(        field,            "Input should be less than " + arg,            "less_than")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_le(field: String, v: String, arg: String) raises -> String:
@@ -185,51 +195,45 @@ def _validator_le(field: String, v: String, arg: String) raises -> String:
     var max_val = Float64(arg)
     var val = Float64(v)
     if val > max_val:
-        raise ValidationError(field,
-            "Input should be less than or equal to " + arg,
-            "less_than_or_equal")
+        var _err = ValidationError(        field,            "Input should be less than or equal to " + arg,            "less_than_or_equal")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_positive(field: String, v: String) raises -> String:
     """Positive number validator (> 0)."""
     var val = Float64(v)
     if val <= Float64(0):
-        raise ValidationError(field,
-            "Input should be greater than 0",
-            "gt_0")
+        var _err = ValidationError(        field,            "Input should be greater than 0",            "gt_0")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_negative(field: String, v: String) raises -> String:
     """Negative number validator (< 0)."""
     var val = Float64(v)
     if val >= Float64(0):
-        raise ValidationError(field,
-            "Input should be less than 0",
-            "lt_0")
+        var _err = ValidationError(        field,            "Input should be less than 0",            "lt_0")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_email(field: String, v: String) raises -> String:
     """Email format validator."""
     if not _is_valid_email(v):
-        raise ValidationError(field,
-            "Value should be a valid email address",
-            "email")
+        var _err = ValidationError(        field,            "Value should be a valid email address",            "email")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_url(field: String, v: String) raises -> String:
     """URL format validator."""
     if not _is_valid_url(v):
-        raise ValidationError(field,
-            "Value should be a valid URL",
-            "url")
+        var _err = ValidationError(        field,            "Value should be a valid URL",            "url")
+        raise Error(validation_error_to_string(_err))
     return v
 
 def _validator_uuid(field: String, v: String) raises -> String:
     """UUID format validator."""
     if not _is_valid_uuid(v):
-        raise ValidationError(field,
-            "Value should be a valid UUID",
-            "uuid")
+        var _err = ValidationError(        field,            "Value should be a valid UUID",            "uuid")
+        raise Error(validation_error_to_string(_err))
     return v
 
 # ---------- Validator application ----------
@@ -261,13 +265,15 @@ def apply_field_validators(
         # Parse validator name and argument
         var colon_pos = -1
         for i in range(p.byte_length()):
-            if ord(p.as_bytes()[i]) == 58:  # ':'
+            if p.as_bytes()[i] == 58:  # ':'
                 colon_pos = i
                 break
 
+        var val_name: String = ""
+        var val_arg: String = ""
         if colon_pos >= 0:
-            var val_name = String(p[byte=0:colon_pos])
-            var val_arg = String(p[byte=colon_pos + 1:p.byte_length()])
+            val_name = String(p[byte=0:colon_pos])
+            val_arg = String(p[byte=colon_pos + 1:p.byte_length()])
         else:
             var val_name = p
             var val_arg = ""
@@ -348,7 +354,7 @@ def validation_error_to_422(e: ValidationError) -> Dict[String, String]:
     var loc_list = List[String]()
     loc_list.append("body")
     loc_list.append(e.field_name)
-    error_dict["loc"] = loc_list.join(",")
+    error_dict["loc"] = join_list(loc_list, ",")
     error_dict["msg"] = e.message
     error_dict["type"] = e.constraint
     return error_dict^

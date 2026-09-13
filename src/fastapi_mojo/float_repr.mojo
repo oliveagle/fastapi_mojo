@@ -204,12 +204,8 @@ def is_finite(v: Float64) -> Bool:
     if v != v:
         # NaN check: NaN is the only value != itself
         return False
-    if v == Float64("inf"):  # Actually check via _sfmt_e
-        return False
-    if v == Float64("-inf"):
-        return False
-    # Check against infinity
-    if v > 1.0e308 or v < -1.0e308:
+    # Check against infinity using numeric threshold (avoids Float64(String) which raises)
+    if v > Float64(1.7976931348623157e308) or v < Float64(-1.7976931348623157e308):
         return False
     return True
 

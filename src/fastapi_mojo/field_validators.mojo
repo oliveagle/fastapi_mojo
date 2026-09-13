@@ -20,19 +20,32 @@ from handler import Handler, KIND_ECHO
 
 # ---------- Validation Error ----------
 
-class FieldValidationError:
-    field_name: String
-    message: String
-    validator_type: String
+struct FieldValidationError:
+    var field_name: String
+    var message: String
+    var validator_type: String
 
-    init(field: String, msg: String, vtype: String):
+    def __init__(out self, field: String, msg: String, vtype: String):
         self.field_name = field
         self.message = msg
         self.validator_type = vtype
 
 # ---------- Numeric Helpers ----------
 
-def _try_f64(s: String) -> Float64 raises:
+def join_list(lst: List[String], sep: String) -> String:
+    var s = ""
+    for i in range(len(lst)):
+        if i > 0:
+            s = s + sep
+        s = s + lst[i]
+    return s
+
+
+
+def field_validation_error_to_string(e: FieldValidationError) -> String:
+    return e.field_name + ": " + e.message + " (" + e.validator_type + ")"
+
+def _try_f64(s: String) raises -> Float64:
     """Parse string to Float64."""
     var n = s.byte_length()
     if n == 0:
@@ -74,66 +87,58 @@ def _validate_gt(field: String, v: String, arg: String) raises -> String:
     var val = _try_f64(v)
     var min_val = _try_f64(arg)
     if val <= min_val:
-        raise FieldValidationError(field, 
-            "Input should be greater than " + arg,
-            "greater_than")
+        var _err = FieldValidationError(        field,             "Input should be greater than " + arg,            "greater_than")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 def _validate_ge(field: String, v: String, arg: String) raises -> String:
     var val = _try_f64(v)
     var min_val = _try_f64(arg)
     if val < min_val:
-        raise FieldValidationError(field,
-            "Input should be greater than or equal to " + arg,
-            "greater_than_or_equal")
+        var _err = FieldValidationError(        field,            "Input should be greater than or equal to " + arg,            "greater_than_or_equal")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 def _validate_lt(field: String, v: String, arg: String) raises -> String:
     var val = _try_f64(v)
     var max_val = _try_f64(arg)
     if val >= max_val:
-        raise FieldValidationError(field,
-            "Input should be less than " + arg,
-            "less_than")
+        var _err = FieldValidationError(        field,            "Input should be less than " + arg,            "less_than")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 def _validate_le(field: String, v: String, arg: String) raises -> String:
     var val = _try_f64(v)
     var max_val = _try_f64(arg)
     if val > max_val:
-        raise FieldValidationError(field,
-            "Input should be less than or equal to " + arg,
-            "less_than_or_equal")
+        var _err = FieldValidationError(        field,            "Input should be less than or equal to " + arg,            "less_than_or_equal")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 def _validate_positive(field: String, v: String) raises -> String:
     var val = _try_f64(v)
     if val <= Float64(0):
-        raise FieldValidationError(field,
-            "Input should be greater than 0",
-            "gt_0")
+        var _err = FieldValidationError(        field,            "Input should be greater than 0",            "gt_0")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 def _validate_negative(field: String, v: String) raises -> String:
     var val = _try_f64(v)
     if val >= Float64(0):
-        raise FieldValidationError(field,
-            "Input should be less than 0",
-            "lt_0")
+        var _err = FieldValidationError(        field,            "Input should be less than 0",            "lt_0")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 def _validate_not_empty(field: String, v: String) raises -> String:
     if v.byte_length() == 0:
-        raise FieldValidationError(field,
-            "String should not be empty",
-            "min_length")
+        var _err = FieldValidationError(        field,            "String should not be empty",            "min_length")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 def _validate_email(field: String, v: String) raises -> String:
     if v.find("@") < 0 or v.byte_length() < 5:
-        raise FieldValidationError(field,
-            "Value should be a valid email address",
-            "email")
+        var _err = FieldValidationError(        field,            "Value should be a valid email address",            "email")
+        raise Error(field_validation_error_to_string(_err))
     return v
 
 # ---------- Main validation function ----------
@@ -150,16 +155,16 @@ def run_field_validator(field_name: String, value: String, validator_spec: Strin
     
     if vtype == "gt":
         if len(parts) > 1:
-            return _validate_gt(field_name, value, parts[1])^
+            return _validate_gt(field_name, value, String(parts[1]))^
     elif vtype == "ge":
         if len(parts) > 1:
-            return _validate_ge(field_name, value, parts[1])^
+            return _validate_ge(field_name, value, String(parts[1]))^
     elif vtype == "lt":
         if len(parts) > 1:
-            return _validate_lt(field_name, value, parts[1])^
+            return _validate_lt(field_name, value, String(parts[1]))^
     elif vtype == "le":
         if len(parts) > 1:
-            return _validate_le(field_name, value, parts[1])^
+            return _validate_le(field_name, value, String(parts[1]))^
     elif vtype == "positive":
         return _validate_positive(field_name, value)^
     elif vtype == "negative":
@@ -185,7 +190,7 @@ def error_to_422(e: FieldValidationError) -> Dict[String, String]:
     var loc_list = List[String]()
     loc_list.append("body")
     loc_list.append(e.field_name)
-    error_dict["loc"] = loc_list.join(",")
+    error_dict["loc"] = join_list(loc_list, ",")
     error_dict["msg"] = e.message
     error_dict["type"] = e.validator_type
     return error_dict^
