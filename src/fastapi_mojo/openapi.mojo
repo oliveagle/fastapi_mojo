@@ -272,7 +272,15 @@ def _generate_operation(route: Route) raises -> String:
     if rd == "":
         rd = "Successful Response"
     var responses = StringBuilder()
-    responses.append("\"" + pk + "\":{\"description\":\"" + json_escape(rd) + "\",\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\"}}}}")
+    # 决策-91 (ADR-0065): use _response_schema if present for response content
+    var resp_schema_ref = ""
+    if "_response_schema" in h.data and h.data["_response_schema"] != "":
+        var resp_name = h.name + "_response"
+        resp_schema_ref = "\"$ref\":\"#/components/schemas/" + json_escape(resp_name) + "\""
+    if resp_schema_ref != "":
+        responses.append(""" + pk + "":{"description":"" + json_escape(rd) + "","content":{"application/json":{"schema":" + resp_schema_ref + "}}}")
+    else:
+        responses.append(""" + pk + "":{"description":"" + json_escape(rd) + "","content":{"application/json":{"schema":{"type":"object"}}}}")
     if "_responses" in h.data and h.data["_responses"] != "":
         var extra = parse_response_entries(h.data["_responses"])
         for i in range(len(extra)):
@@ -430,6 +438,23 @@ def generate_openapi(router: Router, title: String, version: String, description
                 schemas.append("\"" + json_escape(fname) + "\":" + multipart_openapi_schema(router.routes[i].handler, m))
             else:
                 schemas.append("\"" + json_escape(fname) + "\":" + form_openapi_schema(router.routes[i].handler, m))
+    # 决策-91 (ADR-0065): _response_schema -> components/schemas (独立响应模型)
+    # Generate a separate schema for the response model, named `<handler.name>_response`
+    for i in range(total):
+        if _route_hidden(router.routes[i]):
+            continue
+        if "_response_schema" in router.routes[i].handler.data and router.routes[i].handler.data["_response_schema"] != "":
+            var nm = router.routes[i].handler.name
+            var resp_name = nm + "_response"
+            var dup3 = False
+            for x in s_names:
+                if x == resp_name:
+                    dup3 = True
+                    break
+            if not dup3:
+                s_names.append(resp_name)
+                var rsch = _openapi_object_schema(router.routes[i].handler.data["_response_schema"])
+                schemas.append("\"" + json_escape(resp_name) + "":" + rsch)
     # 决策-44/69: components = schemas (决策-38) + securitySchemes (有 _auth 路由时)
     var comps = List[String]()
     if len(schemas) > 0:
