@@ -22,6 +22,16 @@ from body_schema import parse_body_schema, field_count, get_field, FieldSpec
 from router import Router
 from handler import Handler, KIND_ECHO
 
+# ---------- Dataclass Validation Error ----------
+
+class DataclassValidationError:
+    field_name: String
+    message: String
+
+    init(field: String, msg: String):
+        self.field_name = field
+        self.message = msg
+
 # ---------- Dataclass helpers ----------
 
 def create_dataclass_from_schema(schema_str: String) raises -> Dict[String, String]:
@@ -53,6 +63,37 @@ def create_dataclass_from_schema(schema_str: String) raises -> Dict[String, Stri
     
     return result^
 
+def validate_dataclass_fields(
+    handler: Handler,
+    data: Dict[String, String],
+    schema_str: String
+) raises -> Dict[String, String]:
+    """Validate fields against dataclass schema.
+    
+    Checks that all required fields are present.
+    Raises DataclassValidationError if validation fails.
+    """
+    var spec = create_dataclass_from_schema(schema_str)
+    var result = Dict[String, String]()
+    
+    for fname in spec.keys():
+        if fname not in data:
+            raise DataclassValidationError(fname, "Field is required")
+        result[fname] = data[fname]
+    
+    return result^
+
+def error_to_422(e: DataclassValidationError) -> Dict[String, String]:
+    """Convert error to FastAPI 422 format."""
+    var error_dict = Dict[String, String]()
+    var loc_list = List[String]()
+    loc_list.append("body")
+    loc_list.append(e.field_name)
+    error_dict["loc"] = loc_list.join(",")
+    error_dict["msg"] = e.message
+    error_dict["type"] = "missing" if e.message == "Field is required" else "value_error"
+    return error_dict^
+
 def register_dataclass_routes(mut router: Router) raises:
     """Register demo routes for dataclass support (ADR-0069)."""
     
@@ -62,3 +103,10 @@ def register_dataclass_routes(mut router: Router) raises:
     dc_item.set_data("_body_schema", "name:str;price:float;tax:float=0.0")
     dc_item.set_data("_dataclass", "true")
     router.add_route("/dataclass/item", "POST", dc_item)
+    
+    # /dataclass/user: demonstrate dataclass with required fields
+    var dc_user = Handler(KIND_ECHO(), "dataclass_user")
+    dc_user.set_data("message", "dataclass demo: user")
+    dc_user.set_data("_body_schema", "username:str;email:str;age:int")
+    dc_user.set_data("_dataclass", "true")
+    router.add_route("/dataclass/user", "POST", dc_user)
