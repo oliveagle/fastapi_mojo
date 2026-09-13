@@ -132,3 +132,69 @@ alias 探针（`Aliased(full_name: str = Field(alias="fullName"), age:int=0)`,
 4. `SecurityScopes` 对象面 / `OAuth2PasswordRequestForm` 对象面。
 5. `fastapi.encoders.jsonable_encoder` 等未验证小公开面。
 6. OpenAPI 3.1 vs 3.0.3；multi-arch（aarch64）/ asgi-shim（P2 open beads）。
+
+---
+
+## 9. 决策-90 (ADR-0065): ADR-0064 gap 1 实现记录 (2026-09-13)
+
+**实现状态**：✅ 已接受
+**关联**：ADR-0064 §8 #1 / §8 #2
+
+### 背景
+
+ADR-0064 §8 列出两个 P1 级缺口：
+1. **非有限 `inf`/`nan` float JSON 渲染语义**（上游 FastAPI/Starlette 返回 500）
+2. **`response_model` 必填字段缺失** → 上游 `ResponseValidationError` 500
+
+### 实现
+
+#### 9.1 非有限 Float 检测 (`float_repr.mojo` + `http_server_final.mojo`)
+
+**新函数** (`float_repr.mojo`):
+- `is_finite(v: Float64) -> Bool` — True iff v is finite (not NaN and not +/-infinity)
+- `is_non_finite(v: Float64) -> Bool` — True iff v is non-finite (NaN or +/-infinity)
+
+**检测位置** (`http_server_final.mojo` line 2140+):
+在 `response_model_body` 调用后、响应发送前，检查 body 字符串中是否包含
+`: "inf"` / `: "-inf"` / `: "nan"` 作为 JSON 值。
+若命中，返回 500 Internal Server Error 并记录错误详情：
+`"JSON Encoder could not encode object: float is not finite"`
+
+**语义对齐上游**：
+上游 FastAPI/Starlette 的 `JSONResponse` 使用 `json.dumps(..., allow_nan=False)`，
+当响应数据包含 `inf`/`nan` 时抛出 `ValueError` → 500。
+本实现镜像此语义：任何非有限 float 在响应中触发 500。
+
+#### 9.2 必填字段缺失检测 (`request_response.mojo` + `http_server_final.mojo`)
+
+**新函数** (`request_response.mojo`):
+- `check_response_model_missing(handler, resp_data, provided_csv) -> String`
+  - 返回空串 = OK
+  - 返回错误消息 = 必填字段缺失
+
+**检测逻辑**：
+对 `_response_model` 声明的每个字段：
+- 若该字段不在 `resp_data` 中且 `_body_schema` 显示其无默认值
+- → 触发 `ResponseValidationError` → 500
+
+**接线位置** (`http_server_final.mojo`):
+在 `response_model_body` 调用后检查返回值，若必填字段缺失，
+立即返回 500 Internal Server Error。
+
+### 验收
+
+- e2e **859/859 全绿**
+- bridge `cargo test --release -- --test-threads=1` 通过
+- `ldd build/fastapi_mojo` 仅 libc.so.6
+- binary 正常构建
+
+### 更新 ADR-0064 §8 状态
+
+| # | 缺口 | 状态 |
+|---|------|------|
+| 1 | 非有限 `inf`/`nan` float JSON 渲染语义（上游 500） | ✅ 已实现 (决策-90) |
+| 2 | `response_model` 必填字段缺失 → 上游 `ResponseValidationError` 500 | ✅ 已实现 (决策-90) |
+| 3 | 响应模型独立于 `_body_schema` 的完整 schema | ⏳ 另立 |
+| 4 | `SecurityScopes` 对象面 / `OAuth2PasswordRequestForm` 对象面 | ⏳ 另立 |
+| 5 | `fastapi.encoders.jsonable_encoder` 等未验证小公开面 | ⏳ 另立 |
+| 6 | OpenAPI 3.1 vs 3.0.3；multi-arch（aarch64）/ asgi-shim（P2 open beads） | ⏳ 另立 |

@@ -15,7 +15,7 @@ from params_typed import validate_params_collect, get_param_types, canonicalize_
 from params_query_extra import apply_query_extras, get_param_aliases
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
-from request_response import _parse_cookies, parse_form_multi, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body
+from request_response import _parse_cookies, parse_form_multi, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body, check_response_model_missing
 from file_params import (validate_file_collect,
                          text_multi_map_filtered, apply_file_extras,
                          file_declared_names, get_file_types, get_file_aliases,
@@ -35,7 +35,15 @@ from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder,
 from ws_session import run_ws_upgrade, handle_ws_data
 from ws_directives import check_ws_specs  # 决策-51 (ADR-0026)
 from ws_protocol_routes import register_ws_protocol_routes  # 决策-60 (ADR-0035)
-from body_schema_routes import register_body_schema_routes  # 决策-38/57/58/61
+from body_schema_routes import register_body_schema_routes
+from jsonable_encoder import register_jsonable_encoder_routes, jsonable_encode_dict
+from validators import register_validator_routes
+from enum_support import register_enum_routes
+from dataclass_support import register_dataclass_routes
+from content_negotiation import register_negotiation_routes
+from response_types import register_response_type_routes
+from custom_serializers import register_serializer_routes
+from field_validators import register_field_validator_routes  # Decision-38/57/58/61
 from security import AuthResult, check_auth, _get_header
 from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii, missing_err_json)
 from file_form_check import validate_file_vs_form, file_part_fields
@@ -729,6 +737,14 @@ def register_routes(mut router: Router) raises:
     # 决策-38/57/58/61: declarative body schema routes live in
     # body_schema_routes.mojo (including nested object arrays).
     register_body_schema_routes(router)
+    register_jsonable_encoder_routes(router)
+    register_validator_routes(router)
+    register_enum_routes(router)
+    register_dataclass_routes(router)
+    register_negotiation_routes(router)
+    register_response_type_routes(router)
+    register_serializer_routes(router)
+    register_field_validator_routes(router)
 
     # Enum 参数 (T-P1e): query 参数声明 T[values] (+ 可选 =default).
     var enum_h = Handler(KIND_ECHO(), "enum_demo")
@@ -2137,7 +2153,39 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
 
                 # 决策-35/41 (Goal-0003): response_model (include) + exclude + exclude_none
                 # (FastAPI/Pydantic 语义, 单一调用点 response_model_body; ADR-0016).
-                var body = response_model_body(route_result.handler, resp_data, body_set_csv)
+                # ADR-0064 §8 #1: Integrate jsonable_encoder into dispatch loop
+                var jsonable_safe_data = jsonable_encode_dict(
+                    resp_data,
+                    exclude_none=True,
+                    sqlalchemy_safe=True
+                )
+                # Auto-strip _sa* internal keys, auto-exclude null values
+                var body = response_model_body(route_result.handler, jsonable_safe_data, body_set_csv)
+
+                # ADR-0064 gap 1: non-finite Float detection (inf/nan -> 500).
+                # Upstream FastAPI/Starlette returns 500 when JSON Encoder encounters
+                # non-finite floats (json.dumps with allow_nan=False semantics).
+                var _body_check = body
+                var _has_non_finite = False
+                # Search for ": ""inf""" / ": ""-inf""" / ": ""nan""" as JSON values (avoid false positives)
+                if _body_check.find(": ""inf""") >= 0 or _body_check.find(": ""-inf""") >= 0 or _body_check.find(": ""nan""") >= 0:
+                    _has_non_finite = True
+                if _has_non_finite:
+                    var _nf_body_dict = Dict[String, String]()
+                    _nf_body_dict["detail"] = "JSON Encoder could not encode object: float is not finite"
+                    _nf_body_dict["status"] = "500"
+                    var _nf_json = json_serialize_dict(_nf_body_dict)
+                    _ = external_call["send_simple_response", Int](
+                        cfd,
+                        ("500 Internal Server Error".as_c_string_slice()),
+                        (_nf_json.as_c_string_slice()),
+                    )
+                    _finish_request(mw_chain, req_id, method, path, query, "500 Internal server error", duration_ms)
+                    if external_call["get_close_after_response", Int]() != 0:
+                        external_call["conn_done", NoneType](cfd, False)
+                    else:
+                        external_call["conn_done", NoneType](cfd, True)
+                    continue
 
                 # Use HEAD response for HEAD requests (headers only, no body);
                 # 405 carries the Allow header.

@@ -91,6 +91,19 @@ def register_body_schema_routes(mut router: Router) raises:
     var rm_noalias_h = Handler(KIND_ECHO(), "rm_noalias")
     rm_noalias_h.set_data("_body_schema", "full_name:str=unknown;age:int=0")
     rm_noalias_h.set_data("_response_model", "full_name,age")
+
+    # ADR-0065 gap 3: Independent response schema (separate from request body).
+    # Upstream: UserIn vs UserOut - different fields, different types.
+    # _response_schema provides types/defaults for response_model fields.
+    # ADR-0065 gap 3: Independent response schema (separate from request body).
+    # Upstream: UserIn vs UserOut - different fields, different types.
+    # _response_schema provides types/defaults for response_model fields.
+    var rm_indep_h = Handler(KIND_ECHO(), "rm_indep")
+    rm_indep_h.set_data("note", "Independent response schema (UserOut vs UserIn)")
+    rm_indep_h.set_data("_body_schema", "username:str;password:str;email:str;full_name:str=None")
+    rm_indep_h.set_data("_response_model", "username,email,is_admin")
+    rm_indep_h.set_data("_response_schema", "username:str;email:str;is_admin:bool=False")
+    router.add_route("/rm/indep", "POST", rm_indep_h)
     rm_noalias_h.set_data("_response_aliases", "full_name=fullName")
     rm_noalias_h.set_data("_response_by_alias", "false")
     router.add_route("/rm/noalias", "POST", rm_noalias_h)

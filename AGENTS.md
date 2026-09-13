@@ -527,6 +527,7 @@
   0 警告 / mojo 自测 21 check 全过 / bench 6 场景 0 errors（get_root_10k_100c
   41.9k req/s 无回归）/ ldd 仅 libc / env -i 干净启动 / binary **3.1M**
   （≤4.2M）/ **FFI diff = 0**。
+- **已决策-93**：**自定义字段验证器**（ADR-0067）：FastAPI  等价实现。支持声明式  自定义验证器：positive/negative/email/url/uuid/range(gt/lt/ge/le)。纯 Mojo 实现，FFI diff=0。demo 路由 、、。e2e 验证器路由测试通过；binary 130 routes / ldd libc-only。
 
 - **已决策-39**：**finish_header multipart/form-data UTF-8 豁免（P0 修复，
   DC2 端口遗漏）**：
@@ -1801,3 +1802,9 @@ RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
 决策-23 质量门禁；决策-21 终态 Mojo + Rust only；决策-20 DC2-h；
 决策-19 Bridge 终态 Rust；决策-18 WS 精化；决策-17 高并发 WS；
 决策-16 WS 增强；决策-15 WS；决策-14 单 binary 机制；决策-13 Mojo 单 binary 本标）*
+- **已决策-90**：**ADR-0064 gap 1/2 实现：非有限 `inf`/`nan` float 渲染 → 500 + `response_model` 必填字段缺失 → `ResponseValidationError` 500**（2026-09-13）：
+  1. **非有限 Float 检测**（`float_repr.mojo` + `http_server_final.mojo`）：新增 `is_finite(v: Float64)` / `is_non_finite(v: Float64)` 函数；dispatch 在 `response_model_body` 后检查 body 中是否含 `: "inf"` / `: "-inf"` / `: "nan"` JSON 值；命中 → 500 Internal Server Error（`detail` = `"JSON Encoder could not encode object: float is not finite"`）；语义对齐上游 FastAPI/Starlette `JSONResponse`（`json.dumps(allow_nan=False)` → `ValueError` → 500）。
+  2. **必填字段缺失检测**（`request_response.mojo` + `http_server_final.mojo`）：新增 `check_response_model_missing(handler, resp_data, provided_csv) -> String` 函数；对 `_response_model` 声明的每个字段检查是否在 `resp_data` 中且 `_body_schema` 无默认值；缺失 → 返回 `ResponseValidationError` 消息 → 500。
+  3. **验收**：e2e **859/859 全绿**；bridge `cargo test --release -- --test-threads=1` 通过；`ldd build/fastapi_mojo` 仅 libc；binary 正常构建；**FFI diff = 0**（纯 Mojo）。
+- **已决策-91**：**独立响应模型 schema**（ADR-0065, `fastapi_mojo-fjt` bead 销账）：兑现 ADR-0064 §8 #3（response_model 独立于 body 的完整 schema）。上游 FastAPI 的 `response_model` 与请求体可以是不同的 Pydantic 类（如 UserIn vs UserOut，字段集合/类型/默认值均不同）；本实现新增 `_response_schema` 声明字段（与 `_body_schema` 同语法），`response_model_body` / `check_response_model_missing` 优先使用 `_response_schema` 作为类型/默认值来源，无 `_response_schema` 时回退 `_body_schema`（向后兼容）。新增 demo 路由 `/rm/indep`（POST）：body 含 username/password/email，response_model 声明 username/email/is_admin，response_schema 提供 is_admin:bool=False 默认值。`_response_model` 字段列表 + `_response_schema` 类型信息协同，实现安全过滤（password 不出现）+ 业务派生（is_admin 注入）。**FFI diff = 0**（纯 Mojo，零 Rust/零 C）；e2e **859/859** 全绿 / bridge cargo test 通过 / binary 5,265,856 B ≤6MiB / ldd libc-only。OpenAPI response schema 仍从 `_body_schema` 生成（P2 改进）。
+- **已决策-92**：**`jsonable_encoder` 公开面**（ADR-0066, ADR-0064 §8 #5 兑现）：上游 `fastapi.encoders.jsonable_encoder(obj)` 将任意对象转为 JSON 兼容形式（Pydantic→model_dump、dataclass→asdict、Enum→.value、datetime/UUID/Decimal/IP→str、dict/list→递归、include/exclude/exclude_none/exclude_defaults 过滤、sqlalchemy_safe 剔 _sa* 键、custom_encoder 自定义转换器）。本实现新增 `jsonable_encoder.mojo`（252 LOC，纯 Mojo，FFI diff=0）：`jsonable_encode_value` / `jsonable_encode_dict` / `jsonable_encode_list` / `jsonable_encoder` 四函数 + 类型启发式（`_is_datetime_str` / `_is_uuid_str` / `_is_ip_str` / `_is_decimal_str`）；demo 路由 `/encoder/basic`（exclude_none + sqlalchemy_safe）+ `/encoder/exclude`（exclude CSV）；接线 `register_jsonable_encoder_routes(router)`。偏差：Mojo 无 Pydantic/dataclass/Enum 运行时；Dict[String,String] 天然 JSON 兼容；custom_encoder 用 Dict[String,String] 映射替代 Python 闭包。e2e **859/859** 全绿 / binary 127 routes / ldd libc-only / **FFI diff = 0**。

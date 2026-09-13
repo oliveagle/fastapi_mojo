@@ -37,6 +37,7 @@ from json_rust import serialize_dict_opt_in
 from params_query import url_decode  # _parse_form_body (决策-44 从 http_server_final 移入)
 # 决策-89 (ADR-0064): response_model 类型/默认值来自 _body_schema (单一 spec 源).
 from body_schema import parse_body_schema, field_count, get_field, FieldSpec, canonical_default_value
+from validators import validate_model_fields
 
 
 def _bof(s: String, i: Int) -> Int:
@@ -345,10 +346,14 @@ def response_model_body(handler: Handler, resp_data: Dict[String, String],
     var alias_map = Dict[String, String]()
     if "_response_aliases" in handler.data:
         alias_map = _parse_alias_table(handler.data["_response_aliases"])
-    # 声明模型 = _body_schema (字段类型 + 默认值, 与请求校验同源; 缺失时无声明元数据).
+    # 声明模型 = _response_schema if present, else _body_schema (决策-91 ADR-0065: 独立响应模型).
+    # FastAPI: response_model 与 body 模型可以是不同的 Pydantic class.
     var specs = Dict[String, FieldSpec]()
-    if "_body_schema" in handler.data:
-        var fs = parse_body_schema(handler.data["_body_schema"])
+    var schema_source = "_body_schema"
+    if "_response_schema" in handler.data:
+        schema_source = "_response_schema"
+    if schema_source in handler.data:
+        var fs = parse_body_schema(handler.data[schema_source])
         for i in range(field_count(fs)):
             var fld = get_field(fs, i)
             specs[fld.name] = fld^
@@ -386,3 +391,45 @@ def response_model_body(handler: Handler, resp_data: Dict[String, String],
             out_key = alias_map[f]
         filtered[out_key] = _rm_render(f, resolved, specs)
     return serialize_dict_opt_in(filtered)
+
+def check_response_model_missing(handler: Handler, resp_data: Dict[String, String],
+                                provided_csv: String = "") raises -> String:
+    """决策-90 (ADR-0065): Check for required fields missing in response_model.
+
+    Returns empty string if OK, or error message describing the missing field.
+    Aligned with upstream FastAPI `ResponseValidationError` which raises
+    `fastapi.exceptions.ResponseValidationError` -> 500 Internal Server Error
+    when a required field (no default) is not present in the response data.
+    """
+    if "_response_model" not in handler.data:
+        return ""
+    var model_fields = _split_csv(handler.data["_response_model"])
+    var exclude = List[String]()
+    if "_response_exclude" in handler.data:
+        exclude = _split_csv(handler.data["_response_exclude"])
+    # Specs from _response_schema if present, else _body_schema (决策-91 ADR-0065).
+    var specs = Dict[String, FieldSpec]()
+    var schema_source = "_body_schema"
+    if "_response_schema" in handler.data:
+        schema_source = "_response_schema"
+    if schema_source in handler.data:
+        var fs = parse_body_schema(handler.data[schema_source])
+        for i in range(field_count(fs)):
+            var fld = get_field(fs, i)
+            specs[fld.name] = fld^
+    # Check each field
+    for f in model_fields:
+        if _csv_contains(exclude, f):
+            continue
+        # Determine if field has a value
+        var has_val = False
+        if ("body_" + f) in resp_data:
+            has_val = True
+        elif f in resp_data:
+            has_val = True
+        if not has_val:
+            # Check if field has a default
+            if f in specs and not specs[f].has_default():
+                # Required field missing -> ResponseValidationError -> 500
+                return "ResponseValidationError: missing required field " + f + "'"
+    return ""

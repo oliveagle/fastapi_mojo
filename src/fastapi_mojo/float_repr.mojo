@@ -192,3 +192,33 @@ def is_dec_f64_syntax(s: String) -> Bool:
             return False
         i += 1
     return True
+
+def is_finite(v: Float64) -> Bool:
+    """True iff v is finite (not NaN and not +/-infinity).
+
+    Upstream FastAPI/Starlette JSONResponse uses `json.dumps(..., allow_nan=False)`
+    which raises ValueError for inf/nan. We mirror this: any non-finite float in a
+    response triggers a 500 error.
+    """
+    # CPython `math.isfinite` semantics: not (nan or inf or -inf)
+    if v != v:
+        # NaN check: NaN is the only value != itself
+        return False
+    if v == Float64("inf"):  # Actually check via _sfmt_e
+        return False
+    if v == Float64("-inf"):
+        return False
+    # Check against infinity
+    if v > 1.0e308 or v < -1.0e308:
+        return False
+    return True
+
+def is_non_finite(v: Float64) -> Bool:
+    """True iff v is non-finite (NaN or +/-infinity)."""
+    if v != v:
+        return True
+    # Check if _sfmt_e returns inf/nan string
+    var s = _sfmt_e(v, 1)
+    if s == "inf" or s == "-inf" or s == "nan":
+        return True
+    return False
