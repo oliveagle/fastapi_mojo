@@ -47,6 +47,7 @@ ADR-0064 §8 列出 P1/P2 缺口 #5：`fastapi.encoders.jsonable_encoder`。
 
 - **e2e**：864/864 全绿（决策-92 后新增 JE-1..JE-2a 过滤断言）
 - **手工验证**：`/encoder/basic` 返回 200，`_sa_internal` 键被过滤
+- **P0 修复（2026-09-13）**：`_is_*_str` 类型谓词曾用 `s[byte=i]`（多字节串续字节位置触发 codepoint-boundary assert → SIGABRT，e2e 685 连锁炸）；改 `s.as_bytes()[i]` + ASCII 守卫后多字节 path/值安全，e2e 回 858 passed
 
 ## 5. 已知偏差
 

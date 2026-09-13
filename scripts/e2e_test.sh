@@ -90,7 +90,7 @@ FAIL=0
 FAILED_NAMES=()
 
 pass() { PASS=$((PASS+1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL+1)); FAILED_NAMES+=("$1"); echo "  FAIL: $1 — $2"; }
+fail() { FAIL=$((FAIL+1)); FAILED_NAMES+=("$1"); local _d="${2:-}"; echo "  FAIL: $1 — $_d"; }
 
 # --- fmtool 探测/构建 ---------------------------------------------------------
 
@@ -2102,7 +2102,7 @@ if [[ "$GZ_READY" == 1 ]]; then
     if cmp -s "$TMP/gz_plain.json" "$TMP/gz_gz.json" && grep -q '"openapi"' "$TMP/gz_gz.json"; then
         pass "GZ-5 gunzip roundtrip identical"
     else
-        fail "GZ-5 gunzip roundtrip identical"
+        fail "GZ-5 gunzip roundtrip identical" "expected decompressed == original"
     fi
     # GZ-6: AE "GZIP" 大写 → 不命中 (大小写敏感 quirk) → identity + Vary.
     GZ6=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: GZIP' "$GZ_BASE/openapi.json")
@@ -2215,7 +2215,7 @@ if crs_wait "$CRS_PORT"; then
     if crs_has_hdr '^access-control-allow-origin: *\*$'; then
         pass "CRS-2 wildcard config + Origin → ACAO *"
     else
-        fail "CRS-2 wildcard config + Origin → ACAO *"
+        fail "CRS-2 wildcard config + Origin → ACAO *" "missing ACAO or code"
     fi
     # CRS-3: 白名单命中 + credentials → 回显 + credentials + Vary: Origin
     crs_req -H 'Origin: http://a.com' "$CRS_BASE/health" >/dev/null
@@ -2224,7 +2224,7 @@ if crs_wait "$CRS_PORT"; then
         && crs_has_hdr '^vary: *Origin$'; then
         pass "CRS-3 allowed origin → echo + credentials + Vary"
     else
-        fail "CRS-3 allowed origin → echo + credentials + Vary"
+        fail "CRS-3 allowed origin → echo + credentials + Vary" "headers or code missing"
     fi
     # CRS-4: 白名单未命中 → 无 ACAO (上游仍发静态 simple_headers: credentials), 无 Vary
     crs_req -H 'Origin: http://evil.com' "$CRS_BASE/health"
@@ -3471,7 +3471,7 @@ if [[ "$MW_READY" == 1 ]]; then
     if curl -s -D - -o /dev/null "$MW_BASE/health" | tr -d '\r' | grep -qi '^X-Mw: *1'; then
         pass "MW-1 HDR: /health has X-Mw: 1"
     else
-        fail "MW-1 HDR: /health has X-Mw: 1"
+        fail "MW-1 HDR: /health has X-Mw: 1" "X-Mw header missing or value != 1"
     fi
     # MW-2: REQHDR 合成请求头 — /mw/reqhdr _reads_headers 回显 header_X-Mw-Inj: injected
     B=$(curl -s --max-time 10 "$MW_BASE/mw/reqhdr")
@@ -3607,7 +3607,7 @@ if [[ "$MW4_READY" == 1 ]]; then
     if grep -qi '^content-type: *text/plain' "$TMP/mw4_hdr_c"; then
         pass "MW-9 BLOCK: content-type text/plain"
     else
-        fail "MW-9 BLOCK: content-type text/plain"
+        fail "MW-9 BLOCK: content-type text/plain" "response content-type not blocked"
     fi
 else
     fail "MW-D side server did not start" "see $MW4_LOG"

@@ -26,21 +26,39 @@ from handler import Handler, KIND_ECHO
 from router import Router
 
 # ---------- Type predicates (lightweight, no reflection in Mojo) ----------
+#
+# Multi-byte (UTF-8) 安全 (决策-84/ADR-0059 同款教训):
+#   Mojo 1.0.0 `s[byte=i]` 要求 i 落在码点边界. 多字节字符串 (e.g. "中") 的
+#   续字节位置 (0x80..0xBF) 触发 `Assert Error: String span index ... does not
+#   lie on a codepoint boundary` -> server 崩溃 (实测: dispatch 响应面
+#   jsonable_encode_dict 触发 _is_datetime_str on path="中", req-92 后
+#   SIGABRT, 后续 685 e2e 全炸). 修正: 用 `s.as_bytes()[i]` 字节安全访问 +
+#   类型谓词前置 ASCII 守卫 (datetime/uuid/ip/decimal 按定义 ASCII, 多字节
+#   串直接 False).
+
+def _is_ascii_bytes(s: String) -> Bool:
+    """True iff every byte of s is < 0x80 (pure ASCII)."""
+    var b = s.as_bytes()
+    for i in range(s.byte_length()):
+        if Int(b[i]) >= 128:
+            return False
+    return True
 
 def _is_datetime_str(s: String) -> Bool:
     """Heuristic: detect ISO datetime strings (YYYY-MM-DD...)."""
-    if s.byte_length() >= 10:
-        var e = ord(s[byte=4])  # 4th char (0-indexed)
+    if s.byte_length() >= 10 and _is_ascii_bytes(s):
+        var e = Int(s.as_bytes()[4])  # 5th byte (0-indexed)
         if e == 45 or e == 47:
             return True
     return False
 
 def _is_uuid_str(s: String) -> Bool:
     """Heuristic: 8-4-4-4-12 hex pattern."""
-    if s.byte_length() != 36:
+    if s.byte_length() != 36 or not _is_ascii_bytes(s):
         return False
-    for i in range(s.byte_length()):
-        var e = ord(s[byte=i])
+    var b = s.as_bytes()
+    for i in range(36):
+        var e = Int(b[i])
         if i == 8 or i == 13 or i == 18 or i == 23:
             if e != 45:
                 return False
@@ -48,10 +66,13 @@ def _is_uuid_str(s: String) -> Bool:
 
 def _is_ip_str(s: String) -> Bool:
     """Heuristic: IPv4 (dotted) or IPv6 (colon-separated)."""
+    if s.byte_length() == 0 or not _is_ascii_bytes(s):
+        return False
     var dot_count = 0
     var colon_count = 0
+    var b = s.as_bytes()
     for i in range(s.byte_length()):
-        var e = ord(s[byte=i])
+        var e = Int(b[i])
         if e == 46:
             dot_count += 1
         elif e == 58:
@@ -63,13 +84,14 @@ def _is_ip_str(s: String) -> Bool:
     return False
 
 def _is_decimal_str(s: String) -> Bool:
-    """Heuristic: Decimal-like string (digits with optional decimal point, optional E exponent)."""
-    if s.byte_length() == 0:
+    """Heuristic: Decimal-like string (digits with optional decimal point)."""
+    if s.byte_length() == 0 or not _is_ascii_bytes(s):
         return False
     var has_dot = False
     var has_digit = False
+    var b = s.as_bytes()
     for i in range(s.byte_length()):
-        var e = ord(s[byte=i])
+        var e = Int(b[i])
         if e == 46:
             has_dot = True
         elif e >= 48 and e <= 57:
