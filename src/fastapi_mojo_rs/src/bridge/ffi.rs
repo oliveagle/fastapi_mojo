@@ -838,3 +838,99 @@ pub extern "C" fn inject_request_header(name: *const c_char, value: *const c_cha
     let v = unsafe { c_str_lossy(value) };
     super::request::synth_push(&n, &v)
 }
+
+// =====================================================================
+// 56. upstream (upstream_*) — 上游引擎转发 (长度前缀 JSON over TCP).
+//     供 KIND_UPSTREAM: Mojo 侧把请求体转给模型引擎进程, 响应体原样回传.
+//     slice 契约: 指向 thread-local 缓冲, 下一次 upstream_call 后失效;
+//     缓冲 NUL 终止 (决策-36).
+// =====================================================================
+
+/// 调用上游引擎: 把 path + payload (请求体字节) 发往上池 (ports_csv 轮转),
+/// 返回响应体长度. -1 = 失败 (错误文本用 upstream_error_slice 取).
+/// path / payload 均用 (ptr, len) 传, **不假设 NUL 终止** (请求体可能含任意字节).
+/// ports_csv: "18410,18411" (逗号分隔); pin >= 0 -> 固定第 pin%n 个
+/// (前端 worker 绑引擎副本), pin < 0 -> 跨请求轮转.
+#[no_mangle]
+pub extern "C" fn upstream_call(
+    host: *const c_char,
+    ports_csv: *const c_char,
+    path: *const c_char,
+    path_len: c_long,
+    payload: *const c_char,
+    payload_len: c_long,
+    timeout_ms: c_long,
+    pin: c_long,
+) -> c_long {
+    let host_s = if host.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(host) }.to_string_lossy().into_owned()
+    };
+    let ports_s = if ports_csv.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ports_csv) }.to_string_lossy().into_owned()
+    };
+    let path_v: Vec<u8> = if path.is_null() || path_len <= 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(path as *const u8, path_len as usize) }.to_vec()
+    };
+    let data: Vec<u8> = if payload.is_null() || payload_len <= 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(payload as *const u8, payload_len as usize) }.to_vec()
+    };
+    // 副本选择 + failover: 从归属副本开始, 失败则按环序尝试其余副本
+    // (引擎重启/单副本崩掉时请求不会 502, 由其余副本接住).
+    let res = match super::upstream::port_ring(&ports_s, pin as i64) {
+        Ok((ports, start)) => {
+            let mut last: Result<Vec<u8>, String> = Err("no upstream tried".to_string());
+            for i in 0..ports.len() {
+                let port = ports[(start + i) % ports.len()];
+                match super::upstream::upstream_call(&host_s, port, &path_v, &data, timeout_ms as u64) {
+                    Ok(v) => {
+                        last = Ok(v);
+                        break;
+                    }
+                    Err(e) => last = Err(e),
+                }
+            }
+            last
+        }
+        Err(e) => Err(e),
+    };
+    let out_len = match &res {
+        Ok(v) => v.len() as c_long,
+        Err(_) => -1,
+    };
+    super::upstream::store_result(res);
+    out_len
+}
+
+/// 上次 upstream_call 的上游状态码 (0 = 传输层失败/未调用).
+#[no_mangle]
+pub extern "C" fn upstream_status() -> c_long {
+    super::upstream::last_status() as c_long
+}
+
+/// 上次 upstream_call 的响应体 (NUL 终止 slice; 空 = 无响应).
+#[no_mangle]
+pub extern "C" fn upstream_reply_slice() -> CSlice {
+    let (ptr, len) = super::upstream::last_reply_ptr();
+    if ptr.is_null() {
+        return CSlice { ptr: empty_ptr(), len: 0 };
+    }
+    CSlice { ptr: ptr as *const c_char, len: len as c_long }
+}
+
+/// 上次 upstream_call 的错误信息 (NUL 终止 slice; 空 = 上次成功).
+#[no_mangle]
+pub extern "C" fn upstream_error_slice() -> CSlice {
+    let (ptr, len) = super::upstream::last_error_ptr();
+    if ptr.is_null() {
+        return CSlice { ptr: empty_ptr(), len: 0 };
+    }
+    CSlice { ptr: ptr as *const c_char, len: len as c_long }
+}

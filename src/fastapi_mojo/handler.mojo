@@ -16,6 +16,7 @@ from std.ffi import external_call, CStringSlice
 from string_builder import span_to_str, next_codepoint_len
 from params_query import ParsedParams
 from params_json import parse_body_json
+from json import json_escape
 
 
 # ---------- 处理器行为常量 (零参 def) ----------
@@ -120,6 +121,18 @@ def KIND_REDIRECT() -> Int:
     无 Content-Type). 声明 _redirect_url + 可选 _redirect_status.
     真实逻辑在 dispatch send_redirect_response (SSE/FILE 同型特例)."""
     return 400
+
+
+def KIND_UPSTREAM() -> Int:
+    """决策-90: 上游引擎转发 — 把**原始请求体**转给模型引擎侧车进程
+    (长度前缀 JSON over TCP, 不经 HTTP 解析再序列化), 上游响应体原样返回.
+    声明: _upstream_host (默认 127.0.0.1) / _upstream_ports ("18410,18411"
+    逗号分隔, 跨请求轮转 — 一前端对多 GPU 副本) / _upstream_path
+    (帧内 path, 如 "/v1/systemone") / _upstream_timeout_ms (默认 30000).
+    响应走 resp_data["__raw__"] 原样通道 (dispatch 特例: 跳过 response_model
+    与 method/path/... 元字段注入; 上游不可达 -> 502 + {"detail": ...}).
+    运行时零 Python: 引擎是**另一个进程**, 不是本 binary 的运行期依赖."""
+    return 301
 
 
 # ---------- Handler 类型 ----------
@@ -385,6 +398,59 @@ def run_handler(handler: Handler,
         var respr = Dict[String, String]()
         respr["message"] = "redirect response"
         return ("307 Temporary Redirect", respr^)
+
+    # UPSTREAM (决策-90): 原始请求体 -> 引擎侧车; 响应体经 __raw__ 原样返回.
+    # dispatch 检测到此 kind 后跳过 response_model/meta 注入直接发送.
+    elif handler.kind == KIND_UPSTREAM():
+        var uphost = "127.0.0.1"
+        if "_upstream_host" in handler.data:
+            uphost = handler.data["_upstream_host"]
+        var upports = ""
+        if "_upstream_ports" in handler.data:
+            upports = handler.data["_upstream_ports"]
+        var uppath = ""
+        if "_upstream_path" in handler.data:
+            uppath = handler.data["_upstream_path"]
+        var uptimeout: Int = 30000
+        if "_upstream_timeout_ms" in handler.data:
+            uptimeout = atol(String(handler.data["_upstream_timeout_ms"]))
+        # 原始请求体: get_body_slice 返回 active conn 的 body (ptr,len), 非 NUL
+        # 终止; span_to_str 按真实字节数解码, 不做 HTTP 解析再序列化 (保真).
+        var rbody = span_to_str(
+            external_call["get_body_slice", CStringSlice[origin_of(String(""))]]().as_bytes())
+        # 引擎副本绑定: _upstream_worker_pin=true -> 本 worker 固定用
+        # ports[worker_id % n] (每个引擎同时只有 1 个在飞请求 = 引擎满速).
+        var up_pin: Int64 = -1
+        if "_upstream_worker_pin" in handler.data and handler.data["_upstream_worker_pin"] == "true":
+            up_pin = Int64(external_call["get_worker_id", Int]())
+        var rc = external_call["upstream_call", Int64](
+            uphost.as_c_string_slice(), upports.as_c_string_slice(),
+            uppath.as_c_string_slice(), Int64(uppath.byte_length()),
+            rbody.as_c_string_slice(), Int64(rbody.byte_length()),
+            Int64(uptimeout), up_pin)
+        var resp_up = Dict[String, String]()
+        if rc < 0:
+            var esl = external_call["upstream_error_slice", CStringSlice[origin_of(String(""))]]()
+            var emsg = span_to_str(esl.as_bytes())
+            resp_up["__raw__"] = "{\"detail\":\"" + json_escape(emsg) + "\"}"
+            return ("502 Bad Gateway", resp_up^)
+        var rsl = external_call["upstream_reply_slice", CStringSlice[origin_of(String(""))]]()
+        resp_up["__raw__"] = span_to_str(rsl.as_bytes())
+        # 上游状态码 -> HTTP status line (引擎侧车的 422/503 等直接透传,
+        # 前端因此不需要再懂业务错误; 未知码降级 200)。
+        var upst = external_call["upstream_status", Int]()
+        var stline = "200 OK"
+        if upst == 400:
+            stline = "400 Bad Request"
+        elif upst == 404:
+            stline = "404 Not Found"
+        elif upst == 422:
+            stline = "422 Unprocessable Entity"
+        elif upst == 503:
+            stline = "503 Service Unavailable"
+        elif upst >= 500:
+            stline = "500 Internal Server Error"
+        return (stline, resp_up^)
 
     else:
         var resp = Dict[String, String]()

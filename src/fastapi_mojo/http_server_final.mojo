@@ -28,7 +28,7 @@ from header_params import parse_header_entry, check_header_specs  # 决策-53 (A
 from std.os import getenv  # 决策-52: app 级 OPENAPI env (请求期读, 空 = 默认)
 from streaming import build_sse_body, build_sse_body_fields, sse_event_count
 from handler import KIND_SSE, KIND_FILE, KIND_REDIRECT
-from handler import KIND_DEPENDENCY
+from handler import KIND_DEPENDENCY, KIND_UPSTREAM
 from middleware import MiddlewareChain, Middleware, mw_request_id, mw_timing, mw_logging, now_ms
 from mw_spec import MWSpec, parse_mw_spec, check_mw_spec, mw_plan_request
 from string_builder import decode_utf8_bytes, next_codepoint_len, StringBuilder, span_to_str
@@ -460,6 +460,47 @@ def is_static_path(path: String) -> Bool:
         if ext == k:
             return True
     return False
+
+
+# 决策-90: soft-decider 生产 app 的路由表 (env FASTAPI_MOJO_APP=soft_decider).
+#
+# 与 demo 路由表 (register_routes) 分离的原因: demo 有 110 条演示路由
+# (文件服务/上传/OAuth2/静态目录...), 不该出现在绑定 0.0.0.0 的生产前端上.
+# 本表只有引擎转发: POST /v1/systemone + GET /health (+ /v1/health 别名).
+#
+# 引擎地址: FASTAPI_MOJO_UPSTREAM_HOST (默认 127.0.0.1) /
+#           FASTAPI_MOJO_UPSTREAM_PORTS ("18410,18411,..." 逗号分隔, 轮转).
+def register_soft_decider_routes(mut router: Router) raises:
+    var uhost = "127.0.0.1"
+    var uhost_env = getenv("FASTAPI_MOJO_UPSTREAM_HOST")
+    if uhost_env.byte_length() > 0:
+        uhost = uhost_env
+    var uports = "18410"
+    var uports_env = getenv("FASTAPI_MOJO_UPSTREAM_PORTS")
+    if uports_env.byte_length() > 0:
+        uports = uports_env
+
+    var system_one_h = Handler(KIND_UPSTREAM(), "system_one")
+    system_one_h.set_data("_upstream_host", uhost)
+    system_one_h.set_data("_upstream_ports", uports)
+    system_one_h.set_data("_upstream_path", "/v1/systemone")
+    system_one_h.set_data("_upstream_timeout_ms", "60000")
+    system_one_h.set_data("_upstream_worker_pin", "true")
+    router.add_route("/v1/systemone", "POST", system_one_h)
+
+    var health_h = Handler(KIND_UPSTREAM(), "engine_health")
+    health_h.set_data("_upstream_host", uhost)
+    health_h.set_data("_upstream_ports", uports)
+    health_h.set_data("_upstream_path", "/health")
+    health_h.set_data("_upstream_timeout_ms", "5000")
+    router.add_route("/health", "GET", health_h)
+
+    var health2_h = Handler(KIND_UPSTREAM(), "engine_health_v1")
+    health2_h.set_data("_upstream_host", uhost)
+    health2_h.set_data("_upstream_ports", uports)
+    health2_h.set_data("_upstream_path", "/health")
+    health2_h.set_data("_upstream_timeout_ms", "5000")
+    router.add_route("/v1/health", "GET", health2_h)
 
 
 # 路由表 (用户代码 = 纯数据, ADR-0004): 新增路由不需要改动核心 dispatch.
@@ -2139,6 +2180,24 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         external_call["conn_done", NoneType](cfd, True)
                     continue
 
+                # KIND_UPSTREAM (决策-90): 引擎响应体原样透传 — body/status 来自
+                # 上游侧车, 跳过 response_model 与 meta 字段注入 (KIND_HTML 同位特例).
+                if route_result.handler.kind == KIND_UPSTREAM():
+                    var up_body = ""
+                    if "__raw__" in resp_data:
+                        up_body = resp_data["__raw__"]
+                    var up_dur = mw_timing(mw_chain, start_ms)
+                    _ = external_call["send_simple_response", Int](
+                        cfd, status_line.as_c_string_slice(),
+                        up_body.as_c_string_slice())
+                    _finish_request(mw_chain, req_id, method, path, query, status_line, up_dur)
+                    _run_dep_teardowns(dep_teardowns, req_id, method, path)
+                    if external_call["get_close_after_response", Int]() != 0:
+                        external_call["conn_done", NoneType](cfd, False)
+                    else:
+                        external_call["conn_done", NoneType](cfd, True)
+                    continue
+
                 resp_data["method"] = method
                 resp_data["path"] = path
                 resp_data["handler"] = route_result.handler.name
@@ -2258,7 +2317,13 @@ def main() raises:
     external_call["set_max_body_size", NoneType](1048576)
 
     var router = Router()
-    register_routes(router)   # 用户代码 = 数据 (ADR-0004)
+    # 决策-90: 生产 app 选择 (env; 默认 = demo 路由表, e2e parity 不变).
+    #   FASTAPI_MOJO_APP=soft_decider -> 只注册引擎转发路由.
+    if getenv("FASTAPI_MOJO_APP") == "soft_decider":
+        print("App: soft_decider (engine proxy)")
+        register_soft_decider_routes(router)
+    else:
+        register_routes(router)   # 用户代码 = 数据 (ADR-0004)
     print("Routes: " + String(router.route_count()))
 
     var mw_chain = MiddlewareChain()

@@ -66,6 +66,7 @@ pub mod lifespan;
 pub mod multipart;
 pub mod time_util;
 pub mod tls;
+pub mod upstream;
 
 pub mod regex;
 pub mod middleware;
@@ -145,3 +146,6 @@ mod otel_traces_tests;
 
 #[cfg(test)]
 mod tls_tests;
+
+#[cfg(test)]
+mod upstream_tests;
