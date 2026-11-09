@@ -4246,6 +4246,132 @@ else
     fail "JE-2a exclude should remove hide_this" "body: ${JE2:0:200}"
 fi
 
+# ============================================================================
+# PM: 决策-105 (上游 FastAPI 0.157.0 / 0.159.0 / 0.160.0) — 参数模型组
+#   组合模型 (同 location 多组各自校验) / 可选模型 (全缺席 -> 不注入不报
+#   missing) / extra 策略 (ignore|allow|forbid; 未处理键 = 该 location 里
+#   不属于该模型的提交键, 含兄弟模型的字段). query + header + cookie 三面.
+# ============================================================================
+
+# PM-1: 组合模型 — 两组各自注入 (page 用组内声明默认 2).
+B=$(curl -s --max-time 10 "$BASE/pm/q-allow?term=hello&limit=2")
+if [[ "$B" == *'"query_filters_term": "hello"'* && "$B" == *'"query_filters_page": "2"'* && "$B" == *'"query_pagination_limit": "2"'* ]]; then
+    pass "PM-1 composed models: both groups injected independently"
+else fail "PM-1 composed models" "got: ${B:0:260}"; fi
+
+# PM-2: extra=allow — 同 location 未处理键收入组; 兄弟组的字段也算 extra.
+if [[ "$B" == *'"query_filters_x_limit": "2"'* && "$B" == *'"query_pagination_x_term": "hello"'* ]]; then
+    pass "PM-2 extra=allow collects sibling model keys"
+else fail "PM-2 extra=allow" "got: ${B:0:260}"; fi
+
+# PM-3: 可选模型 (0.159.0) — 组字段全缺席 -> 整组不注入 (模型 = None).
+B=$(curl -s --max-time 10 "$BASE/pm/q-optional")
+if [[ "$B" != *'"query_window_start"'* && "$B" != *'"query_label_text"'* ]]; then
+    pass "PM-3 optional model absent -> no injection"
+else fail "PM-3 optional absent" "got: ${B:0:260}"; fi
+
+# PM-4: 可选模型 — 组内有字段在场 -> 正常校验, 缺另一必填 -> 422 missing.
+B=$(curl -s --max-time 10 "$BASE/pm/q-optional?start=1")
+if [[ "$B" == *'"loc":["query","end"]'* && "$B" == *'"type":"missing"'* ]]; then
+    pass "PM-4 optional model present -> missing sibling field 422"
+else fail "PM-4 optional partial" "got: ${B:0:260}"; fi
+
+# PM-5: 可选模型 — 只给另一组字段 -> 该组注入, absent 组仍不注入.
+B=$(curl -s --max-time 10 "$BASE/pm/q-optional?text=yo")
+if [[ "$B" == *'"query_label_text": "yo"'* && "$B" != *'"query_window_start"'* ]]; then
+    pass "PM-5 optional group isolated injection"
+else fail "PM-5 optional isolated" "got: ${B:0:260}"; fi
+
+# PM-6: extra=forbid (0.160.0) — 未处理键逐键 422 extra_forbidden.
+B=$(curl -s --max-time 10 "$BASE/pm/q-forbid?alpha=a&beta=b")
+if [[ "$B" == *'"loc":["query","beta"]'* && "$B" == *'"type":"extra_forbidden"'* && "$B" == *'Extra inputs are not permitted'* ]]; then
+    pass "PM-6 extra=forbid rejects unknown key (extra_forbidden)"
+else fail "PM-6 extra=forbid" "got: ${B:0:260}"; fi
+
+# PM-7: extra=forbid — 只有模型字段 -> 200 + 组注入.
+B=$(curl -s --max-time 10 "$BASE/pm/q-forbid?alpha=a")
+if [[ "$B" == *'"query_strict_alpha": "a"'* ]]; then
+    pass "PM-7 extra=forbid accepts model fields"
+else fail "PM-7 extra=forbid ok path" "got: ${B:0:260}"; fi
+
+# PM-8: 组字段类型解析失败 -> 422 loc ["query",字段] (与个体参数同形).
+B=$(curl -s --max-time 10 "$BASE/pm/q-allow?term=hello&page=abc")
+if [[ "$B" == *'"loc":["query","page"]'* && "$B" == *'"type":"int_parsing"'* ]]; then
+    pass "PM-8 model field type error loc parity"
+else fail "PM-8 model field type" "got: ${B:0:260}"; fi
+
+# PM-9: header 面模型组 — x-id 在场 + x-trace 用组内默认.
+B=$(curl -s --max-time 10 -H "x-id: 7" "$BASE/pm/hdr")
+if [[ "$B" == *'"header_ident_x_id": "7"'* && "$B" == *'"header_ident_x_trace": "tr"'* ]]; then
+    pass "PM-9 header model injects value + default"
+else fail "PM-9 header model" "got: ${B:0:260}"; fi
+
+# PM-10: header 面必填缺失 -> 422 loc = HTTP header 名 (决策-103 语义).
+B=$(curl -s --max-time 10 "$BASE/pm/hdr")
+if [[ "$B" == *'"loc":["header","x-id"]'* && "$B" == *'"type":"missing"'* ]]; then
+    pass "PM-10 header model missing -> loc uses header name"
+else fail "PM-10 header model missing" "got: ${B:0:260}"; fi
+
+# PM-11: 未转换字段名 (x_id) 不被接受、也不算 extra (上游 "Do not accept an
+#        unconverted field name as an extra header") -> 仍报 missing x-id.
+B=$(curl -s --max-time 10 -H "x_id: 7" "$BASE/pm/hdr")
+if [[ "$B" == *'"loc":["header","x-id"]'* && "$B" != *'extra_forbidden'* ]]; then
+    pass "PM-11 unconverted header name not accepted (no extra error)"
+else fail "PM-11 unconverted header name" "got: ${B:0:260}"; fi
+
+# PM-12: header 面 extra=forbid — 声明面内、模型外的 header -> extra_forbidden.
+B=$(curl -s --max-time 10 -H "x-id: 7" -H "x-extra: z" "$BASE/pm/hdr")
+if [[ "$B" == *'"loc":["header","x-extra"]'* && "$B" == *'"type":"extra_forbidden"'* ]]; then
+    pass "PM-12 header extra=forbid rejects declared non-model header"
+else fail "PM-12 header extra=forbid" "got: ${B:0:260}"; fi
+
+# PM-13: header 面 extra=allow — 额外 header 收入组 (header_<组>_x_<名>).
+B=$(curl -s --max-time 10 -H "x-id: 7" -H "x-extra: z" "$BASE/pm/hdr-allow")
+if [[ "$B" == *'"header_ident_x_x_extra": "z"'* && "$B" == *'"header_ident_x_id": "7"'* ]]; then
+    pass "PM-13 header extra=allow collects extra header"
+else fail "PM-13 header extra=allow" "got: ${B:0:260}"; fi
+
+# PM-14: cookie 面模型组 — 值 + 组内默认.
+B=$(curl -s --max-time 10 -H "Cookie: session=abc" "$BASE/pm/cookie")
+if [[ "$B" == *'"cookie_sess_session": "abc"'* && "$B" == *'"cookie_sess_theme": "light"'* ]]; then
+    pass "PM-14 cookie model injects value + default"
+else fail "PM-14 cookie model" "got: ${B:0:260}"; fi
+
+# PM-15: cookie 面必填缺失 -> 422 loc ["cookie",名字].
+B=$(curl -s --max-time 10 "$BASE/pm/cookie")
+if [[ "$B" == *'"loc":["cookie","session"]'* && "$B" == *'"type":"missing"'* ]]; then
+    pass "PM-15 cookie model missing -> 422"
+else fail "PM-15 cookie model missing" "got: ${B:0:260}"; fi
+
+# PM-16: cookie 同名多值 -> 取最后一个 (RFC 6265 顺序语义).
+B=$(curl -s --max-time 10 -H "Cookie: session=a; session=b" "$BASE/pm/cookie")
+if [[ "$B" == *'"cookie_sess_session": "b"'* ]]; then
+    pass "PM-16 cookie duplicate -> last wins"
+else fail "PM-16 cookie duplicate" "got: ${B:0:260}"; fi
+
+# PM-17: cookie 面 extra=forbid — 模型外的 cookie -> extra_forbidden.
+B=$(curl -s --max-time 10 -H "Cookie: session=abc; other=1" "$BASE/pm/cookie")
+if [[ "$B" == *'"loc":["cookie","other"]'* && "$B" == *'"type":"extra_forbidden"'* ]]; then
+    pass "PM-17 cookie extra=forbid rejects unknown cookie"
+else fail "PM-17 cookie extra=forbid" "got: ${B:0:260}"; fi
+
+# PM-18: OpenAPI — 组字段摊平进对应 location 的 parameters; required 反映
+#        字段默认与组可选性 (可选组字段 required=false).
+OAPI_PM=$(curl -s --max-time 10 "$BASE/openapi.json")
+if [[ "$OAPI_PM" == *'"name":"term","in":"query","required":true'* \
+   && "$OAPI_PM" == *'"name":"page","in":"query","required":false'* \
+   && "$OAPI_PM" == *'"name":"start","in":"query","required":false'* \
+   && "$OAPI_PM" == *'"name":"x-id","in":"header","required":true'* \
+   && "$OAPI_PM" == *'"name":"theme","in":"cookie","required":false'* ]]; then
+    pass "PM-18 openapi flattens model fields (query/header/cookie + required)"
+else fail "PM-18 openapi flatten" "$(printf '%s' "$OAPI_PM" | head -c 0)"; fi
+
+# PM-19: /openapi.json 全文档仍为合法 JSON (JSON 硬门禁).
+curl -s --max-time 10 "$BASE/openapi.json" -o "$TMP/oapi_pm.json"
+if "$FMTOOL" jsoncheck "$TMP/oapi_pm.json" >/dev/null 2>&1; then
+    pass "PM-19 openapi.json valid JSON (fmtool jsoncheck)"
+else fail "PM-19 openapi jsoncheck" "$(head -c 200 "$TMP/oapi_pm.json")"; fi
+
 # --- summary ---------------------------------------------------------------------
 
 

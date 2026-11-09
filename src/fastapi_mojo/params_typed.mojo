@@ -26,6 +26,8 @@
 
 from handler import Handler
 from params_query_extra import validate_list_values, split_csv, join_values, parse_table
+from param_models import (ParamModelGroup, group_extra_keys, extra_forbidden_json,
+                           model_group_active)
 from alias_choices import (candidates_for, pick_in_dict, pick_in_multi,
                            pick_path_name, first_candidate)
 from numlit import (TypeSpec, parse_type_spec, ParsedBase, parse_base,
@@ -200,6 +202,64 @@ def validate_params_collect(type_spec: Dict[String, String],
     for k in type_spec:
         if k not in path_params:
             _vpc_one(k, type_spec, path_params, query_params, query_multi, aliases, constraints, errs)
+    return (len(errs) == 0, errs^)
+
+
+def _extra_input_json(key: String, values: Dict[String, String],
+                      multi: Dict[String, List[String]]) raises -> String:
+    """extra=forbid 的 input 值 (上游: 单值 -> JSON 字符串; 多值 -> 数组)."""
+    if key in multi:
+        var lst = multi[key].copy()
+        if len(lst) == 1:
+            return "\"" + json_escape(lst[0]) + "\""
+        var parts = List[String]()
+        for v in lst:
+            parts.append("\"" + json_escape(v) + "\"")
+        return "[" + ",".join(parts) + "]"
+    if key in values:
+        return "\"" + json_escape(values[key]) + "\""
+    return "null"
+
+
+def validate_model_params_collect(models: List[ParamModelGroup],
+                                   path_params: Dict[String, String],
+                                   query_params: Dict[String, String],
+                                   query_multi: Dict[String, List[String]],
+                                   aliases: Dict[String, String],
+                                   constraints: Dict[String, String]) raises -> Tuple[Bool, List[String]]:
+    """参数模型组统一校验 (决策-105; 上游 0.157.0 / 0.159.0 / 0.160.0).
+
+    上游语义 (fastapi master _request_param_model_to_args, 逐行核实):
+      - 组字段按普通参数校验 (类型/枚举/约束/默认; 422 loc = ["query", 字段]);
+      - **可选组**且组内字段一个都没出现 (且无 extra 收集值) -> 整组缺席
+        (不报 missing, 不注入默认; 上游 Optional 模型 = None);
+      - extra="forbid": 该组未处理但请求里出现的键 -> 422 extra_forbidden
+        (loc = ["query", 键], msg "Extra inputs are not permitted");
+      - extra="allow"/"ignore": 不产生错误 (allow 的收集在注入面做)."""
+    var errs = List[String]()
+    if len(models) == 0:
+        return (True, errs^)
+    var submitted = List[String]()
+    for k in query_params:
+        submitted.append(k)
+    for gi in range(len(models)):
+        var g = models[gi].copy()
+        if not model_group_active(g, aliases, query_params, query_multi,
+                                   submitted, False):
+            continue
+        var spec = Dict[String, String]()
+        for f in g.field_order:
+            spec[f] = g.field_specs[f]
+        for f in g.field_order:
+            _vpc_one(f, spec, path_params, query_params, query_multi,
+                     aliases, constraints, errs)
+        if g.extra == "forbid":
+            var ex = group_extra_keys(g, submitted, aliases, query_params,
+                                      query_multi, False)
+            for k in ex:
+                errs.append(extra_forbidden_json(
+                    "\"query\"", k,
+                    _extra_input_json(k, query_params, query_multi)))
     return (len(errs) == 0, errs^)
 
 

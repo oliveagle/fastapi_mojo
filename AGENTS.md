@@ -114,7 +114,7 @@
   单一 binary 构建（含 rust toolchain：`cargo build --release` 出 staticlib，
   `-static-libgcc` 静态链接 libgcc_s 保 ldd 干净，见 §3.2）
   + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试（含 `cargo test --release
-  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 917 项, 79 项
+  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 936 项, 79 项
   起扩展, 含 WebSocket 增强/并发/精化 + 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）
   + TestClient TC（ADR-0031）) +
   体积预算（中间态 ≤ 6M，终态 ≤ C + 2M）
@@ -1872,3 +1872,30 @@ RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
   5. **e2e 回归（AL-* 共 26 项，886 → 917）**：AL-Q1~Q6（query：首候选命中 / 第二候选命中 / **声明序优先**（`?beta=2&alpha=1` → alpha 生效）/ 缺候选 → 422 missing loc=首候选 / 命中候选非法 loc=该候选 / 第二候选非法 loc=该候选）/ AL-H1~H5（header 字面候选）/ AL-F1~F5（form urlencoded）/ AL-FL1~FL4（file multipart）/ AL-B1~B3（body JSON）/ AL-P1~P4（path：模板名命中 / 声明名绑定 / loc=模板名）/ **AL-OA**（OpenAPI 名称 = 候选首个 + `fmtool jsoncheck` 整份文档合法 JSON）。**另按上游更正 4 处存量断言**（MP12/MP13/MP24/MP23b：file 别名 422 loc 由字段名 `doc` 改为**别名** `docfile` —— 上游报别名不报字段名），并在脚本内加注释说明。
   6. **已知边界（不计入本项）**：上游的**模型级** alias（0.156.6）、**cookie 参数**、**BaseModel 作 query/header 参数**在本项目**无对应概念**（扁平声明式）→ 归 0.157.0「组合 query/header/cookie 参数模型」项（需新增声明语法，见优先队列第 10 项）。
   **验收**：e2e **917/917** 全绿（0 failed）；bridge `cargo test --release -- --test-threads=1` **530 passed / 2 failed / 4 ignored**（2 项 `cmd_tests::escaping_in_output` + `send_tests::static_file_traversal_returns_403` 为 **pristine HEAD 既有**且**本机环境依赖**：`/bin/sh` = bash（非 dash，printf `\"` 语义不同）+ `TMPDIR=$HOME/tmp`（使 `dir/../../etc/passwd` 不存在 → realpath 失败返回 404）；`TMPDIR=/tmp` 下 traversal 测试转绿，CI 环境（ubuntu，TMPDIR 未设、/bin/sh=dash）不受影响）；两 crate `clippy --release --tests -D warnings` **0 警告**；`ldd build/fastapi_mojo` 仅 **libc.so.6 + libm.so.6**；`env -i` 干净启动 health **200**；binary **5,418,424 B (5.17 MiB)** ≤6M 预算；`find src -name '*.c'` = **0**、`*.py` = **0**、无 `.venv`。**Fidelity**：upstream-tracking.md **B 主题 ✅ 1→6、➖ 0→1、❌ 7→1**；合计表与各节表格对齐（41 行 ✅=11 / 🔶=8 / ❌=10 / ➖=12，逐节核对脚本确认）。**新增模块 `alias_choices.mojo` 106 LOC < 500 God package 阈值**。
+
+- **已决策-105**：**上游 0.157.0 / 0.159.0 / 0.160.0 参数模型组（组合模型 / 可选模型 / extra 策略；query + header + cookie 三面）**
+  （docs/upstream-tracking.md A 主题；上游 PR #16573 / #16584 / #16594；ADR-0070）
+  1. **上游权威语义（已从 `fastapi/dependencies/utils.py::_request_param_model_to_args` 逐行核实）**：
+     - **组合模型（0.157.0）**：同一 location 可声明**多个** Pydantic 模型作 `Query()`/`Header()`/`Cookie()` 参数，各自独立校验、各自注入；
+     - **逐字段取值**：`alias, request_alias = next((pair for pair in aliases if pair[1] in received_params), aliases[0])` —— 命中**首个在场候选**，都不在场取第一个（= 决策-104 语义）；
+     - **`own_names`** = 字段**全部**请求别名；**`processed_keys`** = 每字段的**选中别名**，header 面额外把**未转换的字段名**（`x_id`）也计入（源码注释 "Do not accept an unconverted field name as an extra header"）；
+     - **未处理键** = `received_params` 里不在 `processed_keys` 的键 → 交给该模型 extra 策略：`ignore` 丢弃 / `allow` 收入（模型 extra 字段）/ `forbid` **逐键 422**（pydantic `extra_forbidden`，msg "Extra inputs are not permitted"，loc `(location, 键)`）；
+     - **缺席条件（0.159.0）**：`if field_info.annotation is not model and not (own_names ∩ received_params or (extra in ("allow","forbid") and params_to_process)): value = Undefined` —— **只有可选模型**才可能缺席；**非可选模型恒校验**（`{}` → 逐字段 missing 422，collect-all）；
+     - **header `convert_underscores`** 模型级默认 True（`x_id` → `x-id`），`AliasChoices` 候选为**字面名**；header 错误 loc 报 **HTTP header 名**（决策-103 语义）；
+     - **OpenAPI**：模型字段**摊平**进该 location 的 `parameters`；可选模型的字段 `required=false`。
+  2. **声明语法（延续 `_param_types` 家族，不引入模型/类概念）**：
+     - `_param_models` / `_param_model_opts`（query 面）、`_header_models` / `_header_model_opts`、`_cookie_models` / `_cookie_model_opts`；
+     - `;` 分隔组、`|` 分隔组内字段、字段 = `名字:类型规格`（规格语法与 `_param_types` **完全一致**：默认 `=2` / 枚举 `[a,b]` / list `[]`）；
+     - 属性 CSV：`extra=ignore|allow|forbid`、`optional`（= 上游 `Optional[Model]`）；
+     - 组字段的别名/描述/约束复用该 location 既有共享表（`_param_aliases` / `_param_descs` / `_param_constraints`；header 面 wire 名取 `_reads_headers` 条目，cookie 面名 = 字段名原样）。
+  3. **实现（纯 Mojo，FFI diff = 0）**：
+     - **新增 `param_models.mojo`（358 LOC，叶子）**：`ParamModelGroup` + `parse_param_models`（畸形即 raise）+ `group_selected_alias` / `group_field_present` / `group_processed_keys` / `group_extra_keys` / `model_group_active` / `extra_forbidden_json` / `model_group_key` / `model_extra_key`；
+     - **新增 `header_models.mojo`（115 LOC）**：`validate_model_groups`（校验+注入；复用 `validate_headers_collect`，故组字段语义与个体 typed header 完全一致）+ `apply_model_group_extras`（allow 收集）+ `group_identity_aliases`；
+     - **新增 `param_models_check.mojo`（52 LOC）**：注册期 fail-fast（语法 / query 组字段与 `_param_types` 重名 / header 组字段未在 `_reads_headers` 声明或与 `_header_types` 重名）；
+     - **`params_typed.mojo`**：`validate_model_params_collect`（组字段逐个走既有 `_vpc_one`）+ `_extra_input_json`；**`params_query_extra.mojo`**：`apply_model_extras`（成功路径注入 group 字段 + allow 额外键；list → CSV、int/float/bool 规范化；缺席可选组整组不注入）；
+     - **`http_server_final.mojo`**：dispatch 三段接线（query `pmodels/mperr`；header `hread_present/hread_names` 常驻 + `hmodels/hm_*`；cookie `cmodels/cm_*`，Cookie 头只解析一次）+ 成功路径注入 + 注册期 `check_param_model_specs(router)`；**6 条 demo 路由** `/pm/q-allow`、`/pm/q-optional`、`/pm/q-forbid`、`/pm/hdr`、`/pm/hdr-allow`、`/pm/cookie`；
+     - **`openapi.mojo` / `openapi_schemas.mojo`**：三面组字段摊平进 parameters（required = 无默认且组非可选；query 取候选首个、header 取 HTTP header 名、cookie 原样；`cookie` 并入 path/query 的 schema 分支）。
+  4. **实测踩坑并固化（ADR-0070 §4.6）**：`read_headers_present` 的 `present` 以**声明名**为键（命中 wire 名另存 loc 表），首版误把它当别名表（`reads` = 声明名→wire 名）传给组逻辑 → header 组存在性恒假（missing 不报、字段不注入）；改为恒等映射 `group_identity_aliases` 判定、`reads` **只**用于 422 loc 命名。
+  5. **已知偏差（记入 ADR-0070 §5）**：**header 面 extra 域 = 该路由 `_reads_headers` 声明且在场的 header**，非上游「请求全部 header」（Rust bridge 无「枚举全部请求 header」导出，不为测试性语义新增 FFI）；组内嵌套模型 / 模型级 `alias_generator` / 实例默认值不支持。
+  6. **e2e 回归（PM-* 共 19 项，917 → 936）**：PM-1/2（组合两组各自注入 + allow 收兄弟组键）/ PM-3~5（可选组缺席不注入、部分在场 → missing、组间隔离）/ PM-6/7（forbid 逐键 422 + 合法路径）/ PM-8（组字段类型错 loc 同形）/ PM-9~13（header：注入+默认、missing loc=HTTP header 名、未转换名不算 extra、forbid、allow）/ PM-14~17（cookie：注入+默认、missing、同名多值取末、forbid）/ PM-18（OpenAPI 三面摊平 + required）/ PM-19（`/openapi.json` `fmtool jsoncheck` 合法 JSON）。
+  **验收**：e2e **936/936** 全绿（917 + PM-1~19，0 failed）；bridge `cargo test --release -- --test-threads=1`（`TMPDIR=/tmp`）**531 passed / 1 failed / 4 ignored**（唯一失败 `cmd_tests::escaping_in_output` 为 **pristine HEAD 既有**且**本机环境依赖**：`/bin/sh` = bash 使 `printf` 转义语义不同；CI 的 dash 不受影响）；两 crate `clippy --release --tests -D warnings` **0 警告**；`ldd build/fastapi_mojo` 仅 **libc.so.6 + libm.so.6**；`env -i` 干净启动 health **200**；binary **5,586,360 B (5.33 MiB)** ≤6M 预算；`find src -name '*.c'` = **0**、`*.py` = **0**、无 `.venv`。**upstream-tracking.md A 主题 ✅ 3→6、🔶 3→2、❌ 6→4**；合计 **41 行 = ✅14 / 🔶7 / ❌8 / ➖12**。God package：新增模块 358/115/52 LOC 均 < 500；`http_server_final.mojo` 2522→2654、`openapi.mojo` 636→704（**存量超限名单内**，拆分待办延续）。

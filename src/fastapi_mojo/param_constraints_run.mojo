@@ -63,7 +63,8 @@ def _hdr_parse_err(loc: String, type_name: String, raw: String) -> String:
 def validate_headers_collect(header_types: Dict[String, String],
                              reads: Dict[String, String],
                              present: Dict[String, String],
-                             constraints: Dict[String, String]) raises -> Tuple[Bool, List[String], Dict[String, String]]:
+                             constraints: Dict[String, String],
+                             loc_kind: String = "header") raises -> Tuple[Bool, List[String], Dict[String, String]]:
     """Header 统一校验 (ADR-0029 §3.3). 返回 (ok, errs, inject_values):
     缺失: 有默认 -> 校验默认 (违 -> 422, input = 类型化默认, P26-b-7/8; 过 ->
     注入默认字面量); 无默认 -> 422 missing (input null, loc = wire 名).
@@ -80,7 +81,7 @@ def validate_headers_collect(header_types: Dict[String, String],
         # 决策-103 (上游 0.152.0): loc 报 **HTTP header 名** (显式别名
         # 原样; 否则 `_`->`-`), 而非 Python 字段名.
         var wire = header_loc_name(name, reads)
-        var loc = "[\"header\",\"" + json_escape(wire) + "\"]"
+        var loc = "[\"" + loc_kind + "\",\"" + json_escape(wire) + "\"]"
         if name not in present:
             if not ts.has_default():
                 errs.append(_pe(loc, "Field required", "missing", "null"))

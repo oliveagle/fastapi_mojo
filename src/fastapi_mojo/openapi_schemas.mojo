@@ -387,7 +387,7 @@ def _generate_parameter(param_name: String, in_: String, type_spec: String, requ
     sb.append("{\"name\":\"" + json_escape(param_name) + "\",")
     sb.append("\"in\":\"" + in_ + "\",")
     sb.append("\"required\":" + ("true" if required else "false") + ",")
-    if in_ == "path" or in_ == "query":
+    if in_ == "path" or in_ == "query" or in_ == "cookie":
         if param_name in cons:
             sb.append("\"schema\":" + _openapi_param_schema(type_spec, desc,
                                                              parse_constraint_entry(cons[param_name], "")))

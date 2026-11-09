@@ -11,9 +11,14 @@ from router import Router, RouteMatch
 from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KIND_STATUS, KIND_ROUTES, KIND_TEMPLATE, KIND_HTML, KIND_RUN_CMD, KIND_WS_ECHO, KIND_WS_COUNTER, KIND_WS_GREET, KIND_OAUTH2_TOKEN
 from params_query import parse_path_params, parse_query_params, url_decode, url_decode_path, ParsedParams
 from params_json import parse_body_json
-from params_typed import validate_params_collect, get_param_types, canonicalize_typed_values
+from params_typed import (validate_params_collect, get_param_types,
+                          canonicalize_typed_values, validate_model_params_collect)
 from params_query_extra import (apply_query_extras, get_param_aliases,
-                                apply_path_aliases)
+                                apply_path_aliases, apply_model_extras)
+# 决策-105 (上游 0.157.0 / 0.159.0 / 0.160.0): 参数模型组
+from param_models import (get_param_models, get_header_models, get_cookie_models)
+from param_models_check import check_param_model_specs
+from header_models import validate_model_groups, apply_model_group_extras
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import _parse_cookies, parse_form_multi, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body, check_response_model_missing
@@ -841,6 +846,57 @@ def register_routes(mut router: Router) raises:
     qr_h.set_data("message", "required list demo")
     qr_h.set_data("_param_types", "n:int[]")
     router.add_route("/query-req", "GET", qr_h)
+
+    # 决策-105 (上游 FastAPI 0.157.0 / 0.159.0 / 0.160.0): 参数模型组 —
+    # 一个 handler 声明多个"模型组" (`_param_models` = 组; 每组 = 上游一个
+    # BaseModel 作 Query()), `_param_model_opts` 声明该组 extra 策略 /
+    # 可选性. 组字段的别名/约束复用该 location 既有共享表.
+    #   /pm/q-allow: 组合模型 (0.157.0) — 两组各自独立校验 + extra=allow.
+    var pm_allow_h = Handler(KIND_ECHO(), "pm_q_allow")
+    pm_allow_h.set_data("message", "param model allow demo")
+    pm_allow_h.set_data("_param_models",
+                        "filters=term:str|page:int=2;pagination=limit:int=10")
+    pm_allow_h.set_data("_param_model_opts",
+                        "filters=extra=allow;pagination=extra=allow")
+    router.add_route("/pm/q-allow", "GET", pm_allow_h)
+    #   /pm/q-optional: 可选模型 (0.159.0) — 组字段全缺席 -> 整组不注入、
+    #   不报 missing; 任一字段在场 -> 正常校验 (缺必填 -> 422).
+    var pm_opt_h = Handler(KIND_ECHO(), "pm_q_optional")
+    pm_opt_h.set_data("message", "param model optional demo")
+    pm_opt_h.set_data("_param_models", "window=start:str|end:str;label=text:str=hi")
+    pm_opt_h.set_data("_param_model_opts", "window=optional;label=optional")
+    router.add_route("/pm/q-optional", "GET", pm_opt_h)
+    #   /pm/q-forbid: extra=forbid (0.160.0) — 该 location 未处理键逐键 422
+    #   (type extra_forbidden, msg "Extra inputs are not permitted").
+    var pm_fb_h = Handler(KIND_ECHO(), "pm_q_forbid")
+    pm_fb_h.set_data("message", "param model forbid demo")
+    pm_fb_h.set_data("_param_models", "strict=alpha:str")
+    pm_fb_h.set_data("_param_model_opts", "strict=extra=forbid")
+    router.add_route("/pm/q-forbid", "GET", pm_fb_h)
+    #   /pm/hdr: header 面模型组 (字段必须在 _reads_headers 声明; wire 名 =
+    #   条目 wire — `x_id` -> `x-id`; 422 loc = HTTP header 名).
+    var pm_hd_h = Handler(KIND_ECHO(), "pm_hdr")
+    pm_hd_h.set_data("message", "param model header demo")
+    pm_hd_h.set_data("_reads_headers", "x_id,x_trace,x_extra")
+    pm_hd_h.set_data("_header_models", "ident=x_id:str|x_trace:str=tr")
+    pm_hd_h.set_data("_header_model_opts", "ident=extra=forbid")
+    router.add_route("/pm/hdr", "GET", pm_hd_h)
+    #   /pm/hdr-allow: header 面 extra=allow — 声明面内、模型外的 header
+    #   (x_extra) 收入组 (注入 header_<组>_x_<参数名>). 注意**偏差**:
+    #   extra 域 = 该路由 _reads_headers 声明且在场的 header (Rust bridge
+    #   无"枚举全部请求头"导出), 上游 = 请求全部 header (记入 ADR-0070).
+    var pm_hda_h = Handler(KIND_ECHO(), "pm_hdr_allow")
+    pm_hda_h.set_data("message", "param model header allow demo")
+    pm_hda_h.set_data("_reads_headers", "x_id,x_extra")
+    pm_hda_h.set_data("_header_models", "ident=x_id:str")
+    pm_hda_h.set_data("_header_model_opts", "ident=extra=allow")
+    router.add_route("/pm/hdr-allow", "GET", pm_hda_h)
+    #   /pm/cookie: cookie 面模型组 (cookie 名 = 字段名原样; 同名多值取最后).
+    var pm_ck_h = Handler(KIND_ECHO(), "pm_cookie")
+    pm_ck_h.set_data("message", "param model cookie demo")
+    pm_ck_h.set_data("_cookie_models", "sess=session:str|theme:str=light")
+    pm_ck_h.set_data("_cookie_model_opts", "sess=extra=forbid")
+    router.add_route("/pm/cookie", "GET", pm_ck_h)
     # 决策-45 (ADR-0020): Form 多值/alias/desc demo. _form_types 声明
     # 类型 (list 多值 / 标量默认 / float / bool); _param_descs ->
     # OpenAPI description. 必填 list 缺失 -> 422; count=0 标量默认.
@@ -1483,6 +1539,8 @@ def register_routes(mut router: Router) raises:
     check_openapi_specs(router)
     # 决策-53: _reads_headers 条目 (name / name=alias) 注册期校验 (同策略)
     check_header_specs(router)
+    # 决策-105: _param_models / _header_models / _cookie_models 注册期校验
+    check_param_model_specs(router)
     # 决策-54 (ADR-0029): _param_constraints/_header_types 注册期校验 (同策略)
     check_param_constraints(router)
 
@@ -1903,6 +1961,12 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         # body -> ["body",x] + 嵌套/数组下标; Pydantic v2 风格).
                         var perr = validate_params_collect(type_spec, route_result.params,
                                                            query_params.values, query_params.multi_values, aliases, constraints)
+                        # 决策-105 (上游 0.157.0/0.159.0/0.160.0): 参数模型组 —
+                        # 组字段独立校验 (可选组缺席跳过; extra=forbid -> extra_forbidden).
+                        var pmodels = get_param_models(route_result.handler)
+                        var mperr = validate_model_params_collect(
+                            pmodels, route_result.params, query_params.values,
+                            query_params.multi_values, aliases, constraints)
                         # 隐式 str (未类型化 path/query) 约束 — dispatch 独立 pass (ADR-0029 §3.3)
                         var imp_errs = validate_implicit_constraints(constraints, type_spec, htypes,
                                                                        route_result.params, query_params.values)
@@ -1910,18 +1974,62 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         var herr_ok = True
                         var herr_list = List[String]()
                         var hvals = Dict[String, String]()
-                        if len(htypes) > 0:
+                        var hread_present = Dict[String, String]()
+                        var hread_names = Dict[String, String]()
+                        # 决策-105: header 参数模型组 (与个体 typed header 同一读取面).
+                        var hmodels = get_header_models(route_result.handler)
+                        if ("_reads_headers" in route_result.handler.data) and \
+                                (len(htypes) > 0 or len(hmodels) > 0):
                             # 决策-104: 多候选 header — present 取首个在场候选的值;
                             # reads = 命中的 wire 名 (422 loc 用, 决策-103 语义).
                             var hread = read_headers_present(route_result.handler.data["_reads_headers"])
-                            var present = hread[0].copy()
-                            var reads = hread[1].copy()
-                            var hres = validate_headers_collect(htypes, reads, present, constraints)
-                            herr_ok = hres[0]
-                            for he in hres[1]:
-                                herr_list.append(he)
-                            for hv in hres[2]:
-                                hvals[hv] = hres[2][hv]
+                            hread_present = hread[0].copy()
+                            hread_names = hread[1].copy()
+                            if len(htypes) > 0:
+                                var hres = validate_headers_collect(htypes, hread_names, hread_present, constraints)
+                                herr_ok = hres[0]
+                                for he in hres[1]:
+                                    herr_list.append(he)
+                                for hv in hres[2]:
+                                    hvals[hv] = hres[2][hv]
+                        var hm_ok = True
+                        var hm_errs = List[String]()
+                        var hm_vals = Dict[String, String]()
+                        if len(hmodels) > 0:
+                            var hmres = validate_model_groups(hmodels, hread_names,
+                                                              hread_present, constraints,
+                                                              "header", True)
+                            hm_ok = hmres[0]
+                            for he2 in hmres[1]:
+                                hm_errs.append(he2)
+                            hm_vals = hmres[2].copy()
+                        # 决策-105: cookie 参数模型组 (Cookie 头一次解析; reads = 恒等).
+                        var cmodels = get_cookie_models(route_result.handler)
+                        var cm_ok = True
+                        var cm_errs = List[String]()
+                        var cm_vals = Dict[String, String]()
+                        var cm_present = Dict[String, String]()
+                        var cm_reads = Dict[String, String]()
+                        if len(cmodels) > 0:
+                            var rc_c = external_call["extract_request_header", Int](
+                                "Cookie".as_c_string_slice())
+                            if rc_c == 0:
+                                var sl_c = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
+                                var ck_str = span_to_str(sl_c.as_bytes())
+                                cm_present = _parse_cookies(ck_str)
+                            for gci in range(len(cmodels)):
+                                var g_c = cmodels[gci].copy()
+                                for f_c in g_c.field_order:
+                                    cm_reads[f_c] = f_c
+                            for k_c in cm_present:
+                                cm_reads[k_c] = k_c
+                            var cmres = validate_model_groups(cmodels, cm_reads,
+                                                              cm_present, constraints,
+                                                              "cookie", False)
+                            cm_ok = cmres[0]
+                            for ce in cmres[1]:
+                                cm_errs.append(ce)
+                            cm_vals = cmres[2].copy()
                         # 决策-85 (ADR-0060): Content-Type 决定 body 解析方式
                         # (仅 JSON CT 才按 JSON 解析; 上游 strict_content_type 默认).
                         var ct_hdr = _get_header("Content-Type")
@@ -1972,11 +2080,20 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         if not perr[0]:
                             for pe in perr[1]:
                                 all_errs.append(pe)
+                        if not mperr[0]:
+                            for me in mperr[1]:
+                                all_errs.append(me)
                         for ie in imp_errs:
                             all_errs.append(ie)
                         if not herr_ok:
                             for he in herr_list:
                                 all_errs.append(he)
+                        if not hm_ok:
+                            for he3 in hm_errs:
+                                all_errs.append(he3)
+                        if not cm_ok:
+                            for ce2 in cm_errs:
+                                all_errs.append(ce2)
                         if not sres[0]:
                             for se in sres[1]:
                                 all_errs.append(se)
@@ -2005,6 +2122,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                             # 决策-43 (Goal-0003 P2 #3): 成功路径 list 多值/alias 归一化 —
                             # values[key] = list CSV / alias 绑定值 (原始 name 覆写: 无绑定效力).
                             apply_query_extras(query_params, type_spec, aliases, route_result.params)
+                            # 决策-105: 参数模型组注入 (组字段 + extra=allow 额外字段).
+                            apply_model_extras(query_params, pmodels, aliases)
                             # 决策-81 (ADR-0056): int/float/bool 规范化回写 — handler /
                             # 响应注入 (query_*) 看到 pydantic 等价值 (007 -> 7).
                             canonicalize_typed_values(type_spec, aliases,
@@ -2044,6 +2163,19 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                         req_params["header_" + hn] = hvals[hn]
                                 if "_reads_cookies" in route_result.handler.data:
                                     inject_request_cookies(req_params, route_result.handler.data["_reads_cookies"])
+                                # 决策-105: header/cookie 参数模型组注入.
+                                for hv2 in hm_vals:
+                                    req_params["header_" + hv2] = hm_vals[hv2]
+                                for cv2 in cm_vals:
+                                    req_params["cookie_" + cv2] = cm_vals[cv2]
+                                if len(hmodels) > 0:
+                                    apply_model_group_extras(req_params, hmodels,
+                                                             hread_names, hread_present,
+                                                             "header", True)
+                                if len(cmodels) > 0:
+                                    apply_model_group_extras(req_params, cmodels,
+                                                             cm_reads, cm_present,
+                                                             "cookie", False)
                                 # 决策-45: form 归一化单点注入 — typed
                                 # list 全 occurrence CSV / 标量 last-wins /
                                 # alias 绑定 / legacy 未标注字段 (缺失 -> "").

@@ -14,10 +14,13 @@ from router import Router, Route
 from handler import Handler
 from params_typed import get_param_types
 from params_query_extra import get_param_aliases, get_param_descs
-from header_params import (parse_header_entry, header_entry_parts)  # 决策-53 (ADR-0028): header param 名 = wire 名
+from header_params import (parse_header_entry, header_entry_parts,
+                           header_loc_name)  # 决策-53 (ADR-0028): header param 名 = wire 名
 from body_validate import get_body_aliases  # 决策-104: body 字段别名
 from alias_choices import candidates_for, first_candidate, pick_path_name
-from param_constraints import get_param_constraints, get_header_types
+from param_constraints import (get_param_constraints, get_header_types,
+                               parse_reads_headers)
+from param_models import (get_param_models, get_header_models, get_cookie_models)  # 决策-105
 from numlit import parse_type_spec, parse_base
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
                          _split_top, _trim, _parse_range)
@@ -252,6 +255,71 @@ def _generate_operation(route: Route) raises -> String:
                     break
             # query param: optional if has default (list: 显式 '=' = 空 list 默认), else required
             params.append(_generate_parameter(name, "query", ts_str, not has_default, ds, cons))
+
+    # 决策-105 (上游 0.157.0 / 0.159.0 / 0.160.0): 参数模型组字段**摊平**进
+    # 对应 location 的 parameters. required = 字段无默认 **且** 组非可选
+    # (上游: 可选模型 = Optional[Model] -> 字段 required=False).
+    var qmodels = get_param_models(h)
+    for qmi in range(len(qmodels)):
+        var qg = qmodels[qmi].copy()
+        for qf in qg.field_order:
+            var qts = qg.field_specs[qf]
+            var qname = qf
+            if qf in aliases:
+                qname = first_candidate(candidates_for(aliases, qf))
+                if qf in cons:
+                    cons[qname] = cons[qf]
+            var qds = ""
+            if qf in descs:
+                qds = descs[qf]
+            var qdef = False
+            for qj in range(qts.byte_length()):
+                if ord(qts[byte=qj]) == 61:
+                    qdef = True
+                    break
+            var qreq = (not qdef) and (not qg.optional)
+            params.append(_generate_parameter(qname, "query", qts, qreq, qds, cons))
+
+    var hmodels = get_header_models(h)
+    if len(hmodels) > 0:
+        var hreads = Dict[String, String]()
+        if "_reads_headers" in h.data:
+            hreads = parse_reads_headers(h.data["_reads_headers"])
+        for hmi in range(len(hmodels)):
+            var hg = hmodels[hmi].copy()
+            for hf in hg.field_order:
+                var hts = hg.field_specs[hf]
+                var hwire = header_loc_name(hf, hreads)
+                if hf != hwire and hf in cons:
+                    cons[hwire] = cons[hf]
+                var hds = ""
+                if hf in descs:
+                    hds = descs[hf]
+                var hdef = False
+                for hj in range(hts.byte_length()):
+                    if ord(hts[byte=hj]) == 61:
+                        hdef = True
+                        break
+                var hreq = (not hdef) and (not hg.optional)
+                params.append(_generate_parameter(hwire, "header", hts, hreq, hds, cons))
+
+    var cmodels = get_cookie_models(h)
+    for cmi in range(len(cmodels)):
+        var cg = cmodels[cmi].copy()
+        for cf in cg.field_order:
+            var cts = cg.field_specs[cf]
+            var cds = ""
+            if cf in descs:
+                cds = descs[cf]
+            if cf in cons:
+                cons[cf] = cons[cf]
+            var cdef = False
+            for cj in range(cts.byte_length()):
+                if ord(cts[byte=cj]) == 61:
+                    cdef = True
+                    break
+            var creq = (not cdef) and (not cg.optional)
+            params.append(_generate_parameter(cf, "cookie", cts, creq, cds, cons))
 
     if len(params) > 0:
         if started:

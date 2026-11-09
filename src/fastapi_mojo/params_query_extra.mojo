@@ -26,6 +26,9 @@
 
 from handler import Handler
 from params_query import ParsedParams, parse_query_params
+from param_models import (ParamModelGroup, group_extra_keys, model_group_active,
+                          model_group_key, model_extra_key)
+from numlit import parse_type_spec, parse_base, parse_typed_value
 from alias_choices import (candidates_for, pick_in_dict, pick_in_multi,
                            pick_path_name, first_candidate)
 from json import json_escape
@@ -269,6 +272,86 @@ def apply_path_aliases(mut params: Dict[String, String],
         var pname = pick_path_name(cands, params, k)
         if pname != "" and pname != k:
             params[k] = params[pname]
+
+
+def _canon_model_value(spec: String, raw: String) -> String:
+    """决策-81 同款规范化: int/float/bool 标量 -> pydantic 等价值 (失败原样)."""
+    var ts = parse_type_spec(spec)
+    var pb = parse_base(ts.base_type)
+    if pb.type_name == "int" or pb.type_name == "float" or pb.type_name == "bool":
+        var pr = parse_typed_value(pb.type_name, raw)
+        if pr[0]:
+            return pr[1]
+    return raw
+
+
+def _canon_model_csv(spec: String, csv: String) raises -> String:
+    """list 组字段默认/请求值的逐元素规范化 (int/float/bool; 空串原样)."""
+    var ts = parse_type_spec(spec)
+    var pb = parse_base(ts.base_type)
+    if pb.type_name != "int" and pb.type_name != "float" and pb.type_name != "bool":
+        return csv
+    if csv == "":
+        return csv
+    var out = List[String]()
+    var parts = split_csv(csv)
+    for part in parts:
+        var pr = parse_typed_value(pb.type_name, part)
+        if pr[0]:
+            out.append(pr[1])
+        else:
+            out.append(part)
+    return join_values(out^)
+
+
+def apply_model_extras(mut query: ParsedParams,
+                       models: List[ParamModelGroup],
+                       aliases: Dict[String, String]) raises:
+    """决策-105: query 面参数模型组成功路径注入.
+
+    组字段 -> values["<组>_<字段>"] (list -> CSV; int/float/bool 规范化;
+    缺失 -> 声明默认); extra=allow 的额外字段 -> values["<组>_x_<键>"]
+    (多值 -> CSV). 缺席可选组**整组不注入** (上游模型 = None, 不注入默认值).
+
+    submitted = 注入前的请求键集合 (函数入口固定一次, 避免本函数自己注入的
+    组键被后续组当作 extra; 组字段名跨组唯一由注册期保证)."""
+    if len(models) == 0:
+        return
+    var submitted = List[String]()
+    for k in query.values:
+        submitted.append(k)
+    for gi in range(len(models)):
+        var g = models[gi].copy()
+        if not model_group_active(g, aliases, query.values, query.multi_values,
+                                   submitted, False):
+            continue
+        for f in g.field_order:
+            var spec = g.field_specs[f]
+            var cands = candidates_for(aliases, f)
+            var hit = pick_in_dict(cands, query.values)
+            var val = String("")
+            if is_list_spec(spec):
+                if hit != "":
+                    val = _canon_model_csv(spec, join_values(query.get_multi(hit)))
+                elif has_eq(spec):
+                    val = _canon_model_csv(spec, list_default_csv(spec))
+            else:
+                if hit != "":
+                    val = _canon_model_value(spec, query.values[hit])
+                elif has_eq(spec):
+                    val = _canon_model_value(spec, default_part(spec))
+            query.values[model_group_key(g.name, f)] = val
+        if g.extra == "allow":
+            var ex = group_extra_keys(g, submitted, aliases, query.values,
+                                       query.multi_values, False)
+            for k in ex:
+                var v = String("")
+                if k in query.multi_values:
+                    var mv = query.multi_values[k].copy()
+                    v = join_values(mv)
+                elif k in query.values:
+                    v = query.values[k]
+                query.values[model_extra_key(g.name, k)] = v
 
 
 # ---------- 自测 ----------
