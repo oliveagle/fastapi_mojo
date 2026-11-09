@@ -65,6 +65,12 @@ def snapshot_mp_parts() raises -> MpParts:
         out.b64s.append(mp_ffi_read_field(i, 4))
         out.raw_lens.append(max(0, raw_len))
         out.idxs.append(i)
+        # 决策-102 (0.143.5): 是否带 filename 属性 — 纯文本 part (无属性)
+        # 与浏览器未选文件 (filename="") 必须可区分 (0.150.0 只过滤后者).
+        var hf = 0
+        if external_call["mp_part_has_filename", Int](Int64(i)) != 0:
+            hf = 1
+        out.has_filenames.append(hf)
         i += 1
     return out^
 

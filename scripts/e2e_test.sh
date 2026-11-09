@@ -42,6 +42,10 @@
 #   - UploadFile 对象 API: _file_types file/bytes + 422 (U2 value_error / U3 string_type /
 #     U4 last-wins / U5 全缺失) + _file_ops (head/range/sha256/save) + multipart OpenAPI
 #     (决策-46, MP8..MP23b; size = 实际字节 U1; MP1..MP7 决策-32 存量)
+#   - bytes 列表字段 (上游 list[bytes] | None = File(None)): multipart 文本 part 一律
+#     保留 (含空 -> size 0) / 未选文件输入被过滤; urlencoded 空串保留为 1 个空元素,
+#     缺失则字段缺席; urlencoded 字符串送 file 字段 -> 422 value_error
+#     (决策-102, MP26..MP31; 上游 0.143.5 PR #9383 + 0.150.0 PR #16534)
 #   - Depends use_cache: 每请求 memo 表 (默认 cached 菱形 1 次 / _depends_nocache =
 #     use_cache=False 重派发 / 嵌套 nocache 结果入库供 cached 引用复用, 上游 P9-1/2/3)
 #     (决策-47, DC-1..DC-7; _dep_calls 观测超集)
@@ -1575,6 +1579,50 @@ else fail "MP24 unselected empty file" "code=$MP24_CODE n=$N24 body: ${MP24:0:24
 MP25=$(curl -sS -m 5 -X POST -F 'docfile=@'"$UP_DIR/doc.txt" -F 'docs=;filename=' -F 'docs=@'"$UP_DIR/s1.txt" -F 'note=n25' "$BASE/upload-file")
 if [[ "$MP25" == *'"file_docs_count": "1"'* && "$MP25" == *'"file_docs_filename": "s1.txt"'* && "$MP25" == *'"file_doc_filename": "doc.txt"'* ]]; then pass "MP25 empty file part filtered from list -> count=1 (s1)"
 else fail "MP25 empty file in list" "body: ${MP25:0:280}"; fi
+
+# --- 决策-102 (上游 0.143.5 / 0.150.0): bytes 列表字段 -----------------------
+# /upload-bytes-list 声明 "files:bytes[]=" (上游 `files: list[bytes] | None
+# = File(None)`). multipart 与 urlencoded 共用同一声明 (上游 File 继承 Form).
+printf 'hello' > "$UP_DIR/sel5.txt"
+printf '' > "$UP_DIR/empty0.txt"
+
+# MP26: multipart 文本 part 一律保留 (含空文本 -> size 0); 上游
+#   test_multipart_text_items_in_bytes_list_are_preserved: sizes [0,4,5].
+MP26=$(curl -sS -m 5 -X POST -F 'files=' -F 'files=text' -F 'files=@'"$UP_DIR/sel5.txt" "$BASE/upload-bytes-list")
+if [[ "$MP26" == *'"file_files_count": "3"'* && "$MP26" == *'\"size\":0'* && "$MP26" == *'\"size\":4'* && "$MP26" == *'\"size\":5'* ]]; then pass "MP26 bytes list: multipart text parts preserved (count=3, sizes 0/4/5)"
+else fail "MP26 bytes list text parts" "body: ${MP26:0:320}"; fi
+
+# MP27: 未选文件输入 (filename 属性 且 filename=="" 且 size==0) 被过滤;
+#   有名空文件 (filename=empty0.txt, size 0) 保留 -> count=1 (上游
+#   test_file_list_ignores_unselected_inputs).
+MP27=$(curl -sS -m 5 -X POST -F 'files=;filename=' -F 'files=@'"$UP_DIR/empty0.txt" "$BASE/upload-bytes-list")
+if [[ "$MP27" == *'"file_files_count": "1"'* && "$MP27" == *'\"filename\":\"empty0.txt\"'* && "$MP27" == *'\"size\":0'* ]]; then pass "MP27 bytes list: unselected file input filtered (count=1, named empty file kept)"
+else fail "MP27 bytes list unselected filter" "body: ${MP27:0:320}"; fi
+
+# MP28: urlencoded 空串 -> 保留为 1 个空元素 (count=1, size=0); 上游
+#   test_optional_bytes_list_send_empty_str -> files_count=1, sizes=[0].
+MP28=$(curl -sS -m 5 -X POST -H 'Content-Type: application/x-www-form-urlencoded' --data 'files=' "$BASE/upload-bytes-list")
+if [[ "$MP28" == *'"file_files_count": "1"'* && "$MP28" == *'\"size\":0'* ]]; then pass "MP28 bytes list: urlencoded empty value -> count=1 size=0 (upstream PR #9383)"
+else fail "MP28 urlencoded empty bytes list" "body: ${MP28:0:320}"; fi
+
+# MP29: urlencoded 不带该键 -> 字段缺失 (上游 None) -> 无 count 键; 上游
+#   test_optional_bytes_list_no_files -> files_count=0.
+MP29_CODE=$(curl -sS -m 5 -o "$TMP/mp29_body" -w '%{http_code}' -X POST -H 'Content-Type: application/x-www-form-urlencoded' "$BASE/upload-bytes-list")
+MP29=$(cat "$TMP/mp29_body")
+if [[ "$MP29_CODE" == "200" && "$MP29" != *'file_files_count'* ]]; then pass "MP29 bytes list: urlencoded absent value -> field missing (None), no count key"
+else fail "MP29 urlencoded absent bytes list" "code=$MP29_CODE body: ${MP29:0:240}"; fi
+
+# MP30: urlencoded 多值 -> 全部 occurrence (count=2, sizes 1/2).
+MP30=$(curl -sS -m 5 -X POST -H 'Content-Type: application/x-www-form-urlencoded' --data 'files=a&files=bc' "$BASE/upload-bytes-list")
+if [[ "$MP30" == *'"file_files_count": "2"'* && "$MP30" == *'\"size\":1'* && "$MP30" == *'\"size\":2'* ]]; then pass "MP30 bytes list: urlencoded multi values -> count=2 (sizes 1/2)"
+else fail "MP30 urlencoded multi bytes list" "body: ${MP30:0:320}"; fi
+
+# MP31: urlencoded 字符串送 file 基础字段 -> 422 value_error (上游 File 继承
+#   Form -> request.form() 收字符串 -> UploadFile 校验失败).
+MP31_CODE=$(curl -sS -m 5 -o "$TMP/mp31_body" -w '%{http_code}' -X POST -H 'Content-Type: application/x-www-form-urlencoded' --data 'docfile=abc' "$BASE/upload-file")
+MP31=$(cat "$TMP/mp31_body")
+if [[ "$MP31_CODE" == "422" && "$MP31" == *'"type":"value_error"'* && "$MP31" == *"Expected UploadFile, received: <class 'str'>"* ]]; then pass "MP31 urlencoded string into file field -> 422 value_error (upstream File-inherits-Form)"
+else fail "MP31 urlencoded file field value_error" "code=$MP31_CODE body: ${MP31:0:320}"; fi
 
 # MP22: 文本 part 供给声明 form 字段 (U8): note=hello.
 MP22=$(curl -sS -m 5 -X POST -F 'note=hello' -F 'docfile=@'"$UP_DIR/doc.txt" -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")

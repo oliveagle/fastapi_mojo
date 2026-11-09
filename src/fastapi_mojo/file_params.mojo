@@ -32,40 +32,10 @@ from string_builder import decode_utf8_bytes, StringBuilder
 from form_params import get_form_types, get_form_aliases
 
 # ---------- 快照数据结构 ----------
-
-struct MpParts:
-    """multipart part 快照 (并行 List — 可复制, ServerInfo 同模式;
-    各字段同长度, 下标 i 平行对应一个 part)."""
-    var names: List[String]
-    var filenames: List[String]
-    var cts: List[String]
-    var b64s: List[String]
-    var raw_lens: List[Int]
-    var idxs: List[Int]
-
-    def __init__(out self):
-        self.names = List[String]()
-        self.filenames = List[String]()
-        self.cts = List[String]()
-        self.b64s = List[String]()
-        self.raw_lens = List[Int]()
-        self.idxs = List[Int]()
-
-    def copy(self) -> MpParts:
-        var p = MpParts()
-        p.names = self.names.copy()
-        p.filenames = self.filenames.copy()
-        p.cts = self.cts.copy()
-        p.b64s = self.b64s.copy()
-        p.raw_lens = self.raw_lens.copy()
-        p.idxs = self.idxs.copy()
-        return p^
-
-    def count(self) -> Int:
-        return len(self.names)
-
-    def is_file(self, i: Int) -> Bool:
-        return self.filenames[i] != ""
+# 决策-102: MpParts 结构 + 上游 presence 语义判定拆到 mp_parts.mojo
+# (500 行阈值; 0.143.5 新增 has_filenames 字段). 此处转出保持既有
+# `from file_params import MpParts` 导入面不变.
+from mp_parts import MpParts, is_empty_file_input, scalar_missing, occurrences
 
 # ---------- b64 (协议层归 Mojo, ADR-0010) ----------
 
@@ -239,15 +209,20 @@ def _uploadfile_value_err(loc: String, text_val: String) -> String:
 
 
 def validate_file_collect(type_spec: Dict[String, String],
-                          aliases: Dict[String, String],
-                          parts: MpParts) raises -> Tuple[Bool, List[String]]:
-    """File 422 校验 (声明序, collect-all): 无 occurrence -> 必填
-    missing ("Field required" F 大写 + input null) / 可选 (=) 通过;
-    非 list last-wins (U4; base=file 且 last 是文本 part ->
-    value_error; bytes 任意); list 逐 occurrence (base=file 文本
-    occurrence -> value_error loc ["body",name,i]; bytes 全接受,
-    U9 上游 500 bug). parts 空 (非 multipart / 解析失败) = 上游
-    「字段全缺失」(U5)."""
+    aliases: Dict[String, String],
+    parts: MpParts) raises -> Tuple[Bool, List[String]]:
+    """File 422 校验 (声明序, collect-all). 上游 0.143.5 / 0.150.0 parity:
+
+    - 标量: presence 由**最后一个** occurrence 决定 (上游
+      _get_multidict_value 单值分支 values.get(alias) = 最后一个值);
+      文件 part 仅 "filename=='' 且 size==0" 视为缺失 (0.150.0);
+      文本 part 空内容亦视为缺失 (上游 "" -> Undefined);
+      base=file 且 part 是文本 -> value_error (U2).
+    - 列表: 全部 occurrence, 仅过滤 "filename=='' 且 size==0" 的未选文件
+      (0.150.0); **纯文本 part 一律保留** (0.143.5: bytes 列表保留文本项,
+      空文本 -> size 0); base=file 且 part 是文本 -> value_error (U2,
+      loc 带元素下标).
+    parts 空 (非 multipart / 解析失败) = 上游「字段全缺失」(U5)."""
     var errs = List[String]()
     if len(type_spec) == 0:
         return (True, errs^)
@@ -257,37 +232,44 @@ def validate_file_collect(type_spec: Dict[String, String],
         var loc = "[\"body\",\"" + json_escape(k) + "\"]"
         if base != "file" and base != "bytes":
             errs.append(_fe(loc, "unknown type for parameter '" + k + "': " + base,
-                            "unknown_type", "null"))
+            "unknown_type", "null"))
             continue
         var lookup = k
         if k in aliases:
             lookup = aliases[k]
-        var occ = List[Int]()
-        var pi = 0
-        while pi < parts.count():
-            if parts.names[pi] == lookup:
-                # 0.150.0 (upstream breaking, PR #16534): 浏览器未选择文件的空
-                # 输入 (filename=="" 且 size==0) 视为缺失 -> 不进入 occurrence.
-                if not (parts.filenames[pi] == "" and parts.raw_lens[pi] == 0):
-                    occ.append(pi)
-            pi += 1
+        var occ = occurrences(parts, lookup)
         if len(occ) == 0:
             if not fs[2]:
                 errs.append(_fe(loc, "Field required", "missing", "null"))
             continue
         if not fs[1]:
+            # 标量: 最后一个 occurrence 决定 presence (上游 last-wins)
             var last = occ[len(occ) - 1]
+            if scalar_missing(parts, last):
+                if not fs[2]:
+                    errs.append(_fe(loc, "Field required", "missing", "null"))
+                continue
             if base == "file" and not parts.is_file(last):
                 errs.append(_uploadfile_value_err(loc, _part_text(parts, last)))
             continue
+        # 列表: 过滤未选文件输入 (0.150.0); 文本 part 全保留 (0.143.5)
+        var kept = List[Int]()
+        for o in occ:
+            if not is_empty_file_input(parts, o):
+                kept.append(o)
+        if len(kept) == 0:
+            if not fs[2]:
+                errs.append(_fe(loc, "Field required", "missing", "null"))
+            continue
         var j = 0
-        while j < len(occ):
-            var pi2 = occ[j]
+        while j < len(kept):
+            var pi2 = kept[j]
             if base == "file" and not parts.is_file(pi2):
                 var eloc = "[\"body\",\"" + json_escape(k) + "\"," + String(j) + "]"
                 errs.append(_uploadfile_value_err(eloc, _part_text(parts, pi2)))
             j += 1
     return (len(errs) == 0, errs^)
+
 
 
 def _decl_of(wire: String, types: Dict[String, String],
@@ -361,21 +343,57 @@ def text_multi_map(parts: MpParts) raises -> Dict[String, List[String]]:
 # ---------- Success-path injection ----------
 
 def apply_file_extras(mut params: Dict[String, String], handler: Handler,
-                      parts: MpParts) raises:
-    """Success path (decision-32 superset + decision-46): file part ->
-    file_<declared>_filename/_content_type/_size(actual bytes, U1)/
-    _body_b64 (U4); text part -> form_<declared> (last-wins); text part
-    hitting a declared bytes field -> file_ keys (bytes accepts both, U9);
-    list declaration -> file_<declared>_count + _list_json
-    ([{"filename","content_type","size","body_b64"},...] in order);
-    alias fields are keyed by the **declared name** (wire alias has no
-    binding force, same convention as form decision-45); undeclared names
-    use the wire name as-is (decision-32 compat); _file_ops runs in
-    file_ops_ffi."""
+    parts: MpParts) raises:
+    """Success path (decision-32 superset + decision-46 + 0.143.5/0.150.0):
+    - 声明字段 (file/bytes, 可选, list): file_<decl>_filename/_content_type/
+      _size(实际字节, U1)/_body_b64; list -> file_<decl>_count + _list_json
+      ([{"filename","content_type","size","body_b64"},...] 按 occurrence 序);
+      presence 规则同 validate_file_collect (标量 = 最后一个 occurrence;
+      列表 = 全部, 仅过滤未选文件输入; 文本 part 一律保留 — 0.143.5).
+    - 未声明 part: 决策-32 兼容 (wire 名原样 -> file_<wire>_*).
+    - alias 字段按**声明名** key (wire alias 无绑定力, 同 form 决策-45)."""
     var types = get_file_types(handler)
     var aliases = get_file_aliases(handler)
     var ftypes = get_form_types(handler)
     var fali = get_form_aliases(handler)
+    # --- pass 1: 声明字段 (presence 规则同 validate_file_collect) ---
+    for k in types:
+        var fs = _parse_file_spec(types[k])
+        var lookup = k
+        if k in aliases:
+            lookup = aliases[k]
+        var occ = occurrences(parts, lookup)
+        if len(occ) == 0:
+            continue
+        var kept = List[Int]()
+        if fs[1]:
+            for o in occ:
+                if not is_empty_file_input(parts, o):
+                    kept.append(o)
+        else:
+            var last = occ[len(occ) - 1]
+            if not scalar_missing(parts, last):
+                kept.append(last)
+        if len(kept) == 0:
+            continue
+        var lastk = kept[len(kept) - 1]
+        params["file_" + k + "_filename"] = parts.filenames[lastk]
+        params["file_" + k + "_content_type"] = parts.cts[lastk]
+        params["file_" + k + "_size"] = String(parts.raw_lens[lastk])
+        params["file_" + k + "_body_b64"] = parts.b64s[lastk]
+        if fs[1]:
+            params["file_" + k + "_count"] = String(len(kept))
+            var arr = List[String]()
+            for oi in kept:
+                var obj = "{\"filename\":\"" + json_escape(parts.filenames[oi]) + "\","
+                obj = obj + "\"content_type\":\"" + json_escape(parts.cts[oi]) + "\","
+                obj = obj + "\"size\":" + String(parts.raw_lens[oi]) + ","
+                obj = obj + "\"body_b64\":\"" + json_escape(parts.b64s[oi]) + "\"}"
+                arr.append(obj)
+            params["file_" + k + "_list_json"] = "[" + ",".join(arr) + "]"
+    # --- pass 2: 未声明 part (决策-32 兼容: wire 名原样) ---
+    # 文件 part -> file_<wire>_filename/_content_type/_size/_body_b64;
+    # 文本 part 命中声明 form 字段 -> form_ (由 form 路径注入, 同语义).
     var i = 0
     while i < parts.count():
         var nm = parts.names[i]
@@ -383,60 +401,27 @@ def apply_file_extras(mut params: Dict[String, String], handler: Handler,
             i += 1
             continue
         # 0.150.0 (upstream breaking, PR #16534): 未选择浏览器文件输入
-        # (filename=="" 且 size==0) 视为缺失 -> 不注入任何 file_/form_ 键.
-        if parts.filenames[i] == "" and parts.raw_lens[i] == 0:
+        # (有 filename 属性 且 filename=="" 且 size==0) 视为缺失 ->
+        # 不注入任何 file_/form_ 键.
+        if is_empty_file_input(parts, i):
             i += 1
             continue
-        if nm != "":
-            var decl = nm
-            var as_file = parts.is_file(i)
-            if as_file:
-                var fd = _decl_of(nm, types, aliases)
-                if fd != "":
-                    decl = fd
-            else:
-                var fdecl = _decl_of(nm, types, aliases)
-                if fdecl != "":
-                    # Text part hitting a declared file field: base=bytes
-                    # is legal (U9) -> file_ keys; base=file is 422 at the
-                    # validation layer and never reaches here.
-                    decl = fdecl
-                    as_file = _is_bytes_decl(types, fdecl)
-                else:
-                    var ddecl = _decl_of(nm, ftypes, fali)
-                    if ddecl != "":
-                        decl = ddecl
-            if as_file:
-                params["file_" + decl + "_filename"] = parts.filenames[i]
-                params["file_" + decl + "_content_type"] = parts.cts[i]
-                params["file_" + decl + "_size"] = String(parts.raw_lens[i])
-                params["file_" + decl + "_body_b64"] = parts.b64s[i]
-            else:
-                params["form_" + decl] = _part_text(parts, i)
-        i += 1
-    for k in types:
-        var fs = _parse_file_spec(types[k])
-        if not fs[1]:
+        if _decl_of(nm, types, aliases) != "":
+            i += 1
             continue
-        var lookup = k
-        if k in aliases:
-            lookup = aliases[k]
-        var occ = List[Int]()
-        var pi = 0
-        while pi < parts.count():
-            if parts.names[pi] == lookup:
-                # 0.150.0 (upstream breaking, PR #16534): 未选择浏览器文件
-                # 输入 (filename=="" 且 size==0) 视为缺失 -> 不进 list
-                # (与 validate_file_collect 的 occ 收集一致).
-                if not (parts.filenames[pi] == "" and parts.raw_lens[pi] == 0):
-                    occ.append(pi)
-            pi += 1
-        params["file_" + k + "_count"] = String(len(occ))
-        var arr = List[String]()
-        for oi in occ:
-            var obj = "{\"filename\":\"" + json_escape(parts.filenames[oi]) + "\","
-            obj = obj + "\"content_type\":\"" + json_escape(parts.cts[oi]) + "\","
-            obj = obj + "\"size\":" + String(parts.raw_lens[oi]) + ","
-            obj = obj + "\"body_b64\":\"" + json_escape(parts.b64s[oi]) + "\"}"
-            arr.append(obj)
-        params["file_" + k + "_list_json"] = "[" + ",".join(arr) + "]"
+        if not parts.is_file(i):
+            # 文本 part -> form_<name> (U8): 命中声明 form 字段用声明名;
+            # 否则用 wire 名 (决策-32 存量语义 — /upload 路由依赖).
+            var fdecl = _decl_of(nm, ftypes, fali)
+            if fdecl != "":
+                params["form_" + fdecl] = _part_text(parts, i)
+            else:
+                params["form_" + nm] = _part_text(parts, i)
+            i += 1
+            continue
+        if parts.is_file(i):
+            params["file_" + nm + "_filename"] = parts.filenames[i]
+            params["file_" + nm + "_content_type"] = parts.cts[i]
+            params["file_" + nm + "_size"] = String(parts.raw_lens[i])
+            params["file_" + nm + "_body_b64"] = parts.b64s[i]
+        i += 1

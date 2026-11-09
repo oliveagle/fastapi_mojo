@@ -41,13 +41,20 @@ def _has(s: String, sub: String) -> Bool:
 
 
 def _add(mut parts: MpParts, name: String, filename: String, ct: String,
-         b64: String, raw_len: Int) raises:
+         b64: String, raw_len: Int, has_filename: Int = -1) raises:
+    """构造一个 part. has_filename: 1 = 带 filename 属性 (文件 part);
+    0 = 无 filename 属性 (纯文本 part, 上游 FormData 的 str 项);
+    -1 = 旧默认 (按 filename 非空推断 — 兼容既有调用)."""
     parts.names.append(name)
     parts.filenames.append(filename)
     parts.cts.append(ct)
     parts.b64s.append(b64)
     parts.raw_lens.append(raw_len)
     parts.idxs.append(parts.count())
+    if has_filename < 0:
+        parts.has_filenames.append(1 if filename != "" else 0)
+    else:
+        parts.has_filenames.append(has_filename)
 
 
 def main() raises:
@@ -266,5 +273,59 @@ def main() raises:
     check(params3["file_raw_size"] == "4" and params3["file_raw_body_b64"] == "ZGVjcA==",
           "bytes field accepts text part -> file_ keys")
     check(not ("form_raw" in params3), "bytes text not form_")
+
+    # ---- 决策-102 (上游 0.143.5 / 0.150.0 parity) ----
+    # bytes 列表: 纯文本 part 一律保留 (含空文本 -> size 0); 未选文件输入
+    # (有 filename 属性 且 filename=="" 且 size==0) 被过滤 (0.150.0).
+    var ts8 = Dict[String, String]()
+    ts8["files"] = "bytes[]"
+    var p17 = MpParts()
+    _add(p17, "files", "", "", "", 0, 0)           # 纯文本空项 -> 保留
+    _add(p17, "files", "", "", "dGV4dA==", 4, 0)   # 纯文本项 -> 保留
+    _add(p17, "files", "", "", "", 0, 1)           # 未选文件输入 -> 过滤
+    _add(p17, "files", "sel.txt", "", "aGVsbG8=", 5, 1)
+    r = validate_file_collect(ts8, Dict[String, String](), p17.copy())
+    check(r[0], "0.143.5 bytes list: text parts accepted")
+    var h17 = Handler(KIND_ECHO(), "b17")
+    h17.set_data("_file_types", "files:bytes[]")
+    var params17 = Dict[String, String]()
+    apply_file_extras(params17, h17, p17.copy())
+    check(params17["file_files_count"] == "3",
+          "0.143.5 bytes list count=3 (空文本+文本+文件, 未选文件被过滤) got "
+          + params17["file_files_count"])
+    var lj17 = params17["file_files_list_json"]
+    check(_has(lj17, "\"size\":0") and _has(lj17, "\"size\":4")
+          and _has(lj17, "\"size\":5"), "0.143.5 list sizes 0/4/5 got " + lj17)
+    check(_has(lj17, "sel.txt"), "0.143.5 list keeps named file")
+
+    # 标量 bytes: 最后一个 occurrence 是空文本 -> 缺失 (上游 "" -> Undefined).
+    var ts9 = Dict[String, String]()
+    ts9["raw"] = "bytes="
+    var p18 = MpParts()
+    _add(p18, "raw", "", "", "aGVsbG8=", 5, 0)
+    _add(p18, "raw", "", "", "", 0, 0)
+    r = validate_file_collect(ts9, Dict[String, String](), p18.copy())
+    check(r[0], "0.143.5 scalar bytes: trailing empty text -> missing (optional ok)")
+    var h18 = Handler(KIND_ECHO(), "b18")
+    h18.set_data("_file_types", "raw:bytes=")
+    var params18 = Dict[String, String]()
+    apply_file_extras(params18, h18, p18.copy())
+    check(not ("file_raw_size" in params18),
+          "0.143.5 scalar bytes trailing empty text -> no injection")
+
+    # file 基础: 空文本 part -> 缺失 (上游 "" -> Undefined, 非 value_error).
+    var p19 = MpParts()
+    _add(p19, "doc", "", "", "", 0, 0)
+    r = validate_file_collect(ts, Dict[String, String](), p19.copy())
+    check(not r[0] and _has(r[1][0], "Field required"),
+          "0.143.5 file base: empty text part -> missing")
+
+    # file 基础: 未选文件输入 (filename 属性 且 filename=="" 且 size==0)
+    # -> 缺失 (0.150.0).
+    var p20 = MpParts()
+    _add(p20, "doc", "", "", "", 0, 1)
+    r = validate_file_collect(ts, Dict[String, String](), p20.copy())
+    check(not r[0] and _has(r[1][0], "Field required"),
+          "0.150.0 file base: unselected file input -> missing")
 
     print("file_params self-test: all checks passed")

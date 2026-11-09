@@ -509,6 +509,19 @@ pub fn get_part_count() -> c_int {
     lock_mp().last_count
 }
 
+// 上游 0.143.5 / 0.150.0 语义: part 是否带 filename 属性.
+//   Some(_) -> Content-Disposition 带 filename 参数 (浏览器未选文件时 = Some(""))
+//   None    -> 纯文本 part (上游 FormData 的 str 项)
+// 0.150.0 的 `_is_empty_file_input` 只过滤 "有 filename 属性 且 filename==''"
+// 且 size==0" 的未选文件, 因此 None 与 Some("") 必须可区分 (0.143.5 bytes list).
+pub fn get_part_has_filename(i: usize) -> c_int {
+    let g = lock_mp();
+    match g.parts.get(i) {
+        Some(p) if p.filename.is_some() => 1,
+        _ => 0,
+    }
+}
+
 // ===== 逐字节访问器 (纯整数返回, 避免 CStringSlice ABI 歧义) =====
 // field: 0=name 1=filename 2=content_type 3=body 4=body_b64
 // 返回: field_len(i, field) -> 长度; field_byte(i, field, idx) -> 字节 or -1

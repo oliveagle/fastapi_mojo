@@ -86,6 +86,7 @@ use super::multipart::{
     get_part_count as mp_get_part_count_inner,
     get_part_field_len as mp_get_part_field_len_inner,
     get_part_field_byte as mp_get_part_field_byte_inner,
+    get_part_has_filename as mp_get_part_has_filename_inner,
     part_save as mp_part_save_inner,
 };
 use super::io::ws_pump_now as io_ws_pump_now;
@@ -781,6 +782,13 @@ pub extern "C" fn mp_part_field_len(i: c_int, field: c_int) -> c_long {
 #[no_mangle]
 pub extern "C" fn mp_part_field_byte(i: c_int, field: c_int, idx: c_long) -> c_long {
     mp_get_part_field_byte_inner(i as usize, field, idx) as c_long
+}
+
+// 0.143.5: part 是否带 filename 属性 (1=有 / 0=无). 纯文本 part (None) 与
+// 浏览器未选文件 (Some("")) 必须可区分 — 0.150.0 只过滤后者.
+#[no_mangle]
+pub extern "C" fn mp_part_has_filename(i: c_int) -> c_long {
+    mp_get_part_has_filename_inner(i as usize) as c_long
 }
 
 // 决策-54 (ADR-0029): regex search (pattern, s) — 1 = 命中 / 0 = 未中 /

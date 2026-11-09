@@ -12,11 +12,11 @@
 |------|------|----|----|----|----|
 | A. Form/参数模型语义 | 14 | 3 | 3 | 6 | 2 |
 | B. AliasChoices/参数元数据 | 11 | 0 | 3 | 8 | 0 |
-| C. 序列化/body/文件 | 4 | 0 | 1 | 2 | 1 |
+| C. 序列化/body/文件 | 4 | 1 | 1 | 1 | 1 |
 | D. WebSocket 安全依赖 | 1 | 0 | 0 | 1 | 0 |
 | E. OpenTelemetry | 5 | 0 | 1 | 0 | 4 |
 | F. 框架杂项 | 6 | 1 | 0 | 1 | 4 |
-| **合计** | **41** | **4** | **8** | **18** | **11** |
+| **合计** | **41** | **5** | **8** | **17** | **11** |
 
 > 注：0.142.0 有 2 条 Refactors（docs 前端），0.143.4 为可选依赖升级（httpx2），
 > 0.147.0 被 0.162.0 反转，不计入差距。功能改动合计 45 条；下表按行计 41 项
@@ -63,7 +63,7 @@
 |------|------|--------------------|------|
 | 0.143.3 | JSONL/SSE 流非有限 float 序列化修复 | ➖ | SSE data 为声明式 raw（不 JSON 编码）；响应面 inf/nan 已 500（决策-90） |
 | 0.151.0 | 区分 JSON null 与省略的 body 值（breaking） | 🔶 | 决策-63 json input canon 已处理 body 422 input；null vs omitted 语义需核对 |
-| 0.143.5 | byte 文件列表参数空值处理修复 | ❌ | **待实现**：List[bytes] 空 part 处理 |
+| 0.143.5 | byte 文件列表参数空值处理修复 | ✅ | 决策-102：multipart 快照新增 `has_filenames` 维度（区分"无 filename 属性的文本 part"与"filename=\"\" 的未选文件"）→ bytes 列表保留全部文本 part（含空文本 → size 0），未选文件输入仍被 0.150.0 过滤；标量 presence 由**最后一个** occurrence 决定（上游 `values.get(alias)`）；urlencoded CT 下 File/bytes 字段收 form 值（上游 `File` 继承 `Form` → `is_body_form`）→ `files=` 保留为 1 个空元素（count=1, size=0，PR #9383），缺失则字段缺席，字符串送 file 基础字段 → 422 value_error。e2e MP-26~31 |
 | 0.156.8 | 上传文件转 bytes 保留文件位置 | ❌ | Rust bridge file_protocol；文件位置保留需评估 |
 
 ## D. WebSocket 安全依赖
@@ -97,7 +97,7 @@
 
 1. ~~**0.149.0** form 空标量视为缺失~~ ✅ 已完成（e2e FM-21~25）
 2. ~~**0.150.0** 未选择文件输入视为缺失~~ ✅ 已完成（e2e MP-24/25，含 list count/list_json 过滤）
-3. **0.143.5** byte 文件列表空值（file_params.mojo）
+3. ~~**0.143.5** byte 文件列表空值（file_params.mojo）~~ ✅ 已完成（决策-102，e2e MP-26~31）
 4. **0.152.0** header model 校验错误报告 header 名（header_params）
 5. **0.156.3~7** AliasChoices 多候选别名（params/form/body 全类型）
 6. **0.151.0** JSON null vs omitted body（json_canon）
@@ -107,4 +107,4 @@
 10. 模型组合/可选/union 系列（0.157~0.161，需新增声明语法）
 
 ---
-*更新：2026-11-10（0.149.0/0.150.0 闭环；合计 41 行 ✅=4 / 🔶=8 / ❌=18 / ➖=11，计数与各节表格对齐）。数据源：fastapi/fastapi GitHub releases（0.141.1→0.162.2，44 releases）。*
+*更新：2026-11-10（0.149.0/0.150.0/0.143.5 闭环；合计 41 行 ✅=5 / 🔶=8 / ❌=17 / ➖=11，计数与各节表格对齐）。数据源：fastapi/fastapi GitHub releases（0.141.1→0.162.2，44 releases）。*

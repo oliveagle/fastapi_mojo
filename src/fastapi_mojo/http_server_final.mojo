@@ -22,6 +22,9 @@ from file_params import (validate_file_collect,
                          MpParts)
 from dep_cache import DepCache, inject_dep_calls
 from file_ops_ffi import snapshot_mp_parts, apply_file_ops
+# 决策-102 (上游 0.143.5): urlencoded CT 下的 File/bytes 声明字段
+from file_form_values import (validate_file_collect_form,
+                              apply_file_form_values, form_map_without_files)
 from openapi import generate_openapi, swagger_ui_html, redoc_html, swagger_ui_oauth2_redirect_html
 from openapi_custom import check_openapi_specs  # 决策-52 (ADR-0027)
 from header_params import parse_header_entry, check_header_specs  # 决策-53 (ADR-0028)
@@ -1003,6 +1006,18 @@ def register_routes(mut router: Router) raises:
     ub_h.set_data("message", "uploadbytes demo")
     router.add_route("/upload-bytes", "POST", ub_h)
 
+    # 决策-102 (上游 0.143.5): bytes 列表字段 (上游 `files: list[bytes] |
+    # None = File(None)`) — 可选 list, 故声明 "files:bytes[]=".
+    # - urlencoded: files= -> count=1 (空串元素保留, size 0 — PR #9383);
+    #   不带该键 -> count=0 (缺失); 多值 -> 全部 occurrence.
+    # - multipart: 文本 part (无 filename 属性) 保留 (含空文本 -> size 0);
+    #   浏览器未选文件 (filename="") 被过滤 (0.150.0).
+    var ul_h = Handler(KIND_ECHO(), "upload_bytes_list")
+    ul_h.set_data("_multipart", "true")
+    ul_h.set_data("_file_types", "files:bytes[]=")
+    ul_h.set_data("message", "uploadbytes list demo")
+    router.add_route("/upload-bytes-list", "POST", ul_h)
+
 
     # F11 (v0.5.1): BackgroundTasks demo. _background = 响应后同步执行的命令列表 (\n 分隔).
     # demo: GET /bg-write -> 响应后把 req_id 写到 /tmp/bg_<req_id>.txt (shell date 同步)
@@ -1820,18 +1835,27 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         var is_mp_ct = _ct_is_multipart(ct_hdr)
                         var mp_parts = MpParts()
                         var fmulti = Dict[String, List[String]]()
+                        # 决策-102: urlencoded 下 File 字段收同一份 form 值 (上游 File 继承 Form
+                        # -> is_body_form) — raw_multi 供 file 字段用, fmulti 供 form 字段用
+                        # (去掉被 file 字段占用的键: 同一参数不能既是 File 又是 Form).
+                        var raw_multi = Dict[String, List[String]]()
                         if is_mp_ct:
                             mp_parts = snapshot_mp_parts()
                             fmulti = text_multi_map_filtered(mp_parts,
                                                              file_declared_names(route_result.handler))
                         elif _ct_is_form(ct_hdr):
-                            fmulti = parse_form_multi(body_str)
+                            raw_multi = parse_form_multi(body_str)
+                            fmulti = form_map_without_files(raw_multi,
+                                                             file_declared_names(route_result.handler))
                         var ftypes = get_form_types(route_result.handler)
                         var fal = get_form_aliases(route_result.handler)
                         var ferr = validate_form_collect(ftypes, fal, fmulti)
                         var ft_file = get_file_types(route_result.handler)
                         var fal_file = get_file_aliases(route_result.handler)
+                        # 非 multipart 且非 form CT -> mp_parts 空 = 上游「字段全缺失」(U5).
                         var ffe = validate_file_collect(ft_file, fal_file, mp_parts)
+                        if _ct_is_form(ct_hdr):
+                            ffe = validate_file_collect_form(ft_file, fal_file, raw_multi)
                         var ffve: List[String]
                         var flagged: List[String]
                         if is_mp_ct:
@@ -1933,6 +1957,10 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                         apply_file_ops(req_params, mp_parts,
                                                        route_result.handler.data["_file_ops"],
                                                        fal_file)
+                                elif _ct_is_form(ct_hdr):
+                                    # 决策-102 (上游 0.143.5): urlencoded 的 File/bytes 声明
+                                    # 字段注入 (bytes 列表收 form 值; 空串元素保留).
+                                    apply_file_form_values(req_params, route_result.handler, raw_multi)
                                 # F-DI (Depends, 决策-33) + 决策-47 (use_cache):
                                 # 解析 _depends (默认 cached) / _depends_nocache (upstream
                                 # use_cache=False), 递归派发后注入 req_params (前缀

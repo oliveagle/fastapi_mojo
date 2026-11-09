@@ -237,3 +237,26 @@
         assert!(parts[3].filename.is_none());
         assert_eq!(parts[3].body, b"n25");
     }
+
+    #[test]
+    fn part_has_filename_distinguishes_text_and_empty_filename() {
+        // 决策-102 (上游 0.143.5 / 0.150.0): part 是否带 filename 属性 —
+        // 纯文本 part (无 filename 属性, 上游 FormData 的 str 项) 与浏览器
+        // 未选文件 (filename="" 属性存在) 必须可区分: 0.150.0 只过滤后者.
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"--x\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nplain\r\n");
+        body.extend_from_slice(
+            b"--x\r\nContent-Disposition: form-data; name=\"empty\"; filename=\"\"\r\n\r\n\r\n",
+        );
+        body.extend_from_slice(
+            b"--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\ndata\r\n",
+        );
+        body.extend_from_slice(b"--x--\r\n");
+        let ct = b"multipart/form-data; boundary=x";
+        let n = parse_multipart(&body, ct);
+        assert_eq!(n, 3);
+        assert_eq!(get_part_has_filename(0), 0, "纯文本 part 无 filename 属性");
+        assert_eq!(get_part_has_filename(1), 1, "filename=\"\" 仍有属性");
+        assert_eq!(get_part_has_filename(2), 1, "普通文件 part 有属性");
+        assert_eq!(get_part_has_filename(99), 0, "越界索引 -> 0");
+    }
