@@ -12,6 +12,7 @@ from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field,
 from param_constraints import (ConstraintSpec, constraint_schema_fragments,
                                parse_constraint_entry)
 from numlit import parse_base, parse_typed_value
+from alias_choices import candidates_for, first_candidate
 from scalar_types import is_scalar_type, scalar_openapi_schema
 from string_builder import StringBuilder
 from json import json_escape
@@ -89,13 +90,17 @@ def _body_numeric_fragments(cons: String) raises -> List[String]:
     return out^
 
 
-def _openapi_field_schema(fs: FieldSpec) raises -> String:
-    """单字段 schema (决策-38): type/format/enum/min-maxItems/min-maxLength/default."""
+def _openapi_field_schema(fs: FieldSpec,
+                          aliases: Dict[String, String]) raises -> String:
+    """单字段 schema (决策-38): type/format/enum/min-maxItems/min-maxLength/default.
+
+    决策-104: 嵌套 obj 的属性名同样按别名候选首个 (上游 schema property name
+    = validation_alias.choices[0])."""
     var sb = StringBuilder()
     # Decision-61: an array of models uses the recursive object schema as its
     # OpenAPI `items` value; array size/default constraints remain outer-level.
     if fs.is_array and fs.elem == "obj" and fs.nested_spec != "":
-        sb.append("{\"type\":\"array\",\"items\":" + _openapi_object_schema(fs.nested_spec))
+        sb.append("{\"type\":\"array\",\"items\":" + _openapi_object_schema(fs.nested_spec, aliases))
         for c in _split_top(fs.constraints, 44):
             var ct = _trim(c)
             if ct.startswith("items="):
@@ -160,7 +165,7 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
         sb.append("}")
         return sb.take()
     if fs.type_name == "obj" and fs.nested_spec != "":
-        return _openapi_object_schema(fs.nested_spec)
+        return _openapi_object_schema(fs.nested_spec, aliases)
     if fs.is_enum:
         sb.append("{\"type\":\"" + _type_to_openapi(fs.type_name) + "\",\"enum\":" + _json_str_array(fs.enum_values))
         if fs.has_default():
@@ -197,8 +202,12 @@ def _openapi_field_schema(fs: FieldSpec) raises -> String:
     return sb.take()
 
 
-def _openapi_object_schema(spec: String) raises -> String:
-    """_body_schema / 嵌套 obj{...} spec -> {"type":"object","properties":{...},"required":[...]}. """
+def _openapi_object_schema(spec: String,
+                           aliases: Dict[String, String]) raises -> String:
+    """_body_schema / 嵌套 obj{...} spec -> {"type":"object","properties":{...},"required":[...]}.
+
+    决策-104: 属性名 = 声明名的别名候选**首个** (上游 schema property name =
+    validation_alias.choices[0]; 单别名时 = 该别名)."""
     var s = parse_body_schema(spec)
     var sb = StringBuilder()
     sb.append("{\"type\":\"object\",\"properties\":{")
@@ -209,9 +218,11 @@ def _openapi_object_schema(spec: String) raises -> String:
         if not first:
             sb.append(",")
         first = False
-        sb.append("\"" + json_escape(fs.name) + "\":" + _openapi_field_schema(fs))
+        # 决策-104: 属性名 = 别名候选首个 (上游 choices[0])
+        var prop_name = first_candidate(candidates_for(aliases, fs.name))
+        sb.append("\"" + json_escape(prop_name) + "\":" + _openapi_field_schema(fs, aliases))
         if not fs.has_default():
-            req.append("\"" + json_escape(fs.name) + "\"")
+            req.append("\"" + json_escape(prop_name) + "\"")
     sb.append("}")
     if len(req) > 0:
         sb.append(",\"required\":[" + ",".join(req) + "]")

@@ -30,6 +30,7 @@ from params_query_extra import parse_table, split_csv
 from json import json_escape
 from string_builder import decode_utf8_bytes, StringBuilder
 from form_params import get_form_types, get_form_aliases
+from alias_choices import (candidates_for, alias_candidates, first_candidate)
 
 # ---------- 快照数据结构 ----------
 # 决策-102: MpParts 结构 + 上游 presence 语义判定拆到 mp_parts.mojo
@@ -208,6 +209,33 @@ def _uploadfile_value_err(loc: String, text_val: String) -> String:
                "value_error", "\"" + json_escape(text_val) + "\"")
 
 
+def _pick_file_candidate(cands: List[String], parts: MpParts,
+                         is_list: Bool) -> String:
+    """File 面候选命中 (决策-104; 上游 0.156.4 / 0.156.7 AliasChoices):
+    首个**有值**的候选 —
+      - 标量: 末 occurrence 非缺失 (上游 _get_multidict_value 标量分支:
+        空文件输入 / 空文本 -> Undefined -> 继续试下一个 alias);
+      - 列表: 过滤未选文件输入后仍有剩余即命中 (上游 getlist 分支).
+    全不命中 -> '' (缺失)."""
+    for c in cands:
+        var occ = occurrences(parts, c)
+        if len(occ) == 0:
+            continue
+        if is_list:
+            var kept = 0
+            for o in occ:
+                if not is_empty_file_input(parts, o):
+                    kept += 1
+            if kept == 0:
+                continue
+        else:
+            var last = occ[len(occ) - 1]
+            if scalar_missing(parts, last):
+                continue
+        return c
+    return ""
+
+
 def validate_file_collect(type_spec: Dict[String, String],
     aliases: Dict[String, String],
     parts: MpParts) raises -> Tuple[Bool, List[String]]:
@@ -234,10 +262,16 @@ def validate_file_collect(type_spec: Dict[String, String],
             errs.append(_fe(loc, "unknown type for parameter '" + k + "': " + base,
             "unknown_type", "null"))
             continue
-        var lookup = k
-        if k in aliases:
-            lookup = aliases[k]
-        var occ = occurrences(parts, lookup)
+        # 决策-104: 候选序命中 (首个有值者生效); loc 用命中候选.
+        var cands = candidates_for(aliases, k)
+        var lookup = _pick_file_candidate(cands, parts, fs[1])
+        var loc_name = first_candidate(cands)
+        if lookup != "":
+            loc_name = lookup
+        loc = "[\"body\",\"" + json_escape(loc_name) + "\"]"
+        var occ = List[Int]()
+        if lookup != "":
+            occ = occurrences(parts, lookup)
         if len(occ) == 0:
             if not fs[2]:
                 errs.append(_fe(loc, "Field required", "missing", "null"))
@@ -265,7 +299,7 @@ def validate_file_collect(type_spec: Dict[String, String],
         while j < len(kept):
             var pi2 = kept[j]
             if base == "file" and not parts.is_file(pi2):
-                var eloc = "[\"body\",\"" + json_escape(k) + "\"," + String(j) + "]"
+                var eloc = "[\"body\",\"" + json_escape(loc_name) + "\"," + String(j) + "]"
                 errs.append(_uploadfile_value_err(eloc, _part_text(parts, pi2)))
             j += 1
     return (len(errs) == 0, errs^)
@@ -280,8 +314,9 @@ def _decl_of(wire: String, types: Dict[String, String],
     if wire in types:
         return wire
     for k in aliases:
-        if aliases[k] == wire:
-            return k
+        for c in alias_candidates(aliases[k]):
+            if c == wire:
+                return k
     return ""
 
 
@@ -301,7 +336,10 @@ def file_declared_names(handler: Handler) raises -> List[String]:
     for k in types:
         out.append(k)
         if k in aliases:
-            out.append(aliases[k])
+            # 决策-104: 多候选 alias -> 全部候选名都要占位 (文本 part 命中任一
+            # 候选名都不进 form map — 同一参数不能既是 File 又是 Form).
+            for c in alias_candidates(aliases[k]):
+                out.append(c)
     return out^
 
 
@@ -359,10 +397,12 @@ def apply_file_extras(mut params: Dict[String, String], handler: Handler,
     # --- pass 1: 声明字段 (presence 规则同 validate_file_collect) ---
     for k in types:
         var fs = _parse_file_spec(types[k])
-        var lookup = k
-        if k in aliases:
-            lookup = aliases[k]
-        var occ = occurrences(parts, lookup)
+        # 决策-104: 候选序命中 (首个有值者生效; 与 validate_file_collect 同规则)
+        var cands = candidates_for(aliases, k)
+        var lookup = _pick_file_candidate(cands, parts, fs[1])
+        var occ = List[Int]()
+        if lookup != "":
+            occ = occurrences(parts, lookup)
         if len(occ) == 0:
             continue
         var kept = List[Int]()

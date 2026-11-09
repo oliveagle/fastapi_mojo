@@ -12,7 +12,8 @@ from handler import Handler, ServerInfo, run_handler, KIND_ECHO, KIND_STATIC, KI
 from params_query import parse_path_params, parse_query_params, url_decode, url_decode_path, ParsedParams
 from params_json import parse_body_json
 from params_typed import validate_params_collect, get_param_types, canonicalize_typed_values
-from params_query_extra import apply_query_extras, get_param_aliases
+from params_query_extra import (apply_query_extras, get_param_aliases,
+                                apply_path_aliases)
 from body_validate import validate_body_schema, check_body_schemas
 from exceptions import build_exception_body, match_error_map, HTTPExceptionSpec, standard_status_line
 from request_response import _parse_cookies, parse_form_multi, _split_csv, nest_dict, nest_list, nest_raw, parse_response_headers, response_model_body, check_response_model_missing
@@ -27,7 +28,8 @@ from file_form_values import (validate_file_collect_form,
                               apply_file_form_values, form_map_without_files)
 from openapi import generate_openapi, swagger_ui_html, redoc_html, swagger_ui_oauth2_redirect_html
 from openapi_custom import check_openapi_specs  # 决策-52 (ADR-0027)
-from header_params import parse_header_entry, check_header_specs  # 决策-53 (ADR-0028)
+from header_params import (parse_header_entry, check_header_specs,
+                           header_entry_parts)  # 决策-53 (ADR-0028) / 决策-104
 from std.os import getenv  # 决策-52: app 级 OPENAPI env (请求期读, 空 = 默认)
 from streaming import build_sse_body, build_sse_body_fields, sse_event_count
 from handler import KIND_SSE, KIND_FILE, KIND_REDIRECT
@@ -233,7 +235,10 @@ def inject_request_headers(mut params: Dict[String, String], header_names_csv: S
     key 前缀 header_<name>; 缺失 -> 空串. 保持 String-only (与现有 handler 兼容).
     决策-53 (ADR-0028): 条目 = "name" (wire = 下划线→连字符转换, P25-1/4) /
     "name=alias" (wire = alias 原样, P25-3; "name=name" = 字面). 读取仍走
-    bridge get_header_value_ci (ASCII 大小写不敏感 + 多值取首, FFI diff = 0)."""
+    bridge get_header_value_ci (ASCII 大小写不敏感 + 多值取首, FFI diff = 0).
+    决策-104 (上游 0.156.3): 条目 "name=a|b" = 多候选 (AliasChoices) — 按声明
+    序逐个探测, **首个在场**的候选生效 (上游 "next((pair for pair in aliases
+    if pair[1] in received_params), aliases[0])")."""
     var n = header_names_csv.byte_length()
     var start = 0
     var i = 0
@@ -251,26 +256,39 @@ def inject_request_headers(mut params: Dict[String, String], header_names_csv: S
                     e -= 1
                 if e > b:
                     var clean = String(name[byte=b:e])
-                    var pn = parse_header_entry(clean)
+                    var parts = header_entry_parts(clean)
+                    var decl = parts[0]
+                    var cands = parts[1].copy()
                     var v = String("")
-                    var rc = external_call["extract_request_header", Int](
-                        pn[1].as_c_string_slice())
-                    # 决策-54 (ADR-0029): FFI 三态 — 0=在场(含空值) / -2=缺席(slice 已清空) /
-                    # -1=出错. F3a 注入语义保持: 在场/缺席都注入 (缺席 = 空串).
-                    if rc != -1:
-                        var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
-                        v = span_to_str(sl.as_bytes())
-                    params["header_" + pn[0]] = v
+                    # 决策-104: 候选序探测 (首个在场者生效); 全不在场 -> 空串
+                    for c in cands:
+                        var cn = c
+                        var rc = external_call["extract_request_header", Int](
+                            cn.as_c_string_slice())
+                        # 决策-54 (ADR-0029): FFI 三态 — 0=在场(含空值) / -2=缺席(slice 已清空) /
+                        # -1=出错. F3a 注入语义保持: 在场/缺席都注入 (缺席 = 空串).
+                        if rc != -1:
+                            var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
+                            v = span_to_str(sl.as_bytes())
+                            break
+                    params["header_" + decl] = v
             start = i + 1
         i += 1
 
-def read_headers_present(header_names_csv: String) -> Dict[String, String]:
+def read_headers_present(header_names_csv: String) -> Tuple[Dict[String, String], Dict[String, String]]:
     """决策-54 (ADR-0029): typed header 校验用 — 逐 _reads_headers 条目读值.
     FFI 三态 (extract_request_header): rc==0 在场 (含空值) -> name->value;
     rc==-2 缺席 -> 不进 dict (missing 语义, 缺失+默认走 default 校验); rc==-1
     出错 -> 不进 dict. 与 inject_request_headers 同款 FFI (get_header_value_ci
-    多值取首), 仅保留 present 集合."""
+    多值取首), 仅保留 present 集合.
+
+    决策-104 (上游 0.156.3): 返回 (present, loc_names) —
+      - present: 声明名 -> 值 (首个在场候选的值)
+      - loc_names: 声明名 -> **命中的 wire 名** (全不在场时 = 第一个候选);
+        422 loc 用它 (上游 loc = (in_, request_key), 决策-103 的 HTTP header 名
+        语义在多候选下取命中候选)."""
     var out = Dict[String, String]()
+    var locs = Dict[String, String]()
     var n = header_names_csv.byte_length()
     var start = 0
     var i = 0
@@ -287,16 +305,26 @@ def read_headers_present(header_names_csv: String) -> Dict[String, String]:
                     e -= 1
                 if e > b:
                     var clean = String(name[byte=b:e])
-                    var pn = parse_header_entry(clean)
-                    var nn = pn[1]  # wire (local: as_c_string_slice 需非 rvalue)
-                    var rc = external_call["extract_request_header", Int](nn.as_c_string_slice())
-                    if rc == 0:
-                        var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
-                        var kn = pn[0]
-                        out[kn] = span_to_str(sl.as_bytes())
+                    var parts = header_entry_parts(clean)
+                    var decl = parts[0]
+                    var cands = parts[1].copy()
+                    var hit = String("")
+                    # 决策-104: 候选序探测 (首个在场者生效)
+                    for c in cands:
+                        var cn = c  # wire (local: as_c_string_slice 需非 rvalue)
+                        var rc = external_call["extract_request_header", Int](cn.as_c_string_slice())
+                        if rc == 0:
+                            var sl = external_call["get_header_value_slice", CStringSlice[origin_of(String(""))]]()
+                            out[decl] = span_to_str(sl.as_bytes())
+                            hit = c
+                            break
+                    if hit == "":
+                        if len(cands) > 0:
+                            hit = cands[0]
+                    locs[decl] = hit
             start = i + 1
         i += 1
-    return out^
+    return (out^, locs^)
 
 # ---------- F-DI (Depends, 决策-33): 依赖注入 ----------
 
@@ -995,6 +1023,69 @@ def register_routes(mut router: Router) raises:
     uf_h.set_data("_param_descs", "doc=The document to upload;note=A note;opt=Optional attachment")
     uf_h.set_data("message", "uploadfile demo")
     router.add_route("/upload-file", "POST", uf_h)
+
+    # 决策-104 (上游 0.156.3~0.156.7 / PR #16555, #16557, #16559, #16560,
+    # #16564): AliasChoices 多候选别名 demo — 候选按声明序, 首个在请求中出现
+    # 者生效; 都没出现 -> 第一个候选 (loc / 默认来源).
+    # query: ?alpha= / ?beta= (字面候选; 上游 Query(validation_alias=
+    # AliasChoices("alpha","beta")))
+    var aq_h = Handler(KIND_ECHO(), "alias_query")
+    aq_h.set_data("message", "alias choices query demo")
+    aq_h.set_data("_param_types", "q:int=5;who:str=anon")
+    aq_h.set_data("_param_aliases", "q=alpha|beta;who=user_id|uid")
+    router.add_route("/alias/query", "GET", aq_h)
+
+    # query 必填变体 (上游: 候选都没出现 + required -> 422 missing,
+    # loc = 第一个候选 "alpha"; 有默认值时 -> 走默认值 200)
+    var aqr_h = Handler(KIND_ECHO(), "alias_query_req")
+    aqr_h.set_data("message", "alias choices query required demo")
+    aqr_h.set_data("_param_types", "req:int")
+    aqr_h.set_data("_param_aliases", "req=alpha|beta")
+    router.add_route("/alias/query-req", "GET", aqr_h)
+
+    # header: 多候选 = **字面名** (上游 "Explicit choices are literal names,
+    # including underscores in headers")
+    var ah_h = Handler(KIND_ECHO(), "alias_header")
+    ah_h.set_data("message", "alias choices header demo")
+    ah_h.set_data("_reads_headers", "x_alt=alt-one|alt_two")
+    ah_h.set_data("_header_types", "x_alt:int")
+    router.add_route("/alias/header", "GET", ah_h)
+
+    # form (上游 0.156.4 / PR #16557 + 0.156.7 / PR #16564)
+    var af_h = Handler(KIND_ECHO(), "alias_form")
+    af_h.set_data("message", "alias choices form demo")
+    af_h.set_data("_form_types", "field:int=3")
+    af_h.set_data("_form_aliases", "field=f-one|f-two")
+    router.add_route("/alias/form", "POST", af_h)
+
+    # file (上游 0.156.4 / 0.156.7): multipart part 名命中任一候选即可
+    var afl_h = Handler(KIND_ECHO(), "alias_file")
+    afl_h.set_data("message", "alias choices file demo")
+    afl_h.set_data("_multipart", "true")
+    afl_h.set_data("_file_types", "doc:bytes=")
+    afl_h.set_data("_file_aliases", "doc=doc-a|doc-b")
+    router.add_route("/alias/file", "POST", afl_h)
+
+    # body (上游 0.156.4 / PR #16559): JSON body 字段别名
+    var ab_h = Handler(KIND_ECHO(), "alias_body")
+    ab_h.set_data("message", "alias choices body demo")
+    ab_h.set_data("_body_schema", "name:str;age:int=0")
+    ab_h.set_data("_body_aliases", "name=full_name|nickname")
+    router.add_route("/alias/body", "POST", ab_h)
+
+    # path (上游 0.156.5 / PR #16560): 候选里首个出现在路由 path 模板名的生效
+    var ap_h = Handler(KIND_ECHO(), "alias_path")
+    ap_h.set_data("message", "alias choices path demo")
+    ap_h.set_data("_param_types", "item_id:int")
+    ap_h.set_data("_param_aliases", "item_id=item_id|item")
+    router.add_route("/alias/path/{item_id}", "GET", ap_h)
+
+    # path: 声明名与路由模板名不同 (上游 analyze_param 按模板名解析候选)
+    var ap2_h = Handler(KIND_ECHO(), "alias_path2")
+    ap2_h.set_data("message", "alias choices path 2 demo")
+    ap2_h.set_data("_param_types", "id:int")
+    ap2_h.set_data("_param_aliases", "id=item_id|id")
+    router.add_route("/alias/path2/{item_id}", "GET", ap2_h)
 
     # 决策-46: bytes 字段 demo (文本/文件均接受, U9) + ops
     # head:4 / range:1:3 / save -> /tmp/fm_upload/raw.bin.
@@ -1820,8 +1911,11 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         var herr_list = List[String]()
                         var hvals = Dict[String, String]()
                         if len(htypes) > 0:
-                            var present = read_headers_present(route_result.handler.data["_reads_headers"])
-                            var reads = parse_reads_headers(route_result.handler.data["_reads_headers"])
+                            # 决策-104: 多候选 header — present 取首个在场候选的值;
+                            # reads = 命中的 wire 名 (422 loc 用, 决策-103 语义).
+                            var hread = read_headers_present(route_result.handler.data["_reads_headers"])
+                            var present = hread[0].copy()
+                            var reads = hread[1].copy()
                             var hres = validate_headers_collect(htypes, reads, present, constraints)
                             herr_ok = hres[0]
                             for he in hres[1]:
@@ -1926,6 +2020,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                 # F3a: Request 读 headers (Goal-0002). 声明式 _reads_headers CSV.
                                 # 注入 route_result.params 前缀 header_<name>; handler 直读.
                                 var req_params = route_result.params.copy()
+                                # 决策-104: path AliasChoices — 声明名再绑一份
+                                # (上游 values[field.name]; 模板名键保留).
+                                apply_path_aliases(req_params, type_spec, aliases)
                                 # 决策-38: 注入 body 校验值 (含默认值) body_<name> / <父>_<子>
                                 for bk in sres[2]:
                                     req_params["body_" + bk] = sres[2][bk]

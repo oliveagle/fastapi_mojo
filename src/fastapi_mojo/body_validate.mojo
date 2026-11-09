@@ -9,6 +9,7 @@
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
                          err_obj, err_obj_ctx, _in_enum_csv, _enum_or_msg, _split_top, _trim,
                          _find_eq, _is_int_lit, _is_num_lit)
+from alias_choices import candidates_for, pick_in_dict, first_candidate
 from body_coerce import _coerce_body_scalar, _elem_type_err, _elem_json_type
 from body_json import validate_body_json, content_type_is_json
 from body_constraints import (_json_input_frag, _json_input_frag_typed,
@@ -17,9 +18,22 @@ from json_canon import canon_json, json_string_literal
 from handler import Handler
 from router import Router
 from params_query import ParsedParams
+from params_query_extra import parse_table
 from params_json import parse_body_json
 from json import json_escape
 from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
+
+
+def get_body_aliases(handler: Handler) raises -> Dict[String, String]:
+    """_body_aliases 声明表 ("name=alt1|alt2;...", 决策-104).
+
+    上游 0.156.4 (PR #16559) 的 body 字段别名 (Body(alias=) /
+    validation_alias=AliasChoices) 在 fastapi_mojo 的声明式映射: 字段名 ->
+    候选别名列表 ('|' 分隔). 既有 body 无别名机制, 本表为新增 (与
+    _param_aliases / _form_aliases / _file_aliases / _reads_headers 同范式)."""
+    if "_body_aliases" in handler.data:
+        return parse_table(handler.data["_body_aliases"], 59, 61, False)
+    return Dict[String, String]()
 
 
 def _type_err(fs: FieldSpec) -> Tuple[String, String]:
@@ -131,22 +145,35 @@ def _strip_quotes(v: String) -> String:
 
 
 def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: String,
-                     raw_body: String, mut out: Dict[String, String], mut errs: List[String]) raises:
-    """逐字段校验 (顶层与嵌套共用). prefix = 注入键前缀; loc = FastAPI loc 数组 (不含字段名)."""
+                     raw_body: String, mut out: Dict[String, String], mut errs: List[String],
+                     aliases: Dict[String, String]) raises:
+    """逐字段校验 (顶层与嵌套共用). prefix = 注入键前缀; loc = FastAPI loc 数组 (不含字段名).
+
+    决策-104 (上游 0.156.4 / PR #16559): body 字段多候选别名 —
+    候选按声明序取**首个在 body 中出现**者 (上游 `for alias in aliases:
+    value = body.get(alias, Undefined); if found: loc = ("body", alias);
+    break`); 都没出现 -> 第一个候选 (loc). 注入键仍按**声明名** (上游
+    values[field.name])."""
     for i in range(len(s.fields)):
         var fs = get_field(s, i)
         var key = prefix + fs.name
-        var floc = loc + ",\"" + fs.name + "\""
-        if not (fs.name in body.values):
+        # 决策-104: 候选集 + 命中候选 (未命中 -> 第一个候选)
+        var cands = candidates_for(aliases, fs.name)
+        var matched = pick_in_dict(cands, body.values)
+        var loc_name = first_candidate(cands)
+        if matched != "":
+            loc_name = matched
+        var floc = loc + ",\"" + json_escape(loc_name) + "\""
+        if matched == "":
             if fs.has_default():
                 out[key] = fs.default_value
             else:
                 errs.append(err_obj(floc + "]", "Field required", "missing", _body_input(raw_body)))
             continue
-        var raw = body.values[fs.name]
+        var raw = body.values[matched]
         var t = "string"
-        if fs.name in body.types:
-            t = body.types[fs.name]
+        if matched in body.types:
+            t = body.types[matched]
         var ok_t = False
         if fs.is_array:
             ok_t = t == "array"
@@ -246,7 +273,8 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
                         var item_schema = parse_body_schema(fs.nested_spec)
                         _validate_fields(item_schema, item,
                                          prefix + fs.name + "_" + String(ei) + "_",
-                                         floc + "," + String(ei), elems[ei], out, errs)
+                                         floc + "," + String(ei), elems[ei], out, errs,
+                                         aliases)
                 else:
                     _apply_elem_constraints(fs.elem, elems[ei], _strip_quotes(elems[ei]), fs, eloc, errs)
             if fs.elem == "int" or fs.elem == "float" or fs.elem == "bool":
@@ -271,7 +299,10 @@ def _validate_fields(s: ParsedSchema, body: ParsedParams, prefix: String, loc: S
                 errs.append(err_obj(floc + "]", "Input should be an object", "model_type", _json_input_frag(raw)))
             else:
                 var subs = parse_body_schema(fs.nested_spec)
-                _validate_fields(subs, sub, prefix + fs.name + "_", floc, raw_body, out, errs)
+                # 决策-104: 别名表按**字段名**全局生效 (嵌套层同表; 上游每个
+                # 模型各自带别名, fastapi_mojo 为单张扁平表).
+                _validate_fields(subs, sub, prefix + fs.name + "_", floc, raw_body, out,
+                                 errs, aliases)
         else:
             _apply_constraints(fs, raw, raw, -1, _json_input_frag_typed(t, raw),
                                floc + "]", errs)
@@ -337,11 +368,15 @@ def _validate_body_embed(handler: Handler, embed_key: String, body_params: Parse
                             "model_attributes_type", _json_input_frag(raw)))
         return False
     var fields = parse_body_schema(handler.data["_body_schema"])
-    _validate_fields(fields, inner, "", loc_base, raw, out, errs)
+    var baliases = get_body_aliases(handler)
+    _validate_fields(fields, inner, "", loc_base, raw, out, errs, baliases)
     # 决策-89: 记录**显式提供**的顶层字段名 (exclude_unset 用).
+    # 决策-104: 多候选别名时按命中候选判定"显式提供".
     for i in range(field_count(fields)):
-        var nm = get_field(fields, i).name
-        if nm in inner.values:
+        var fsx = get_field(fields, i)
+        var nm = fsx.name
+        var cands = candidates_for(baliases, nm)
+        if pick_in_dict(cands, inner.values) != "":
             set_names.append(nm)
     return len(errs) == 0
 
@@ -416,7 +451,8 @@ def validate_body_schema(handler: Handler, method: String,
                                 "{}", "{\"error\":\"invalid JSON\"}"))
         return (False, errs^, ok_vals^, "")
     var fields = parse_body_schema(handler.data["_body_schema"])
-    _validate_fields(fields, body_params, "", "[\"body\"", body_str, ok_vals, errs)
+    _validate_fields(fields, body_params, "", "[\"body\"", body_str, ok_vals, errs,
+                     get_body_aliases(handler))
     # 决策-89: 记录显式提供的顶层字段名 (exclude_unset).
     var set_names = List[String]()
     for i in range(field_count(fields)):

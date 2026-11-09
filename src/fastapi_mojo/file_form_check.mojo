@@ -16,6 +16,7 @@
 # file_params_selftest / http_server_final -> file_form_check (one-way).
 
 from file_params import MpParts, _decl_of
+from alias_choices import candidates_for
 from json import json_escape
 
 
@@ -59,17 +60,22 @@ def validate_file_vs_form(parts: MpParts, ftypes: Dict[String, String],
         return errs^
     for k in ftypes:
         var spec = ftypes[k]
-        var lookup = k
-        if k in fal:
-            lookup = fal[k]
-        var claimed = _decl_of(lookup, file_types, file_aliases) != ""
+        # 决策-104: 候选序命中 (任一候选名命中即算该字段的 occurrence).
+        var cands = candidates_for(fal, k)
+        var claimed = False
+        for c in cands:
+            if _decl_of(c, file_types, file_aliases) != "":
+                claimed = True
+                break
         if claimed:
             continue
         var occ = List[Int]()
         var pi = 0
         while pi < parts.count():
-            if parts.names[pi] == lookup:
-                occ.append(pi)
+            for c in cands:
+                if parts.names[pi] == c:
+                    occ.append(pi)
+                    break
             pi += 1
         if len(occ) == 0:
             continue
@@ -109,16 +115,23 @@ def file_part_fields(parts: MpParts, ftypes: Dict[String, String],
     if len(ftypes) == 0 or parts.count() == 0:
         return out^
     for k in ftypes:
-        var lookup = k
-        if k in fal:
-            lookup = fal[k]
-        if _decl_of(lookup, file_types, file_aliases) != "":
+        # 决策-104: 候选序命中 (任一候选名命中即可; 声明 file 字段占位优先).
+        var cands = candidates_for(fal, k)
+        var claimed = False
+        for c in cands:
+            if _decl_of(c, file_types, file_aliases) != "":
+                claimed = True
+                break
+        if claimed:
             continue
         var any_file = False
         var pi = 0
         while pi < parts.count():
-            if parts.names[pi] == lookup and parts.is_file(pi):
-                any_file = True
+            for c in cands:
+                if parts.names[pi] == c and parts.is_file(pi):
+                    any_file = True
+                    break
+            if any_file:
                 break
             pi += 1
         if any_file:

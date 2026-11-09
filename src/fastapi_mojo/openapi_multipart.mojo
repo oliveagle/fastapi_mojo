@@ -20,6 +20,7 @@ from form_params import (form_has_declaration, form_field_names_ordered,
 from file_params import (get_file_types, get_file_aliases,
                          file_has_declaration, file_field_names_ordered,
                          _parse_file_spec)
+from alias_choices import candidates_for, first_candidate
 from params_query_extra import get_param_descs, has_eq
 from json import json_escape
 
@@ -101,7 +102,8 @@ def multipart_openapi_schema(handler: Handler, method: String) raises -> String:
         var n = fnames[i]
         var prop = n
         if n in fal:
-            prop = fal[n]
+            # 决策-104: 多候选 -> 属性名 = 候选首个 (上游 choices[0])
+            prop = first_candidate(candidates_for(fal, n))
         if _in_list(seen, prop):
             continue
         seen.append(prop)
@@ -121,7 +123,8 @@ def multipart_openapi_schema(handler: Handler, method: String) raises -> String:
         var n2 = mnames[i]
         var prop2 = n2
         if n2 in fal_form:
-            prop2 = fal_form[n2]
+            # 决策-104: 多候选 -> 属性名 = 候选首个 (上游 choices[0])
+            prop2 = first_candidate(candidates_for(fal_form, n2))
         if _in_list(seen, prop2):
             continue
         seen.append(prop2)

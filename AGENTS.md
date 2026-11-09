@@ -114,7 +114,7 @@
   单一 binary 构建（含 rust toolchain：`cargo build --release` 出 staticlib，
   `-static-libgcc` 静态链接 libgcc_s 保 ldd 干净，见 §3.2）
   + `ldd` 零依赖断言 + 干净环境 (`env -i`) 启动 + 单元测试（含 `cargo test --release
-  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 802 项, 79 项
+  -- --test-threads=1`，env 全局副作用需单线程）+ e2e (现 917 项, 79 项
   起扩展, 含 WebSocket 增强/并发/精化 + 参数约束面 CP（ADR-0029）+ 用户自定义中间件 MW（ADR-0030）
   + TestClient TC（ADR-0031）) +
   体积预算（中间态 ≤ 6M，终态 ≤ C + 2M）
@@ -1846,3 +1846,29 @@ RSS 平台化 / env -i 干净启动；**v0.5.0 tag 已打已推**；
   6. **Mojo 纯逻辑自检**：`header_params_selftest.mojo` 补 `header_loc_name` 断言（默认 wire 名 / 显式别名 / 字面下划线别名 / **退化态也用 HTTP header 名** / 无下划线原样）+ 交叉校验断言（一致通过 / 名字未在 `_reads_headers` → raise / 无 `_reads_headers` 但有 `_header_types` → raise）。
   7. **已知边界（不计入本项）**：上游的 header **model**（BaseModel 作 Header 参数 + 模型级 `extra` 策略 + 模型级校验器 + `loc_by_alias=False`）在 fastapi_mojo **无对应概念**（扁平声明），其模型组合语义归入「0.157.0 组合 query/header/cookie 参数模型」项（需新增声明语法，见优先队列第 10 项）。
   **验收**：e2e **886/886** 全绿（881 + HD-1~5，0 failed）；bridge `cargo test --release -- --test-threads=1` **530 passed / 2 failed / 4 ignored**（2 项 `cmd_tests::escaping_in_output` + `send_tests::static_file_traversal_returns_403` 为 **pristine HEAD 既有**，与本改动无关）；两 crate `clippy -D warnings` **0 警告**；`ldd` 仅 **libc.so.6 + libm.so.6**；`env -i` 干净启动 health **200**；binary **5,377,464 B (5.13 MiB)** ≤6M 预算；`find src -name '*.c'` = **0**、`*.py` = **0**。**Fidelity**：upstream-tracking.md **B 主题 ✅ 0→1**；合计表与各节表格对齐（41 行 ✅=6 / 🔶=8 / ❌=16 / ➖=11，逐节核对脚本确认）。
+
+- **已决策-104**：**上游 0.156.3~0.156.7 AliasChoices 多候选别名（query/header/path/form/file/body 六面）**（docs/upstream-tracking.md B 主题；上游 PR #16555 / #16557 / #16559 / #16560 / #16562 / #16564，merged 2026-10~11）：
+  1. **上游权威语义（已从 fastapi master 源码 + 上游测试逐行核实，非猜测）**：
+     - `_get_param_aliases`：AliasChoices 全部为 str 时 → `[(choice, choice) for choice in choices]`（**字面名**；header 候选**不做** `_`→`-` 转换 —— 上游 "Explicit choices are literal names, including underscores in headers"）。
+     - **候选按声明序尝试**，请求中**首个出现**者生效（与 query 串出现顺序无关 —— 上游 `next((pair for pair in aliases if pair[1] in received_params), aliases[0])`）；**一个都没出现 → 第一个候选**（作 loc / 默认来源）。
+     - **422 loc = 命中的候选**（上游 `loc = (field_info.in_.value, alias)`），query/header/body/path 各自 in_ 前缀；命中候选值非法 → 该候选的 `int_parsing` 等。
+     - **path 面（PR #16560）**：`analyze_param` 把 validation_alias **钉成候选里首个出现在路由 path 模板名**的那个 choice → 路径参数按模板名取值，OpenAPI path 参数名 = **路由模板名**。
+     - **form/file 面（PR #16557/#16564）**：`_extract_form_body` 按候选序取**首个值非 Undefined** 的候选（空串视为缺失 → 继续试下一个）；422 loc = `("body", **别名**)` —— 上游报**别名**而非 Python 字段名（`form_values.get(field.name, (aliases[0], Undefined))` → `loc = ("body", alias)`）。
+     - **OpenAPI**：query/header 参数名、body/form/file schema 属性名 = **候选首个**（上游 `_get_param_aliases(...)[0]` / `validation_alias.choices[0]`）。
+     - **0.156.6（模型级 alias settings → query/header/cookie）**：fastapi_mojo **无模型概念** → 归 ➖（并入 0.157.0「组合 query/header/cookie 参数模型」项）；**cookie 参数**同样无该概念 → 不适用。
+  2. **声明语法（沿用既有 alias 表的**值**多候选扩展，零新增声明面）**：alias 表值用 `|`（124）分隔候选 —— `_param_aliases="q=alpha|beta"`（query/path）、`_form_aliases="field=f-one|f-two"`（form）、`_file_aliases="doc=doc-a|doc-b"`（file）、`_reads_headers="x_alt=alt-one|alt_two"`（header）、**`_body_aliases="name=full_name|nickname"`（body —— 决策-104 新增表，与既有四表同范式）**。**单候选写法（"name=alias"）与既有语义完全等价**（零回归）。
+  3. **实现（纯 Mojo，**FFI diff = 0**）**：
+     - **新增 `src/fastapi_mojo/alias_choices.mojo`（106 LOC，叶子模块，零 FFI/零 fd/零 env）**：`alias_candidates`（`a|b|c` → 列表）/ `candidates_for`（声明名 → 候选集，未声明 → `[name]`）/ `pick_in_dict`（query/body 面：首个**在场**候选）/ `pick_in_multi`（form/file 多值面：标量空串视为缺席继续试下一个，list 有 occurrence 即命中）/ `pick_path_name`（path 面：首个出现在模板名集合的候选）/ `first_candidate`（都没命中时的 loc / 默认来源）。
+     - **`params_typed.mojo`**：`_vpc_one` 候选序命中 + **loc 用命中候选**；path 用 `pick_path_name`；`canonicalize_typed_values` 候选化。
+     - **`params_query_extra.mojo`**：`apply_query_extras` 候选化；**新增 `apply_path_aliases`**（声明名再绑一份 —— 上游 handler 侧看到的是形参名 `values[field.name]`）。
+     - **`header_params.mojo`**：新增 `header_entry_parts(entry) -> (声明名, 候选列表)` / `header_candidates`（候选为**字面**名）。
+     - **`http_server_final.mojo`**：`read_headers_present` 改返回 `(present, loc_names)`；`inject_request_headers` 候选序探测；dispatch 接线；**新增 7 条 demo 路由** `/alias/{query,query-req,header,form,file,body,path,path2}`。
+     - **`form_params.mojo` / `file_params.mojo`（新增 `_pick_file_candidate`）/ `file_form_values.mojo` / `file_form_check.mojo`**：form/file 候选化（标量空串视为缺席；list 收全部 occurrence）。
+     - **`body_validate.mojo`**：新增 `get_body_aliases`（`_body_aliases` 表）；`_validate_fields` 候选化（loc 用命中候选，注入键仍按声明名）。
+     - **`openapi_schemas.mojo` / `openapi.mojo` / `openapi_multipart.mojo` / `form_params.mojo`**：参数名 / 属性名用候选首个。
+  4. **顺带修掉 2 个 OpenAPI 真 bug（本轮实测暴露，非上游语义问题）**：
+     - **urlencoded form schema 属性名仍是声明名**（multipart 面早已用别名，urlencoded 面漏改）→ `form_openapi_schema` 改用候选首个。
+     - **`/alias/path2/{item_id}` 的 OpenAPI 同时出现 path 参数 `item_id` 与 query 参数 `item_id`** —— query 分支的 is_path 判定只按「声明名 == 模板名」，未考虑**候选**命中模板名 → 判定改用 `pick_path_name(candidates_for(aliases,k), path_params, k) != ""`；同时 path 分支的**类型/描述/约束改取自声明名**（声明名 ≠ 模板名时），约束按模板名补别名条目。
+  5. **e2e 回归（AL-* 共 26 项，886 → 917）**：AL-Q1~Q6（query：首候选命中 / 第二候选命中 / **声明序优先**（`?beta=2&alpha=1` → alpha 生效）/ 缺候选 → 422 missing loc=首候选 / 命中候选非法 loc=该候选 / 第二候选非法 loc=该候选）/ AL-H1~H5（header 字面候选）/ AL-F1~F5（form urlencoded）/ AL-FL1~FL4（file multipart）/ AL-B1~B3（body JSON）/ AL-P1~P4（path：模板名命中 / 声明名绑定 / loc=模板名）/ **AL-OA**（OpenAPI 名称 = 候选首个 + `fmtool jsoncheck` 整份文档合法 JSON）。**另按上游更正 4 处存量断言**（MP12/MP13/MP24/MP23b：file 别名 422 loc 由字段名 `doc` 改为**别名** `docfile` —— 上游报别名不报字段名），并在脚本内加注释说明。
+  6. **已知边界（不计入本项）**：上游的**模型级** alias（0.156.6）、**cookie 参数**、**BaseModel 作 query/header 参数**在本项目**无对应概念**（扁平声明式）→ 归 0.157.0「组合 query/header/cookie 参数模型」项（需新增声明语法，见优先队列第 10 项）。
+  **验收**：e2e **917/917** 全绿（0 failed）；bridge `cargo test --release -- --test-threads=1` **530 passed / 2 failed / 4 ignored**（2 项 `cmd_tests::escaping_in_output` + `send_tests::static_file_traversal_returns_403` 为 **pristine HEAD 既有**且**本机环境依赖**：`/bin/sh` = bash（非 dash，printf `\"` 语义不同）+ `TMPDIR=$HOME/tmp`（使 `dir/../../etc/passwd` 不存在 → realpath 失败返回 404）；`TMPDIR=/tmp` 下 traversal 测试转绿，CI 环境（ubuntu，TMPDIR 未设、/bin/sh=dash）不受影响）；两 crate `clippy --release --tests -D warnings` **0 警告**；`ldd build/fastapi_mojo` 仅 **libc.so.6 + libm.so.6**；`env -i` 干净启动 health **200**；binary **5,418,424 B (5.17 MiB)** ≤6M 预算；`find src -name '*.c'` = **0**、`*.py` = **0**、无 `.venv`。**Fidelity**：upstream-tracking.md **B 主题 ✅ 1→6、➖ 0→1、❌ 7→1**；合计表与各节表格对齐（41 行 ✅=11 / 🔶=8 / ❌=10 / ➖=12，逐节核对脚本确认）。**新增模块 `alias_choices.mojo` 106 LOC < 500 God package 阈值**。

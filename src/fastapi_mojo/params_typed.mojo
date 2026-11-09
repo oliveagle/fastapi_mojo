@@ -26,6 +26,8 @@
 
 from handler import Handler
 from params_query_extra import validate_list_values, split_csv, join_values, parse_table
+from alias_choices import (candidates_for, pick_in_dict, pick_in_multi,
+                           pick_path_name, first_candidate)
 from numlit import (TypeSpec, parse_type_spec, ParsedBase, parse_base,
                    parse_typed_value, parse_f64, enum_in, enum_msg)
 from param_constraints import (_pe_ctx, parse_constraint_entry,
@@ -64,49 +66,67 @@ def _vpc_one(k: String, type_spec: Dict[String, String], path_params: Dict[Strin
              query_params: Dict[String, String], query_multi: Dict[String, List[String]],
              aliases: Dict[String, String], constraints: Dict[String, String],
              mut errs: List[String]) raises:
-    """单参数校验: loc = path->["path",k] / query->["query",k] (list 元素 +
+    """单参数校验: loc = path->["path",x] / query->["query",x] (list 元素 +
     下标 i); 取值 path 优先 -> query (alias) -> default; enum / 类型解析
-    (失败 -> 完整消息, 决策-54 §3.4) / 约束 (每字段仅首个违规, 决策-54)."""
+    (失败 -> 完整消息, 决策-54 §3.4) / 约束 (每字段仅首个违规, 决策-54).
+
+    决策-104 (上游 0.156.3 / 0.156.5): 多候选别名 (AliasChoices) —
+    候选按声明序尝试, 首个在请求中出现者生效; 都没出现 -> 第一个候选.
+    loc 用**命中的候选** (上游 loc = (in_, request_key)); path 面取首个
+    出现在路由 path 模板名里的候选 (上游 PR #16560 analyze_param)."""
     var spec = type_spec[k]
     var ts = parse_type_spec(spec)
     var pb = parse_base(ts.base_type)
-    var in_path = k in path_params
-    var loc = "[\"path\",\"" + json_escape(k) + "\"]"
+    # 决策-104: 候选集 (声明了 alias -> 候选; 未声明 -> [name]).
+    var cands = candidates_for(aliases, k)
+    # path 面: 首个出现在路由 path 模板名里的候选 (上游 0.156.5); 无候选命中
+    # 但名字本身是模板名 -> 沿用名字 (既有语义, 零回归).
+    var path_name = pick_path_name(cands, path_params, k)
+    var in_path = path_name != ""
+    # loc 名: 命中的候选; 未命中 -> 第一个候选 (上游 aliases[0]).
+    var loc_name = first_candidate(cands)
+    var qhit = String("")
+    if in_path:
+        loc_name = path_name
+    else:
+        qhit = pick_in_dict(cands, query_params)
+        if qhit != "":
+            loc_name = qhit
+    var loc = "[\"path\",\"" + json_escape(loc_name) + "\"]"
     if not in_path:
-        loc = "[\"query\",\"" + json_escape(k) + "\"]"
+        loc = "[\"query\",\"" + json_escape(loc_name) + "\"]"
     if not pb.ok:
         errs.append(_pe(loc, "unknown type for parameter '" + k + "': " + ts.base_type, "unknown_type", "null"))
         return
-    var lookup = k
-    if not in_path and k in aliases:
-        lookup = aliases[k]
     if ts.is_list:
         # 决策-43: list 参数 (path 命中时按单值校验 — path 恒单值, 宽松)
         # 决策-54: list + 约束注册期已拒, 运行期不查
+        # 决策-104: list 取值按候选序 (query_multi 在场即命中, 空串元素保留)
         if in_path:
             var one = List[String]()
-            one.append(path_params[k])
-            validate_list_values(pb.type_name, one^, k, errs)
+            one.append(path_params[path_name])
+            validate_list_values(pb.type_name, one^, loc_name, errs)
             return
         var vals: List[String]
-        if lookup in query_multi:
-            vals = query_multi[lookup].copy()
+        var lhit = pick_in_multi(cands, query_multi, False)
+        if lhit != "":
+            vals = query_multi[lhit].copy()
         elif ts.has_default():
             var d = ts.default_value
             vals = split_csv(d)
         else:
             errs.append(_pe(loc, "Field required", "missing", "null"))
             return
-        validate_list_values(pb.type_name, vals^, k, errs)
+        validate_list_values(pb.type_name, vals^, loc_name, errs)
         return
     var raw = ""
     var has_value = False
     var from_default = False
     if in_path:
-        raw = path_params[k]
+        raw = path_params[path_name]
         has_value = True
-    elif lookup in query_params:
-        raw = query_params[lookup]
+    elif qhit != "":
+        raw = query_params[qhit]
         has_value = True
     elif ts.has_default():
         raw = ts.default_value
@@ -215,17 +235,19 @@ def canonicalize_typed_values(type_spec: Dict[String, String],
         var tn = pb.type_name
         if tn != "int" and tn != "float" and tn != "bool":
             continue
-        if k in path_params:
-            var p = parse_typed_value(tn, path_params[k])
+        # 决策-104: path 面取命中的候选 (上游 0.156.5); query 面按候选序.
+        var cands = candidates_for(aliases, k)
+        var pname = pick_path_name(cands, path_params, k)
+        if pname != "":
+            var p = parse_typed_value(tn, path_params[pname])
             if p[0]:
-                path_params[k] = p[1]
+                path_params[pname] = p[1]
             continue
-        var key = k
-        if k in aliases:
-            key = aliases[k]
         var keys = List[String]()
-        keys.append(key)
-        if key != k:
+        var m = pick_in_dict(cands, query_values)
+        if m != "":
+            keys.append(m)
+        if k not in keys:
             keys.append(k)
         for kk in keys:
             if kk not in query_values:

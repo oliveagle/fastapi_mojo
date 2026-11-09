@@ -26,6 +26,8 @@
 
 from handler import Handler
 from params_query import ParsedParams, parse_query_params
+from alias_choices import (candidates_for, pick_in_dict, pick_in_multi,
+                           pick_path_name, first_candidate)
 from json import json_escape
 
 
@@ -206,16 +208,22 @@ def apply_query_extras(mut query: ParsedParams,
       - path 参数跳过 (alias 只适用 query, ADR-0018 §3.2)
     """
     for k in type_spec:
-        if k in path_params:
-            continue
         var spec = type_spec[k]
-        var key = k
-        if k in aliases:
-            key = aliases[k]
-        var in_request = key in query.multi_values
+        # 决策-104: 候选集 (声明了 alias -> 候选序; 未声明 -> [name]).
+        var cands = candidates_for(aliases, k)
+        # path 参数跳过 (alias 只适用 query — ADR-0018 §3.2; path 面
+        # AliasChoices 的取值本来就在 path_params 里, 由 validate 侧解析).
+        if pick_path_name(cands, path_params, k) != "":
+            continue
+        var key = first_candidate(cands)
+        # 决策-104: 候选序命中 (首个在请求中出现者生效). query 的 values 与
+        # multi_values 同键集 (params_query.parse_query_params), 故标量/列表
+        # 共用同一命中判定; 列表取值另走 get_multi (全部 occurrence).
+        var matched = pick_in_dict(cands, query.values)
+        var in_request = matched != ""
         if is_list_spec(spec):
             if in_request:
-                query.values[key] = join_values(query.get_multi(key))
+                query.values[matched] = join_values(query.get_multi(matched))
             elif has_eq(spec):
                 # 显式默认 (含 "str[]=" 空 list -> "", FastAPI 返回 [] 的
                 # String 世界等价)
@@ -232,9 +240,9 @@ def apply_query_extras(mut query: ParsedParams,
             var has_bound = False
             if in_request:
                 if is_list_spec(spec):
-                    bound = join_values(query.get_multi(key))
-                elif key in query.values:
-                    bound = query.values[key]
+                    bound = join_values(query.get_multi(matched))
+                elif matched in query.values:
+                    bound = query.values[matched]
                 has_bound = True
             elif has_eq(spec):
                 if is_list_spec(spec):
@@ -244,6 +252,23 @@ def apply_query_extras(mut query: ParsedParams,
                 has_bound = True
             if has_bound:
                 query.values[k] = bound
+
+
+def apply_path_aliases(mut params: Dict[String, String],
+                       type_spec: Dict[String, String],
+                       aliases: Dict[String, String]) raises:
+    """Path AliasChoices (上游 0.156.5 / PR #16560) 的**声明名绑定**:
+    声明名与路由 path 模板名不同时, 值按模板名取, 但 handler 侧按**声明名**
+    再绑一份 (上游 values[field.name] — 形参名才是 handler 看到的键).
+
+    params = 该路由的 path 参数表 (键 = 路由模板名)."""
+    for k in type_spec:
+        if k not in aliases:
+            continue
+        var cands = candidates_for(aliases, k)
+        var pname = pick_path_name(cands, params, k)
+        if pname != "" and pname != k:
+            params[k] = params[pname]
 
 
 # ---------- 自测 ----------

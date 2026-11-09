@@ -14,7 +14,9 @@ from router import Router, Route
 from handler import Handler
 from params_typed import get_param_types
 from params_query_extra import get_param_aliases, get_param_descs
-from header_params import parse_header_entry  # 决策-53 (ADR-0028): header param 名 = wire 名
+from header_params import (parse_header_entry, header_entry_parts)  # 决策-53 (ADR-0028): header param 名 = wire 名
+from body_validate import get_body_aliases  # 决策-104: body 字段别名
+from alias_choices import candidates_for, first_candidate, pick_path_name
 from param_constraints import get_param_constraints, get_header_types
 from numlit import parse_type_spec, parse_base
 from body_schema import (FieldSpec, ParsedSchema, parse_body_schema, get_field, field_count,
@@ -138,13 +140,33 @@ def _generate_operation(route: Route) raises -> String:
     var htypes = get_header_types(h)
     var aliases = get_param_aliases(h)
     var descs = get_param_descs(h)
+    # 决策-104 (上游 0.156.5 / PR #16560): path 参数的 OpenAPI 名 = 路由模板名,
+    # 但**类型/描述/约束**取自**声明名** (声明名 != 模板名时) — 模板名必是
+    # 候选之一 (上游 analyze_param 把 validation_alias 钉成该 choice).
+    var path_map = Dict[String, String]()
+    for pp in path_params:
+        path_map[pp] = ""
+    var path_decl = Dict[String, String]()
+    for kk in type_spec:
+        var phit = pick_path_name(candidates_for(aliases, kk), path_map, kk)
+        if phit != "":
+            path_decl[phit] = kk
     for p in path_params:
+        var decl = p
+        if p in path_decl:
+            decl = path_decl[p]
         var tn = "string"
-        if p in type_spec:
+        if decl in type_spec:
+            tn = type_spec[decl]
+        elif p in type_spec:
             tn = type_spec[p]
         var ds = ""
-        if p in descs:
+        if decl in descs:
+            ds = descs[decl]
+        elif p in descs:
             ds = descs[p]
+        if decl != p and decl in cons:
+            cons[p] = cons[decl]
         params.append(_generate_parameter(p, "path", tn, True, ds, cons))
 
     # _reads_headers
@@ -168,7 +190,10 @@ def _generate_operation(route: Route) raises -> String:
                     if e > b:
                         var hn = String(piece[byte=b:e])
                         # 决策-53 (ADR-0028): _reads_headers 条目 "name=alias" / "name"
-                        var hp = parse_header_entry(hn)
+                        # 决策-104: 多候选 header -> OpenAPI 参数名 = 候选首个
+                        # (上游 _get_param_aliases(...)[0] -> name = choices[0]).
+                        var hparts = header_entry_parts(hn)
+                        var hp = (hparts[0], hparts[1][0])
                         # 决策-54 (ADR-0029): htypes/descs/cons 全部按声明名 keyed —
                         # 查找必须用 hp[0] (声明名), 输出名 = hp[1] (wire).
                         # cons 表: _generate_parameter 按 param_name (wire) 查;
@@ -196,16 +221,23 @@ def _generate_operation(route: Route) raises -> String:
 
     # query params (type_spec 中非 path 的项; 决策-43: name = alias 或 key)
     for k in type_spec:
+        # 决策-104: path 判定纳入**候选** (声明名 != 模板名但候选命中模板名时,
+        # 该参数是 path 参数, 不能再作为 query 参数重复出现 — 修复 OpenAPI
+        # 同名 path+query 双参数).
         var is_path = False
-        for p in path_params:
-            if p == k:
-                is_path = True
+        for c in candidates_for(aliases, k):
+            for p in path_params:
+                if c == p:
+                    is_path = True
+                    break
+            if is_path:
                 break
         if not is_path:
             var ts_str = type_spec[k]
             var name = k
             if k in aliases:
-                name = aliases[k]
+                # 决策-104: 多候选 -> OpenAPI 参数名 = 候选首个 (上游 choices[0])
+                name = first_candidate(candidates_for(aliases, k))
                 # 决策-54: cons 按声明名 keyed, _generate_parameter 按 (alias) 名查 —
                 # 加别名条目 (与 header 分支同型)
                 if k in cons:
@@ -394,7 +426,8 @@ def generate_openapi(router: Router, title: String, version: String, description
                     break
             if not dup:
                 s_names.append(nm)
-                var sch = _openapi_object_schema(router.routes[i].handler.data["_body_schema"])
+                var sch = _openapi_object_schema(router.routes[i].handler.data["_body_schema"],
+                                                 get_body_aliases(router.routes[i].handler))
                 schemas.append("\"" + json_escape(nm) + "\":" + sch)
                 # 决策-86 (ADR-0061): _body_embed -> 单字段包裹 schema
                 # (Body_<name>_<method> = {<embed>: $ref <name>}, 上游 embed 结构).
@@ -453,7 +486,8 @@ def generate_openapi(router: Router, title: String, version: String, description
                     break
             if not dup3:
                 s_names.append(resp_name)
-                var rsch = _openapi_object_schema(router.routes[i].handler.data["_response_schema"])
+                var rsch = _openapi_object_schema(router.routes[i].handler.data["_response_schema"],
+                                                  Dict[String, String]())
                 schemas.append('"' + json_escape(resp_name) + '":' + rsch)
     # 决策-44/69: components = schemas (决策-38) + securitySchemes (有 _auth 路由时)
     var comps = List[String]()

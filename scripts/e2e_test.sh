@@ -1504,17 +1504,24 @@ MP11=$(curl -sS -m 5 -X POST -H 'Content-Type: application/json' --data '{}' "$B
 if [[ "$MP11" == *'"uploadbytes demo"'* && "$MP11" != *'"file_raw"'* ]]; then pass "MP11 all-optional non-multipart CT -> 200 no file_* (U5)"
 else fail "MP11 all-optional non-multipart" "body: ${MP11:0:200}"; fi
 
+# --- 决策-104 (上游 0.156.4 / PR #16557 + 0.156.7 / PR #16564): form/file 参数
+# 的 422 loc 用**别名** (上游 loc = ("body", alias) — fastapi/dependencies/
+# utils.py::request_body_to_args: `alias, value = form_values.get(field.name,
+# (aliases[0], Undefined)); loc = ("body", alias)`), 不是 Python 字段名.
+# _file_aliases=doc=docfile -> 声明名 doc 的 loc = "docfile"; 无别名的 docs
+# 仍是 "docs". (house 旧口径报字段名 — 决策-104 按上游更正.)
 # MP12: required 缺失 (doc + docs) -> 422 ×2 missing (note 提供).
+# doc 有别名 docfile -> loc = ["body","docfile"] (上游 alias 口径, 决策-104).
 MP12_CODE=$(curl -sS -m 5 -o "$TMP/mp12_body" -w '%{http_code}' -X POST -F 'note=n12' "$BASE/upload-file")
 MP12=$(cat "$TMP/mp12_body")
 N12=$(printf '%s' "$MP12" | grep -o '"type":"missing"' | wc -l | tr -d ' ')
-if [[ "$MP12_CODE" == "422" && "$N12" == "2" && "$MP12" == *'"loc":["body","doc"],"'* && "$MP12" == *'"loc":["body","docs"],"'* ]]; then pass "MP12 required missing (doc+docs) -> 422 ×2 missing"
+if [[ "$MP12_CODE" == "422" && "$N12" == "2" && "$MP12" == *'"loc":["body","docfile"],"'* && "$MP12" == *'"loc":["body","docs"],"'* ]]; then pass "MP12 required missing (doc+docs) -> 422 ×2 missing"
 else fail "MP12 required missing" "code=$MP12_CODE n=$N12 body: ${MP12:0:240}"; fi
 
 # MP13: 文本 part -> 声明 file 字段 (alias docfile) -> U2 value_error (上游完整措辞).
 MP13_CODE=$(curl -sS -m 5 -o "$TMP/mp13_body" -w '%{http_code}' -X POST -F 'docfile=txtval' -F 'note=n13' -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
 MP13=$(cat "$TMP/mp13_body")
-if [[ "$MP13_CODE" == "422" && "$MP13" == *'"type":"value_error"'* && "$MP13" == *'Expected UploadFile, received'* && "$MP13" == *'"loc":["body","doc"],"'* && "$MP13" == *'"input":"txtval"'* ]]; then pass "MP13 text part -> file field (alias) -> 422 value_error (U2)"
+if [[ "$MP13_CODE" == "422" && "$MP13" == *'"type":"value_error"'* && "$MP13" == *'Expected UploadFile, received'* && "$MP13" == *'"loc":["body","docfile"],"'* && "$MP13" == *'"input":"txtval"'* ]]; then pass "MP13 text part -> file field (alias) -> 422 value_error (U2)"
 else fail "MP13 value_error" "code=$MP13_CODE body: ${MP13:0:240}"; fi
 
 # MP14: 文件 part -> 声明 form 字段 (note:str) -> U3 string_type, input =
@@ -1575,7 +1582,7 @@ else fail "MP21 openapi jsoncheck" "$(head -c 200 "$TMP/oapi46.json")"; fi
 MP24_CODE=$(curl -sS -m 5 -o "$TMP/mp24_body" -w '%{http_code}' -X POST -F 'docfile=;filename=' -F 'note=n24' "$BASE/upload-file")
 MP24=$(cat "$TMP/mp24_body")
 N24=$(printf '%s' "$MP24" | grep -o '"type":"missing"' | wc -l | tr -d ' ')
-if [[ "$MP24_CODE" == "422" && "$N24" == "2" && "$MP24" == *'"loc":["body","doc"],"'* && "$MP24" == *'"loc":["body","docs"],"'* ]]; then pass "MP24 unselected empty file part -> 422 missing ×2 (doc+docs)"
+if [[ "$MP24_CODE" == "422" && "$N24" == "2" && "$MP24" == *'"loc":["body","docfile"],"'* && "$MP24" == *'"loc":["body","docs"],"'* ]]; then pass "MP24 unselected empty file part -> 422 missing ×2 (doc+docs)"
 else fail "MP24 unselected empty file" "code=$MP24_CODE n=$N24 body: ${MP24:0:240}"; fi
 # MP25: docs:file[] 中空文件 part 被过滤 -> count=1 (s1) + 真文件 doc 正常
 #   (doc 的 wire 名 = alias docfile).
@@ -1638,7 +1645,7 @@ if [[ "$MP23A" == *'"file_doc_filename": "doc.txt"'* && "$MP23A" == *'"uploadfil
 else fail "MP23a alias 200" "body: ${MP23A:0:240}"; fi
 MP23B_CODE=$(curl -sS -m 5 -o "$TMP/mp23b_body" -w '%{http_code}' -X POST -F 'doc=@'"$UP_DIR/doc.txt" -F 'note=n23' -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
 MP23B=$(cat "$TMP/mp23b_body")
-if [[ "$MP23B_CODE" == "422" && "$MP23B" == *'"type":"missing"'* && "$MP23B" == *'"loc":["body","doc"],"'* ]]; then pass "MP23b declared-name as wire (doc) has no binding -> 422 missing"
+if [[ "$MP23B_CODE" == "422" && "$MP23B" == *'"type":"missing"'* && "$MP23B" == *'"loc":["body","docfile"],"'* ]]; then pass "MP23b declared-name as wire (doc) has no binding -> 422 missing"
 else fail "MP23b declared-name no binding" "code=$MP23B_CODE body: ${MP23B:0:240}"; fi
 
 # --- Security (决策-34, Goal-0003 P0): HTTPBasic / HTTPBearer / APIKey --------------
@@ -3587,6 +3594,153 @@ else fail "HD-4 literal header route" "got: ${B:0:220}"; fi
 B=$(curl -s --max-time 10 -H "x_token: 7" "$BASE/con/hdr3")
 if [[ "$B" == *'"header_x_token": "7"'* ]]; then pass "HD-5 literal header route 200 + inject"
 else fail "HD-5 literal header inject" "got: ${B:0:160}"; fi
+
+
+# ============================================================================
+# AL: 决策-104 (上游 0.156.3~0.156.7) AliasChoices 多候选别名
+# 语义 (上游 tests/test_query_alias_choices.py + test_header_cookie_alias_choices.py
+# + test_path_alias_choices.py + test_body_alias_choices.py 逐条对齐):
+#   - 候选按**声明顺序**尝试, 请求中首个出现者生效 (与出现顺序无关);
+#   - 都没出现 -> 第一个候选 (422 loc 用它);
+#   - 422 loc = 命中的候选 (query/header/body/path 各自 in_ 前缀).
+# ============================================================================
+
+# AL-Q1: query 首个候选命中 (?alpha=7) -> q=7 (声明名 key)
+expect_body_contains "AL-Q1 query first choice" '"query_q": "7"' "$BASE/alias/query?alpha=7"
+
+# AL-Q2: query 第二个候选命中 (?beta=9) -> q=9
+expect_body_contains "AL-Q2 query second choice" '"query_q": "9"' "$BASE/alias/query?beta=9"
+
+# AL-Q3: query 候选按**声明序** (上游 test_choices_follow_declaration_order:
+#        ?second=2&first=1 -> first 生效, 与 query 串出现顺序无关)
+expect_body_contains "AL-Q3 query declaration order wins" '"query_q": "1"' "$BASE/alias/query?beta=2&alpha=1"
+
+# AL-Q4: query 无候选命中 -> 422 missing, loc = 第一个候选
+ALQ4=$(http_body "$BASE/alias/query-req?gamma=3")
+if [[ "$ALQ4" == *'"loc":["query","alpha"]'* && "$ALQ4" == *'"type":"missing"'* ]]; then pass "AL-Q4 query missing loc = first choice"
+else fail "AL-Q4 query missing loc" "got: ${ALQ4:0:220}"; fi
+
+# AL-Q5: query 候选值非法 -> 422 int_parsing, loc = 命中候选
+ALQ5=$(http_body "$BASE/alias/query?alpha=abc")
+if [[ "$ALQ5" == *'"loc":["query","alpha"]'* && "$ALQ5" == *'"type":"int_parsing"'* ]]; then pass "AL-Q5 query invalid loc = matched choice"
+else fail "AL-Q5 query invalid loc" "got: ${ALQ5:0:220}"; fi
+
+# AL-Q6: query 第二个候选非法 -> loc = 该候选
+ALQ6=$(http_body "$BASE/alias/query?beta=abc")
+if [[ "$ALQ6" == *'"loc":["query","beta"]'* && "$ALQ6" == *'"type":"int_parsing"'* ]]; then pass "AL-Q6 query invalid loc = second choice"
+else fail "AL-Q6 query invalid loc" "got: ${ALQ6:0:220}"; fi
+
+# AL-Q7: 声明名本身不是候选 (上游 test_individual_missing_uses_first_alias:
+#        {"value": "1"} / {"ignored": "1"} 同样 missing)
+ALQ7=$(http_body "$BASE/alias/query?alpha=1&user_id=zz")
+if [[ "$ALQ7" == *'"query_who": "zz"'* ]]; then pass "AL-Q7 query second param choices"
+else fail "AL-Q7 query second param" "got: ${ALQ7:0:220}"; fi
+
+# AL-H1: header 首个候选 (alt-one) -> 命中
+ALH1=$(curl -s --max-time 10 -H "alt-one: 5" "$BASE/alias/header")
+if [[ "$ALH1" == *'"header_x_alt": "5"'* ]]; then pass "AL-H1 header first choice"
+else fail "AL-H1 header first choice" "got: ${ALH1:0:200}"; fi
+
+# AL-H2: header 第二个候选 (alt_two, **字面名** — 不做下划线转换)
+ALH2=$(curl -s --max-time 10 -H "alt_two: 7" "$BASE/alias/header")
+if [[ "$ALH2" == *'"header_x_alt": "7"'* ]]; then pass "AL-H2 header second choice (literal underscore)"
+else fail "AL-H2 header second choice" "got: ${ALH2:0:200}"; fi
+
+# AL-H3: header 候选按声明序 (上游 test_header_choices_follow_declaration_order)
+ALH3=$(curl -s --max-time 10 -H "alt_two: 2" -H "alt-one: 1" "$BASE/alias/header")
+if [[ "$ALH3" == *'"header_x_alt": "1"'* ]]; then pass "AL-H3 header declaration order wins"
+else fail "AL-H3 header declaration order" "got: ${ALH3:0:200}"; fi
+
+# AL-H4: header 无候选 -> 422 missing, loc = 第一个候选 (上游 X-First 语义)
+ALH4=$(curl -s --max-time 10 -H "x-alt: 9" "$BASE/alias/header")
+if [[ "$ALH4" == *'"loc":["header","alt-one"]'* && "$ALH4" == *'"type":"missing"'* ]]; then pass "AL-H4 header missing loc = first choice"
+else fail "AL-H4 header missing loc" "got: ${ALH4:0:220}"; fi
+
+# AL-H5: header 候选值非法 -> loc = 命中候选
+ALH5=$(curl -s --max-time 10 -H "alt-one: abc" "$BASE/alias/header")
+if [[ "$ALH5" == *'"loc":["header","alt-one"]'* && "$ALH5" == *'"type":"int_parsing"'* ]]; then pass "AL-H5 header invalid loc = matched choice"
+else fail "AL-H5 header invalid loc" "got: ${ALH5:0:220}"; fi
+
+# AL-F1: form 首个候选 (f-one) -> 命中
+expect_body_contains "AL-F1 form first choice" '"form_field": "5"' "$BASE/alias/form" POST 'f-one=5'
+
+# AL-F2: form 第二个候选 (f-two) -> 命中
+expect_body_contains "AL-F2 form second choice" '"form_field": "7"' "$BASE/alias/form" POST 'f-two=7'
+
+# AL-F3: form 候选按声明序
+expect_body_contains "AL-F3 form declaration order wins" '"form_field": "5"' "$BASE/alias/form" POST 'f-two=7&f-one=5'
+
+# AL-F4: form 无候选 -> 声明默认 (field:int=3)
+expect_body_contains "AL-F4 form default when no choice" '"form_field": "3"' "$BASE/alias/form" POST 'other=1'
+
+# AL-F5: form 候选值非法 -> 422 int_parsing, loc = 命中候选
+ALF5=$(http_body "$BASE/alias/form" POST 'f-two=abc')
+if [[ "$ALF5" == *'"loc":["body","f-two"]'* && "$ALF5" == *'"type":"int_parsing"'* ]]; then pass "AL-F5 form invalid loc = matched choice"
+else fail "AL-F5 form invalid loc" "got: ${ALF5:0:220}"; fi
+
+# AL-FL1: file 首个候选 (doc-a) -> 命中 (multipart part 名 = 候选)
+ALFL1=$(curl -sS -m 10 -X POST -F "doc-a=@$UP_DIR/doc.txt" "$BASE/alias/file")
+if [[ "$ALFL1" == *'"file_doc_size": "14"'* ]]; then pass "AL-FL1 file first choice"
+else fail "AL-FL1 file first choice" "body: ${ALFL1:0:220}"; fi
+
+# AL-FL2: file 第二个候选 (doc-b) -> 命中
+ALFL2=$(curl -sS -m 10 -X POST -F "doc-b=@$UP_DIR/doc.txt" "$BASE/alias/file")
+if [[ "$ALFL2" == *'"file_doc_size": "14"'* ]]; then pass "AL-FL2 file second choice"
+else fail "AL-FL2 file second choice" "body: ${ALFL2:0:220}"; fi
+
+# AL-FL3: file 无候选 -> 字段缺席 (可选, 不注入 file_* 键)
+ALFL3=$(curl -sS -m 10 -X POST -F "other=@$UP_DIR/doc.txt" "$BASE/alias/file")
+if [[ "$ALFL3" != *'"file_doc_size"'* ]]; then pass "AL-FL3 file no candidate -> field absent"
+else fail "AL-FL3 file no candidate" "body: ${ALFL3:0:220}"; fi
+
+# AL-B1: body 首个候选 (full_name) -> 命中
+expect_body_contains "AL-B1 body first choice" '"body_name": "x"' "$BASE/alias/body" POST '{"full_name":"x"}'
+
+# AL-B2: body 第二个候选 (nickname) -> 命中
+expect_body_contains "AL-B2 body second choice" '"body_name": "y"' "$BASE/alias/body" POST '{"nickname":"y"}'
+
+# AL-B3: body 候选按声明序 (上游 test_multiple_body_alias_choices:
+#        {"second": 2, "first": 0} -> first 生效)
+expect_body_contains "AL-B3 body declaration order wins" '"body_name": "x"' "$BASE/alias/body" POST '{"nickname":"y","full_name":"x"}'
+
+# AL-B4: body 无候选 -> 422 missing, loc = 第一个候选
+ALB4=$(http_body "$BASE/alias/body" POST '{}')
+if [[ "$ALB4" == *'"loc":["body","full_name"]'* && "$ALB4" == *'"type":"missing"'* ]]; then pass "AL-B4 body missing loc = first choice"
+else fail "AL-B4 body missing loc" "got: ${ALB4:0:220}"; fi
+
+# AL-B5: body 候选值类型错 -> 422 string_type, loc = 命中候选
+ALB5=$(http_body "$BASE/alias/body" POST '{"nickname":123}')
+if [[ "$ALB5" == *'"loc":["body","nickname"]'* && "$ALB5" == *'"type":"string_type"'* ]]; then pass "AL-B5 body invalid loc = matched choice"
+else fail "AL-B5 body invalid loc" "got: ${ALB5:0:220}"; fi
+
+# AL-P1: path 候选 = 路由模板名 -> 命中 (上游 /items/{item_id})
+expect_body_contains "AL-P1 path choice from template" '"item_id": "42"' "$BASE/alias/path/42"
+
+# AL-P2: path 值非法 -> 422 int_parsing, loc = 命中的模板名
+ALP2=$(http_body "$BASE/alias/path/abc")
+if [[ "$ALP2" == *'"loc":["path","item_id"]'* && "$ALP2" == *'"type":"int_parsing"'* ]]; then pass "AL-P2 path invalid loc = route param name"
+else fail "AL-P2 path invalid loc" "got: ${ALP2:0:220}"; fi
+
+# AL-P3: path 声明名与模板名不同 -> 值按模板名取, 声明名也绑定一份
+ALP3=$(http_body "$BASE/alias/path2/42")
+if [[ "$ALP3" == *'"item_id": "42"'* && "$ALP3" == *'"id": "42"'* ]]; then pass "AL-P3 path declared-name binding"
+else fail "AL-P3 path declared-name binding" "got: ${ALP3:0:220}"; fi
+
+# AL-P4: path 声明名不同 -> 422 loc = 命中的模板名
+ALP4=$(http_body "$BASE/alias/path2/abc")
+if [[ "$ALP4" == *'"loc":["path","item_id"]'* && "$ALP4" == *'"type":"int_parsing"'* ]]; then pass "AL-P4 path loc = route param name (declared alias)"
+else fail "AL-P4 path loc" "got: ${ALP4:0:220}"; fi
+
+# AL-OA: OpenAPI 参数名/属性名 = 候选**首个** (上游 _get_param_aliases(...)[0])
+curl -sS -m 10 "$BASE/openapi.json" -o "$TMP/oapi_alias.json"
+if grep -q '"name":"alpha","in":"query"' "$TMP/oapi_alias.json" \
+   && grep -q '"name":"alt-one","in":"header"' "$TMP/oapi_alias.json" \
+   && grep -q '"full_name":' "$TMP/oapi_alias.json" \
+   && grep -q '"f-one":' "$TMP/oapi_alias.json" \
+   && grep -q '"doc-a":' "$TMP/oapi_alias.json"; then pass "AL-OA openapi names = first choice (query/header/body/form/file)"
+else fail "AL-OA openapi names" "got: $(head -c 200 "$TMP/oapi_alias.json")"; fi
+if "$FMTOOL" jsoncheck "$TMP/oapi_alias.json" >/dev/null; then pass "AL-OA openapi.json valid JSON"
+else fail "AL-OA openapi jsoncheck" "$(head -c 200 "$TMP/oapi_alias.json")"; fi
 
 
 # --- User middleware (决策-55, ADR-0030, Goal-0003 矩阵 #14) ---------------------

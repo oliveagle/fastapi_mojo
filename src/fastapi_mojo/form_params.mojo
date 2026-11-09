@@ -35,6 +35,7 @@ from params_typed import parse_type_spec, parse_base, parse_typed_value
 from params_query_extra import (parse_table, split_csv, join_values,
                                 is_list_spec, has_eq, default_part,
                                 list_default_csv, get_param_descs)
+from alias_choices import (candidates_for, pick_in_multi, first_candidate)
 from json import json_escape
 from scalar_types import is_scalar_type, scalar_canonical, scalar_openapi_schema, parse_scalar, scalar_error_object
 
@@ -148,14 +149,20 @@ def validate_form_collect(type_spec: Dict[String, String],
         var spec = type_spec[k]
         var ts = parse_type_spec(spec)
         var pb = parse_base(ts.base_type)
-        var loc = "[\"body\",\"" + json_escape(k) + "\"]"
+        # 决策-104 (上游 0.156.4 / PR #16557 + 0.156.7 / PR #16564):
+        # 多候选别名 (AliasChoices) — 按候选序取**首个有值**者 (上游
+        # _extract_form_items: 首个有值即 yield 并 break, 后续别名留给别的
+        # 字段 / extra 校验); 都没值 -> 第一个候选 (loc / 默认来源).
+        var cands = candidates_for(aliases, k)
+        var lookup = pick_in_multi(cands, multi, not ts.is_list)
+        var has_wire = lookup != ""
+        var loc_name = first_candidate(cands)
+        if has_wire:
+            loc_name = lookup
+        var loc = "[\"body\",\"" + json_escape(loc_name) + "\"]"
         if not pb.ok:
             errs.append(_fe(loc, "unknown type for parameter '" + k + "': " + ts.base_type, "unknown_type", "null"))
             continue
-        var lookup = k
-        if k in aliases:
-            lookup = aliases[k]
-        var has_wire = lookup in multi
         if ts.is_list:
             var vals: List[String]
             if has_wire:
@@ -171,7 +178,7 @@ def validate_form_collect(type_spec: Dict[String, String],
                 if pb.type_name != "string" and pb.type_name != "str":
                     var pr = parse_typed_value(pb.type_name, v)
                     if not pr[0]:
-                        var eloc = "[\"body\",\"" + json_escape(k) + "\"," + String(i) + "]"
+                        var eloc = "[\"body\",\"" + json_escape(loc_name) + "\"," + String(i) + "]"
                         if is_scalar_type(pb.type_name):
                             errs.append(scalar_error_object(eloc, v, parse_scalar(pb.type_name, v)))
                         else:
@@ -241,10 +248,11 @@ def apply_form_extras(mut params: Dict[String, String],
         var pb2 = parse_base(ts2.base_type)
         if pb2.ok and (pb2.type_name == "int" or pb2.type_name == "float" or pb2.type_name == "bool"):
             canon = pb2.type_name
-        var lookup = k
-        if k in aliases:
-            lookup = aliases[k]
-        var has_wire = lookup in multi
+        # 决策-104: 候选序命中 (首个有值者生效; 标量空串视为缺席 — 上游
+        # 0.149.0 空标量视为缺失, 故标量用 skip_empty=True).
+        var cands = candidates_for(aliases, k)
+        var lookup = pick_in_multi(cands, multi, not is_list_spec(spec))
+        var has_wire = lookup != ""
         if is_list_spec(spec):
             var lv = ""
             if has_wire:
@@ -405,6 +413,9 @@ def form_openapi_schema(handler: Handler, method: String) raises -> String:
     var name = "Body_" + handler.name + "_" + lower_ascii(method)
 
     var types = get_form_types(handler)
+    # 决策-104: 多候选别名 -> OpenAPI 属性名 = 候选**首个** (上游
+    # validation_alias.choices[0]; multipart 面同款见 openapi_multipart).
+    var fal = get_form_aliases(handler)
     var descs = get_param_descs(handler)
     var out = "{\"type\":\"object\",\"title\":\"" + json_escape(name) + "\",\"properties\":{"
     var names = form_field_names_ordered(handler)
@@ -414,14 +425,17 @@ def form_openapi_schema(handler: Handler, method: String) raises -> String:
         if not first:
             out = out + ","
         first = False
+        var prop = n
+        if n in fal:
+            prop = first_candidate(candidates_for(fal, n))
         if n in types:
             var spec = types[n]
             var desc = ""
             if n in descs:
                 desc = descs[n]
-            out = out + "\"" + json_escape(n) + "\":" + _openapi_form_field_schema(n, spec, desc)
+            out = out + "\"" + json_escape(prop) + "\":" + _openapi_form_field_schema(prop, spec, desc)
         else:
-            out = out + "\"" + json_escape(n) + "\":{" + "\"type\":\"string\",\"title\":\"" + json_escape(_cap_name(n)) + "\"}"
+            out = out + "\"" + json_escape(prop) + "\":{" + "\"type\":\"string\",\"title\":\"" + json_escape(_cap_name(prop)) + "\"}"
     out = out + "}}"
     return out^
 

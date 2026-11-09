@@ -30,6 +30,7 @@
 
 from router import Router
 from handler import Handler
+from alias_choices import alias_candidates
 
 
 def header_wire_name(name: String) -> String:
@@ -67,6 +68,45 @@ def parse_header_entry(entry: String) -> Tuple[String, String]:
     var nm = String(entry[byte=0:eq])
     var al = String(entry[byte=eq + 1:n])
     return (nm, al)
+
+
+def header_entry_parts(entry: String) -> Tuple[String, List[String]]:
+    """_reads_headers 条目 -> (声明名, wire 候选列表) (决策-104 AliasChoices).
+
+    "name"       -> (name, [header_wire_name(name)])  (convert_underscores=True)
+    "name=alias" -> (name, ["alias"])                 (显式别名原样, P25-3)
+    "name=a|b"   -> (name, ["a", "b"])                (多候选: **字面名**,
+                    上游 "Explicit choices are literal names, including
+                    underscores in headers" — 候选不做下划线转换)."""
+    var n = entry.byte_length()
+    var eq = -1
+    var i = 0
+    while i < n:
+        if ord(entry[byte=i]) == 61:  # '='
+            eq = i
+            break
+        i += 1
+    if eq < 0:
+        var out0 = List[String]()
+        out0.append(header_wire_name(entry))
+        return (entry, out0^)
+    var nm = String(entry[byte=0:eq])
+    var al = String(entry[byte=eq + 1:n])
+    if al == "":
+        var out1 = List[String]()
+        out1.append(header_wire_name(nm))
+        return (nm, out1^)
+    var cands = alias_candidates(al)
+    if len(cands) == 0:
+        cands.append(al)
+    return (nm, cands^)
+
+
+def header_candidates(entry: String) -> List[String]:
+    """_reads_headers 条目 -> wire 候选列表 (决策-104; 便捷入口)."""
+    var parts = header_entry_parts(entry)
+    var cands = parts[1].copy()
+    return cands^
 
 
 def header_loc_name(name: String, reads: Dict[String, String]) raises -> String:

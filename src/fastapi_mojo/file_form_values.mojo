@@ -21,6 +21,7 @@ from handler import Handler
 from json import json_escape
 from file_params import (get_file_types, get_file_aliases, _parse_file_spec,
                          _b64_encode)
+from alias_choices import candidates_for, pick_in_multi
 
 
 def _fe(loc: String, msg: String, type_name: String, input_json: String) -> String:
@@ -87,10 +88,11 @@ def validate_file_collect_form(type_spec: Dict[String, String],
             errs.append(_fe(loc, "unknown type for parameter '" + k + "': " + base,
             "unknown_type", "null"))
             continue
-        var lookup = k
-        if k in aliases:
-            lookup = aliases[k]
-        if not (lookup in multi):
+        # 决策-104: 候选序命中 (首个有值者生效; 标量空串视为缺席 — 上游
+        # _get_multidict_value 单值分支 "" -> Undefined).
+        var cands = candidates_for(aliases, k)
+        var lookup = pick_in_multi(cands, multi, not fs[1])
+        if lookup == "":
             if not fs[2]:
                 errs.append(_fe(loc, "Field required", "missing", "null"))
             continue
@@ -127,10 +129,10 @@ def apply_file_form_values(mut params: Dict[String, String], handler: Handler,
         var fs = _parse_file_spec(types[k])
         if fs[0] != "bytes":
             continue
-        var lookup = k
-        if k in aliases:
-            lookup = aliases[k]
-        if not (lookup in multi):
+        # 决策-104: 候选序命中 (首个有值者生效)
+        var cands = candidates_for(aliases, k)
+        var lookup = pick_in_multi(cands, multi, not fs[1])
+        if lookup == "":
             continue
         var vals = multi[lookup].copy()
         var last = vals[len(vals) - 1]
