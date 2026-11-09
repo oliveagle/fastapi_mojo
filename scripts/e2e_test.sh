@@ -1787,6 +1787,28 @@ expect_body_contains "RMB-1 by_alias true renames to alias" '"fullName": "y", "a
 expect_body_contains "RMB-2 by_alias false keeps field name" '"full_name": "y", "age": 0' "$BASE/rm/noalias" POST '{"full_name":"y"}'
 expect_body_contains "RMB-3 by_alias int field typed" '"fullName": "y", "age": 3' "$BASE/rm/alias" POST '{"full_name":"y","age":3}'
 
+# --- OpenAPI response schema $ref (决策-95, ADR-0065 §8 #1) --------------------------
+# _response_schema 声明的 handler, OpenAPI responses 必须用
+#   {"$ref":"#/components/schemas/<handler>_response"} 引用 components/schemas 条目.
+# 回归: 决策-95 初版 ($ref 拼成字符串 + 少一个右括号) 使整份 /openapi.json 非法 JSON,
+#       连带把 path item / operation 对象也吞掉 -> jsoncheck 全量失败.
+echo "== OpenAPI response schema \$ref (决策-95) =="
+RMOA=$(curl -sS -m 5 "$BASE/openapi.json")
+if [[ "$RMOA" == *'"schema":{"$ref":"#/components/schemas/rm_indep_response"}'* ]]; then
+    pass "RMOA-1 openapi response schema uses \$ref to _response schema"
+else fail "RMOA-1 openapi response schema \$ref" "missing ref (got: ${RMOA:0:200})"; fi
+if [[ "$RMOA" == *'"rm_indep_response":{"type":"object"'* ]]; then
+    pass "RMOA-2 openapi components has <handler>_response schema"
+else fail "RMOA-2 openapi components _response schema" "missing component"; fi
+if [[ "$RMOA" == *'"is_admin":{"type":"boolean"'* ]]; then
+    pass "RMOA-3 openapi _response schema keeps independent field (is_admin)"
+else fail "RMOA-3 openapi _response schema field" "missing is_admin"; fi
+# 整份文档必须是合法 JSON (fmtool jsoncheck, python-free) — 决策-95 回归护栏.
+curl -sS -m 5 "$BASE/openapi.json" > "$TMP/oapi_rmoa.json"
+if "$FMTOOL" jsoncheck "$TMP/oapi_rmoa.json" >/dev/null; then
+    pass "RMOA-4 openapi.json valid JSON after _response_schema ref (jsoncheck)"
+else fail "RMOA-4 openapi.json jsoncheck" "$(head -c 200 "$TMP/oapi_rmoa.json")"; fi
+
 # --- lifespan (决策-36, Goal-0003 P1) -------------------------------------------------
 # FastAPI `lifespan` 上下文管理器: yield 前 = startup, yield 后 = shutdown;
 # 每进程一次; startup 失败 -> 服务不启动 (进程退出).

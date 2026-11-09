@@ -276,11 +276,11 @@ def _generate_operation(route: Route) raises -> String:
     var resp_schema_ref = ""
     if "_response_schema" in h.data and h.data["_response_schema"] != "":
         var resp_name = h.name + "_response"
-        resp_schema_ref = "\"$ref\":\"#/components/schemas/" + json_escape(resp_name) + "\""
+        resp_schema_ref = "{\"$ref\":\"#/components/schemas/" + json_escape(resp_name) + "\"}"
     if resp_schema_ref != "":
-        responses.append('"' + pk + ':{"description":"' + json_escape(rd) + ',"content":{"application/json":{"schema":"' + resp_schema_ref + '"}}')
+        responses.append('"' + pk + '":{"description":"' + json_escape(rd) + '","content":{"application/json":{"schema":' + resp_schema_ref + '}}}')
     else:
-        responses.append('"' + pk + ':{"description":"' + json_escape(rd) + ',"content":{"application/json":{"schema":{"type":"object"}}}}')
+        responses.append('"' + pk + '":{"description":"' + json_escape(rd) + '","content":{"application/json":{"schema":{"type":"object"}}}}')
     if "_responses" in h.data and h.data["_responses"] != "":
         var extra = parse_response_entries(h.data["_responses"])
         for i in range(len(extra)):
@@ -454,7 +454,7 @@ def generate_openapi(router: Router, title: String, version: String, description
             if not dup3:
                 s_names.append(resp_name)
                 var rsch = _openapi_object_schema(router.routes[i].handler.data["_response_schema"])
-                schemas.append('"' + json_escape(resp_name) + ':"' + rsch)
+                schemas.append('"' + json_escape(resp_name) + '":' + rsch)
     # 决策-44/69: components = schemas (决策-38) + securitySchemes (有 _auth 路由时)
     var comps = List[String]()
     if len(schemas) > 0:
