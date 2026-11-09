@@ -12,6 +12,17 @@
 #     convert_underscores=False 逃生门)
 #   - check_header_specs — 注册期校验 (畸形条目启动即 fail,
 #     check_ws_specs/check_state_specs/check_openapi_specs 同策略)
+#   - header_loc_name — header 422 loc 用的 **HTTP header 名** (决策-103,
+#     上游 0.152.0 / PR #16538: loc 报 HTTP header 名而非 Python 字段名;
+#     显式别名原样保留, 默认 `_`→`-`)
+#
+# 决策-103 (上游 0.152.0): 上游把 header 参数的校验错误 loc 从 Python
+# 字段名 (int_val) 改为 HTTP header 名 (int-val); 显式别名、
+# convert_underscores=False、loc_by_alias=False 保持原行为。fastapi_mojo
+# 的 header 参数是扁平声明 (_reads_headers + _header_types), loc 早已用
+# wire 名; 本次补齐两处缺口: ① 退化态 (只声明 _header_types 而未在
+# _reads_headers 出现) 的 loc 也用 HTTP header 名; ② 该退化态改为
+# 注册期 fail fast (声明了类型却从不读该 header -> 永远 missing 422).
 #
 # 上游探测: /tmp/exch_probe/p25*.py (fastapi 0.141.1 / uvicorn 0.52.4,
 # 细节与偏差见 ADR-0028 §1/§3.5)。大小写不敏感匹配 + 多值取首 = bridge
@@ -58,6 +69,77 @@ def parse_header_entry(entry: String) -> Tuple[String, String]:
     return (nm, al)
 
 
+def header_loc_name(name: String, reads: Dict[String, String]) raises -> String:
+    """Header 422 loc 用的 **HTTP header 名** (上游 0.152.0 / PR #16538:
+    "Validation errors for header parameter models now report the HTTP
+    header name, such as `int-val`, instead of the Python field name,
+    `int_val`"). 规则:
+      - 显式别名 (_reads_headers 的 "name=alias") -> alias 原样
+        (上游 "Explicit aliases ... keep their existing behavior");
+      - 否则 -> 参数名 `_` -> `-` (上游 convert_underscores=True 默认;
+        convert_underscores=False 的逃生门 = "name=name" 显式字面).
+    reads = _reads_headers 解析结果 (参数名 -> wire 名)."""
+    if name in reads:
+        return reads[name]
+    return header_wire_name(name)
+
+
+def _header_type_names(spec: String) -> List[String]:
+    """_header_types 声明的**参数名**列表 ("a:int;b:str=ab" -> ["a","b"]).
+    分隔 ';' (59), 键值分隔 '=' (58); 与 get_header_types 的
+    parse_table(spec, 59, 58, True) 同规则 (无 '=' / 空键跳过; 不 trim).
+    本地实现 (保持本模块纯函数依赖面 — 不引 params_query_extra)."""
+    var out = List[String]()
+    var n = spec.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(spec[byte=i]) == 59)
+        if is_sep:
+            if i > start:
+                var piece = String(spec[byte=start:i])
+                var pn = piece.byte_length()
+                var eq = -1
+                var j = 0
+                while j < pn:
+                    if ord(piece[byte=j]) == 58:
+                        eq = j
+                        break
+                    j += 1
+                if eq > 0:
+                    out.append(String(piece[byte=0:eq]))
+        start = i + 1
+        i += 1
+    return out^
+
+
+def _reads_param_names(csv: String) -> List[String]:
+    """_reads_headers CSV -> 参数名列表 (条目 "name" / "name=alias" 的 name
+    部分; 空条目跳过). 与 parse_reads_headers (param_constraints) 同规则;
+    本地实现避免反向依赖 (param_constraints 已 import 本模块)."""
+    var out = List[String]()
+    var n = csv.byte_length()
+    var start = 0
+    var i = 0
+    while i <= n:
+        var is_sep = (i == n) or (ord(csv[byte=i]) == 44)
+        if is_sep:
+            if i > start:
+                var t = String(csv[byte=start:i])
+                var b = 0
+                var e = t.byte_length()
+                while b < e and (ord(t[byte=b]) == 32 or ord(t[byte=b]) == 9):
+                    b += 1
+                while e > b and (ord(t[byte=e - 1]) == 32 or ord(t[byte=e - 1]) == 9):
+                    e -= 1
+                if e > b:
+                    var pe = parse_header_entry(String(t[byte=b:e]))
+                    out.append(pe[0])
+        start = i + 1
+        i += 1
+    return out^
+
+
 def _valid_header_token(s: String) -> Bool:
     """header 名最小合法性: 非空, 仅可打印非空白 ASCII (0x21-0x7E).
     (RFC 7230 token 粗检 — 拒绝空白/控制字符, 不放行 '=' 由条目
@@ -81,6 +163,23 @@ def check_header_specs(router: Router) raises:
     均非空; 可打印非空白 ASCII). 空条目跳过 (既有行为)."""
     for i in range(router.route_count()):
         var h = router.routes[i].handler.copy()
+        # 决策-103 (上游 0.152.0): _header_types 的每个名字必须在
+        # _reads_headers 的参数名集合内 — 否则该 header 永不读取 (永远
+        # missing 422), 且 422 loc 的 HTTP header 名无从确定 -> 启动即
+        # fail (与畸形 _reads_headers 同策略).
+        if "_header_types" in h.data and h.data["_header_types"] != "":
+            var reads_csv = ""
+            if "_reads_headers" in h.data:
+                reads_csv = h.data["_reads_headers"]
+            var read_names = _reads_param_names(reads_csv)
+            for tn in _header_type_names(h.data["_header_types"]):
+                var found = False
+                for rn in read_names:
+                    if rn == tn:
+                        found = True
+                if not found:
+                    raise Error("header: _header_types name not in _reads_headers: "
+                                + tn + " in " + h.name)
         if "_reads_headers" not in h.data:
             continue
         var entries = h.data["_reads_headers"].split(",")

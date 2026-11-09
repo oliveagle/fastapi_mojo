@@ -18,6 +18,7 @@ from json import json_escape
 from param_constraints import (_pe, _pe_ctx, _rgx_match, parse_constraint_entry,
                                check_num_constraints, check_str_constraints)
 from params_query_extra import split_csv, join_values
+from header_params import header_loc_name
 from scalar_types import is_scalar_type, parse_scalar, scalar_error_object
 
 def _canon_hdr(type_name: String, v: String) -> String:
@@ -76,9 +77,9 @@ def validate_headers_collect(header_types: Dict[String, String],
     for name in header_types:
         var ts = parse_type_spec(header_types[name])
         var pb = parse_base(ts.base_type)
-        var wire = name
-        if name in reads:
-            wire = reads[name]
+        # 决策-103 (上游 0.152.0): loc 报 **HTTP header 名** (显式别名
+        # 原样; 否则 `_`->`-`), 而非 Python 字段名.
+        var wire = header_loc_name(name, reads)
         var loc = "[\"header\",\"" + json_escape(wire) + "\"]"
         if name not in present:
             if not ts.has_default():

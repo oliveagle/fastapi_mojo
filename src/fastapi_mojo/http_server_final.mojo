@@ -1288,6 +1288,14 @@ def register_routes(mut router: Router) raises:
     con5.set_data("_param_constraints", "x-ver=ge=1,le=3,mo=1;tag=len=1-2,pat=^[0-9a-z]+$")
     router.add_route("/con/hdr2", "GET", con5)
 
+    # 决策-103 (上游 0.152.0): convert_underscores=False 逃生门 — header 名
+    # 保留字面下划线 ("x_token=x_token"), 422 loc 报字面 HTTP header 名
+    # (上游: convert_underscores=False 保持原行为).
+    var con7 = Handler(KIND_ECHO(), "con_hdr_underscore")
+    con7.set_data("_reads_headers", "x_token=x_token")
+    con7.set_data("_header_types", "x_token:int")
+    router.add_route("/con/hdr3", "GET", con7)
+
     # /con/all/{n}: collect-all 群序断言路由 (ADR-0029 §7 增补, 超出 §3.7 五路由)
     # — 一个请求同时违 path (n=1<gt=3) + query (q=200>lt=100) + header (x-h
     # 缺失, 默认 2 违 ge=5, input=2 数字) -> detail 数组 path→query→header

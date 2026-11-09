@@ -42,6 +42,9 @@
 #   - UploadFile 对象 API: _file_types file/bytes + 422 (U2 value_error / U3 string_type /
 #     U4 last-wins / U5 全缺失) + _file_ops (head/range/sha256/save) + multipart OpenAPI
 #     (决策-46, MP8..MP23b; size = 实际字节 U1; MP1..MP7 决策-32 存量)
+#   - header 校验 422 的 loc 用 HTTP header 名 (上游 0.152.0 / PR #16538):
+#     默认 `_`->`-` (x_token -> x-token); 显式别名原样; convert_underscores=False
+#     逃生门保留字面下划线 (决策-103, HD-1..HD-5)
 #   - bytes 列表字段 (上游 list[bytes] | None = File(None)): multipart 文本 part 一律
 #     保留 (含空 -> size 0) / 未选文件输入被过滤; urlencoded 空串保留为 1 个空元素,
 #     缺失则字段缺席; urlencoded 字符串送 file 字段 -> 422 value_error
@@ -3547,6 +3550,43 @@ else fail "CP-23 openapi implicit str" "$(head -c 200 "$TMP/oa54a.json")"; fi
 B=$(curl -s --max-time 10 "$BASE/typed?count=abc&verbose=true")
 if [[ "$B" == *'"loc":["query","count"],"msg":"Input should be a valid integer, unable to parse string as an integer","type":"int_parsing","input":"abc"'* ]]; then pass "CP-24 /typed int_parsing full msg regression"
 else fail "CP-24 /typed regression" "got: ${B:0:200}"; fi
+
+
+# ============================================================================
+# HD: 决策-103 (上游 0.152.0 / PR #16538) header 校验 422 的 loc 用
+# **HTTP header 名** (而非 Python 字段名): 显式别名原样保留; 默认 `_`->`-`;
+# convert_underscores=False 逃生门 ("name=name") 保留字面下划线.
+# (e2e 5 checks)
+# ============================================================================
+
+# HD-1: /con/hdr x-token:abc → loc = ["header","x-token"] (默认下划线->连字符
+#        = HTTP header 名; 上游 int_val -> int-val)
+B=$(curl -s --max-time 10 -H "x-token: abc" "$BASE/con/hdr")
+if [[ "$B" == *'"loc":["header","x-token"]'* && "$B" == *'"type":"int_parsing"'* ]]; then pass "HD-1 header loc = HTTP header name (x-token)"
+else fail "HD-1 header loc wire" "got: ${B:0:220}"; fi
+
+# HD-2: /con/hdr2 X-Ver:abc → 显式别名原样保留 (上游 "Explicit aliases keep
+#        their existing behavior")
+B=$(curl -s --max-time 10 -H "X-Ver: abc" "$BASE/con/hdr2")
+if [[ "$B" == *'"loc":["header","X-Ver"]'* && "$B" == *'"type":"int_parsing"'* ]]; then pass "HD-2 header loc keeps explicit alias (X-Ver)"
+else fail "HD-2 header loc alias" "got: ${B:0:220}"; fi
+
+# HD-3: /con/hdr3 x_token:abc → convert_underscores=False 逃生门 → loc 保留
+#        字面下划线 (上游 convert_underscores=False 保持原行为)
+B=$(curl -s --max-time 10 -H "x_token: abc" "$BASE/con/hdr3")
+if [[ "$B" == *'"loc":["header","x_token"]'* && "$B" == *'"type":"int_parsing"'* ]]; then pass "HD-3 header loc literal underscore (convert_underscores=False)"
+else fail "HD-3 header loc literal" "got: ${B:0:220}"; fi
+
+# HD-4: /con/hdr3 x-token:7 → 该路由读的是字面 "x_token" 头, 默认转换名
+#        "x-token" 不生效 → 缺失 422 (loc 仍为字面名)
+B=$(curl -s --max-time 10 -H "x-token: 7" "$BASE/con/hdr3")
+if [[ "$B" == *'"loc":["header","x_token"]'* && "$B" == *'"type":"missing"'* ]]; then pass "HD-4 literal header route ignores dashed name (missing)"
+else fail "HD-4 literal header route" "got: ${B:0:220}"; fi
+
+# HD-5: /con/hdr3 x_token:7 → 200 + 注入字面头值
+B=$(curl -s --max-time 10 -H "x_token: 7" "$BASE/con/hdr3")
+if [[ "$B" == *'"header_x_token": "7"'* ]]; then pass "HD-5 literal header route 200 + inject"
+else fail "HD-5 literal header inject" "got: ${B:0:160}"; fi
 
 
 # --- User middleware (决策-55, ADR-0030, Goal-0003 矩阵 #14) ---------------------

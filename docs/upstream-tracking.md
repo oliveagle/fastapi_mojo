@@ -11,12 +11,12 @@
 | 主题 | 行数 | ✅ | 🔶 | ❌ | ➖ |
 |------|------|----|----|----|----|
 | A. Form/参数模型语义 | 14 | 3 | 3 | 6 | 2 |
-| B. AliasChoices/参数元数据 | 11 | 0 | 3 | 8 | 0 |
+| B. AliasChoices/参数元数据 | 11 | 1 | 3 | 7 | 0 |
 | C. 序列化/body/文件 | 4 | 1 | 1 | 1 | 1 |
 | D. WebSocket 安全依赖 | 1 | 0 | 0 | 1 | 0 |
 | E. OpenTelemetry | 5 | 0 | 1 | 0 | 4 |
 | F. 框架杂项 | 6 | 1 | 0 | 1 | 4 |
-| **合计** | **41** | **5** | **8** | **17** | **11** |
+| **合计** | **41** | **6** | **8** | **16** | **11** |
 
 > 注：0.142.0 有 2 条 Refactors（docs 前端），0.143.4 为可选依赖升级（httpx2），
 > 0.147.0 被 0.162.0 反转，不计入差距。功能改动合计 45 条；下表按行计 41 项
@@ -55,7 +55,7 @@
 | 0.156.5 | AliasChoices（path 参数） | ❌ | 同上 |
 | 0.156.6 | 模型 alias 设置应用于 query/header/cookie | ❌ | 模型级 alias 缺席 |
 | 0.156.7 | form/file AliasChoices 校验错误位置修复 | ❌ | 随 AliasChoices 一起 |
-| 0.152.0 | header model 校验错误报告 HTTP header 名 | ❌ | **待实现**：header 校验 loc 用 header 名（当前 _reads_headers 无 422 校验） |
+| 0.152.0 | header model 校验错误报告 HTTP header 名 | ✅ | 决策-103：header 校验 422 的 loc 统一用 **HTTP header 名**（上游 PR #16538 —— loc 报 HTTP header 名而非 Python 字段名）：默认 `_`→`-`（上游 convert_underscores=True 默认）、**显式别名原样保留**（上游 "Explicit aliases keep their existing behavior"）、convert_underscores=False 逃生门（`_reads_headers` 的 `name=name`）保留字面下划线；退化态（只声明 `_header_types` 而未出现在 `_reads_headers`）改**注册期 fail fast**（声明了类型却从不读该 header → 永远 missing 422）。注：上游的 header **model**（BaseModel 作为 Header 参数 + 模型级 extra/校验器）本身 fastapi_mojo 无该概念（扁平声明），模型组合语义归 0.157.0 项。e2e HD-1~5 |
 
 ## C. 序列化 / body / 文件
 
@@ -98,7 +98,7 @@
 1. ~~**0.149.0** form 空标量视为缺失~~ ✅ 已完成（e2e FM-21~25）
 2. ~~**0.150.0** 未选择文件输入视为缺失~~ ✅ 已完成（e2e MP-24/25，含 list count/list_json 过滤）
 3. ~~**0.143.5** byte 文件列表空值（file_params.mojo）~~ ✅ 已完成（决策-102，e2e MP-26~31）
-4. **0.152.0** header model 校验错误报告 header 名（header_params）
+4. ~~**0.152.0** header model 校验错误报告 header 名（header_params）~~ ✅ 已完成（决策-103，e2e HD-1~5；header 422 loc 统一用 HTTP header 名）
 5. **0.156.3~7** AliasChoices 多候选别名（params/form/body 全类型）
 6. **0.151.0** JSON null vs omitted body（json_canon）
 7. **0.158.1** OpenAPI form media types 保留
@@ -107,4 +107,4 @@
 10. 模型组合/可选/union 系列（0.157~0.161，需新增声明语法）
 
 ---
-*更新：2026-11-10（0.149.0/0.150.0/0.143.5 闭环；合计 41 行 ✅=5 / 🔶=8 / ❌=17 / ➖=11，计数与各节表格对齐）。数据源：fastapi/fastapi GitHub releases（0.141.1→0.162.2，44 releases）。*
+*更新：2026-11-10（0.149.0/0.150.0/0.143.5/0.152.0 闭环；合计 41 行 ✅=6 / 🔶=8 / ❌=16 / ➖=11，计数与各节表格对齐）。数据源：fastapi/fastapi GitHub releases（0.141.1→0.162.2，44 releases）。*

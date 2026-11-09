@@ -4,12 +4,13 @@
 # main 只调纯函数, 不触 FFI 闭包; ws_directives_selftest /
 # openapi_custom_selftest 同模式). 覆盖:
 #   header_wire_name (P25-1/4 全向量) / parse_header_entry (name /
-#   alias / n=n 字面) / check_header_specs (合法通过 + 畸形 raise ×6).
+#   alias / n=n 字面) / check_header_specs (合法通过 + 畸形 raise ×6)
+#   + header_loc_name (决策-103 上游 0.152.0: loc 用 HTTP header 名).
 
 import std.os
 
 from header_params import (header_wire_name, parse_header_entry,
-                           check_header_specs)
+                           check_header_specs, header_loc_name)
 from router import Router
 from handler import Handler, KIND_ECHO
 
@@ -133,5 +134,52 @@ def main() raises:
     except:
         raised6 = True
     check(raised6, "bad 控制字符 raise")
+
+    # ---------- 决策-103 (上游 0.152.0): header_loc_name ----------
+    # loc 报 HTTP header 名: 显式别名原样; 否则 `_`->`-`.
+    var rd = Dict[String, String]()
+    rd["x_token"] = "x-token"
+    rd["x-ver"] = "X-Ver"
+    rd["lit"] = "lit_underscore"
+    check(header_loc_name("x_token", rd) == "x-token", "loc 默认 wire 名")
+    check(header_loc_name("x-ver", rd) == "X-Ver", "loc 显式别名原样")
+    check(header_loc_name("lit", rd) == "lit_underscore", "loc 字面下划线别名原样")
+    var rd_empty = Dict[String, String]()
+    check(header_loc_name("x_token", rd_empty) == "x-token",
+          "loc 退化态也用 HTTP header 名 (下划线->连字符)")
+    check(header_loc_name("X-Id", rd_empty) == "X-Id", "loc 无下划线原样")
+
+    # ---------- 决策-103: _header_types 交叉校验 ----------
+    # _header_types 的名字必须在 _reads_headers 的参数名集合内
+    var ok5 = Handler(KIND_ECHO(), "ok5")
+    ok5.set_data("_reads_headers", "x_token,x-app")
+    ok5.set_data("_header_types", "x_token:int;x-app:bool=true")
+    var r2 = Router()
+    r2.add_route("/e", "GET", ok5)
+    check_header_specs(r2)  # 不应 raise
+    check(True, "交叉校验一致通过")
+
+    var raised7 = False
+    var bad7 = Router()
+    var b7 = Handler(KIND_ECHO(), "b7")
+    b7.set_data("_reads_headers", "x_token")
+    b7.set_data("_header_types", "x_other:int")
+    bad7.add_route("/x7", "GET", b7)
+    try:
+        check_header_specs(bad7)
+    except:
+        raised7 = True
+    check(raised7, "交叉校验: _header_types 名字未在 _reads_headers -> raise")
+
+    var raised8 = False
+    var bad8 = Router()
+    var b8 = Handler(KIND_ECHO(), "b8")
+    b8.set_data("_header_types", "x_token:int")
+    bad8.add_route("/x8", "GET", b8)
+    try:
+        check_header_specs(bad8)
+    except:
+        raised8 = True
+    check(raised8, "交叉校验: 无 _reads_headers 但有 _header_types -> raise")
 
     print("all header_params checks passed")
