@@ -1558,6 +1558,24 @@ curl -sS -m 5 "$BASE/openapi.json" > "$TMP/oapi46.json"
 if "$FMTOOL" jsoncheck "$TMP/oapi46.json" >/dev/null; then pass "MP21 openapi.json full doc valid JSON (fmtool jsoncheck)"
 else fail "MP21 openapi jsoncheck" "$(head -c 200 "$TMP/oapi46.json")"; fi
 
+# --- 0.150.0 (upstream breaking, PR #16534): 未选择浏览器文件输入视为缺失 ---
+# 浏览器 <input type=file> 未选择 -> multipart part filename="" size=0 ->
+# 视为缺失 (不进 occurrence): 必填 -> 422 missing; 可选 -> 默认通过;
+# list 中该 part 被过滤 (count 不含).
+# MP24: /upload-file 提交 docfile= 空文件 part (filename="" size=0) + note ->
+#   doc/docs 均视为缺失 -> 422 missing ×2 (note 提供). 注意 doc 字段的 wire
+#   名是 alias docfile (见 _file_aliases=doc=docfile; MP23a/b 已验证).
+MP24_CODE=$(curl -sS -m 5 -o "$TMP/mp24_body" -w '%{http_code}' -X POST -F 'docfile=;filename=' -F 'note=n24' "$BASE/upload-file")
+MP24=$(cat "$TMP/mp24_body")
+N24=$(printf '%s' "$MP24" | grep -o '"type":"missing"' | wc -l | tr -d ' ')
+if [[ "$MP24_CODE" == "422" && "$N24" == "2" && "$MP24" == *'"loc":["body","doc"],"'* && "$MP24" == *'"loc":["body","docs"],"'* ]]; then pass "MP24 unselected empty file part -> 422 missing ×2 (doc+docs)"
+else fail "MP24 unselected empty file" "code=$MP24_CODE n=$N24 body: ${MP24:0:240}"; fi
+# MP25: docs:file[] 中空文件 part 被过滤 -> count=1 (s1) + 真文件 doc 正常
+#   (doc 的 wire 名 = alias docfile).
+MP25=$(curl -sS -m 5 -X POST -F 'docfile=@'"$UP_DIR/doc.txt" -F 'docs=;filename=' -F 'docs=@'"$UP_DIR/s1.txt" -F 'note=n25' "$BASE/upload-file")
+if [[ "$MP25" == *'"file_docs_count": "1"'* && "$MP25" == *'"file_docs_filename": "s1.txt"'* && "$MP25" == *'"file_doc_filename": "doc.txt"'* ]]; then pass "MP25 empty file part filtered from list -> count=1 (s1)"
+else fail "MP25 empty file in list" "body: ${MP25:0:280}"; fi
+
 # MP22: 文本 part 供给声明 form 字段 (U8): note=hello.
 MP22=$(curl -sS -m 5 -X POST -F 'note=hello' -F 'docfile=@'"$UP_DIR/doc.txt" -F 'docs=@'"$UP_DIR/doc.txt" "$BASE/upload-file")
 if [[ "$MP22" == *'"form_note": "hello"'* && "$MP22" == *'"file_doc_filename": "doc.txt"'* ]]; then pass "MP22 multipart text part feeds declared form field (U8) -> form_note=hello"
@@ -2655,6 +2673,25 @@ FM19Q=$(http_body "$BASE/query-req?n=1&n=zz&n=yy")
 N19=$(printf '%s' "$FM19Q" | grep -o '"type":"int_parsing"' | wc -l | tr -d ' ')
 if [[ "$N19" == "2" ]]; then pass "FM-20 query collect-all 2 int_parsing (P1 fix)"
 else fail "FM-20 query collect-all 2 int_parsing (P1 fix)" "got $N19: ${FM19Q:0:160}"; fi
+
+# --- 0.149.0 (upstream breaking, PR #16529): form 空标量视为缺失 -------------
+# /form-empty: _form_types="req:int;opt:int=7;flag:bool;name:str"
+# 浏览器空 input 提交 "" -> 缺失 -> 无默认 422 missing / 有默认用默认;
+# 列表内空串保留 (不在此测).
+expect_body_contains "FM-21 empty scalar -> declared default" '"form_req": "5", "form_opt": "7", "form_flag": "true", "form_name": "a"' "$BASE/form-empty" POST 'req=5&opt=&flag=true&name=a'
+FE22_CODE=$(curl -sS -m 5 -o "$TMP/fe22_body" -w '%{http_code}' -X POST --data 'req=&opt=9&flag=true&name=a' "$BASE/form-empty")
+FE22=$(cat "$TMP/fe22_body")
+if [[ "$FE22_CODE" == "422" && "$FE22" == *'"loc":["body","req"],"msg":"Field required","type":"missing","input":null'* ]]; then pass "FM-22 empty int scalar -> 422 missing (no default)"
+else fail "FM-22 empty int scalar -> 422 missing" "code=$FE22_CODE body: ${FE22:0:200}"; fi
+FE23_CODE=$(curl -sS -m 5 -o "$TMP/fe23_body" -w '%{http_code}' -X POST --data 'req=5&opt=9&flag=&name=a' "$BASE/form-empty")
+FE23=$(cat "$TMP/fe23_body")
+if [[ "$FE23_CODE" == "422" && "$FE23" == *'"loc":["body","flag"],"msg":"Field required","type":"missing","input":null'* ]]; then pass "FM-23 empty bool scalar -> 422 missing (no default)"
+else fail "FM-23 empty bool scalar -> 422 missing" "code=$FE23_CODE body: ${FE23:0:200}"; fi
+FE24_CODE=$(curl -sS -m 5 -o "$TMP/fe24_body" -w '%{http_code}' -X POST --data 'req=5&opt=9&flag=true&name=' "$BASE/form-empty")
+FE24=$(cat "$TMP/fe24_body")
+if [[ "$FE24_CODE" == "422" && "$FE24" == *'"loc":["body","name"],"msg":"Field required","type":"missing","input":null'* ]]; then pass "FM-24 empty str scalar -> 422 missing (no default)"
+else fail "FM-24 empty str scalar -> 422 missing" "code=$FE24_CODE body: ${FE24:0:200}"; fi
+expect_body_contains "FM-25 empty scalar -> alias route default (size)" '"form_size": "2"' "$BASE/form-alias" POST 'tags=x&size='
 
 
 # --- File/Streaming responses (决策-48, ADR-0023, Goal-0003 P1 矩阵 #10) --------

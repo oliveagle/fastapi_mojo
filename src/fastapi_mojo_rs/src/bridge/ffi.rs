@@ -884,7 +884,7 @@ pub extern "C" fn upstream_call(
     };
     // 副本选择 + failover: 从归属副本开始, 失败则按环序尝试其余副本
     // (引擎重启/单副本崩掉时请求不会 502, 由其余副本接住).
-    let res = match super::upstream::port_ring(&ports_s, pin as i64) {
+    let res = match super::upstream::port_ring(&ports_s, pin) {
         Ok((ports, start)) => {
             let mut last: Result<Vec<u8>, String> = Err("no upstream tried".to_string());
             for i in 0..ports.len() {

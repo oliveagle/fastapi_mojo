@@ -210,3 +210,30 @@
         assert_eq!(parse_multipart(body, ct), 1);
         assert_eq!(part_save(99, "/tmp/fm_mp_should_not_exist.bin"), -1);
     }
+
+    #[test]
+    fn parse_empty_file_part_among_files() {
+        // 复现 MP25: 空文件 part (filename="", 空 body) 夹在真实文件 part 之间
+        // (curl -F 'docs=;filename=' wire 格式; 上游 0.150.0 未选择文件输入).
+        let body = b"--b\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"doc.txt\"\r\nContent-Type: text/plain\r\n\r\ndoc-body\r\n--b\r\nContent-Disposition: form-data; name=\"docs\"; filename=\"\"\r\n\r\n\r\n--b\r\nContent-Disposition: form-data; name=\"docs\"; filename=\"s1.txt\"\r\nContent-Type: text/plain\r\n\r\ns1-body\r\n--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nn25\r\n--b--\r\n";
+        let ct = b"multipart/form-data; boundary=b";
+        let n = parse_multipart(body, ct);
+        assert_eq!(n, 4, "expect 4 parts parsed, got {n}");
+        let parts = &lock_mp().parts;
+        // part0 = doc 文件
+        assert_eq!(parts[0].name, b"doc");
+        assert_eq!(parts[0].filename.as_deref().unwrap(), b"doc.txt");
+        assert_eq!(parts[0].body, b"doc-body");
+        // part1 = 空文件 part (filename="", 空 body)
+        assert_eq!(parts[1].name, b"docs");
+        assert_eq!(parts[1].filename.as_deref().unwrap(), b"");
+        assert!(parts[1].body.is_empty());
+        // part2 = s1 文件
+        assert_eq!(parts[2].name, b"docs");
+        assert_eq!(parts[2].filename.as_deref().unwrap(), b"s1.txt");
+        assert_eq!(parts[2].body, b"s1-body");
+        // part3 = note 文本
+        assert_eq!(parts[3].name, b"note");
+        assert!(parts[3].filename.is_none());
+        assert_eq!(parts[3].body, b"n25");
+    }

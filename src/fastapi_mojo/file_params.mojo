@@ -266,7 +266,10 @@ def validate_file_collect(type_spec: Dict[String, String],
         var pi = 0
         while pi < parts.count():
             if parts.names[pi] == lookup:
-                occ.append(pi)
+                # 0.150.0 (upstream breaking, PR #16534): 浏览器未选择文件的空
+                # 输入 (filename=="" 且 size==0) 视为缺失 -> 不进入 occurrence.
+                if not (parts.filenames[pi] == "" and parts.raw_lens[pi] == 0):
+                    occ.append(pi)
             pi += 1
         if len(occ) == 0:
             if not fs[2]:
@@ -376,6 +379,14 @@ def apply_file_extras(mut params: Dict[String, String], handler: Handler,
     var i = 0
     while i < parts.count():
         var nm = parts.names[i]
+        if nm == "":
+            i += 1
+            continue
+        # 0.150.0 (upstream breaking, PR #16534): 未选择浏览器文件输入
+        # (filename=="" 且 size==0) 视为缺失 -> 不注入任何 file_/form_ 键.
+        if parts.filenames[i] == "" and parts.raw_lens[i] == 0:
+            i += 1
+            continue
         if nm != "":
             var decl = nm
             var as_file = parts.is_file(i)
@@ -414,7 +425,11 @@ def apply_file_extras(mut params: Dict[String, String], handler: Handler,
         var pi = 0
         while pi < parts.count():
             if parts.names[pi] == lookup:
-                occ.append(pi)
+                # 0.150.0 (upstream breaking, PR #16534): 未选择浏览器文件
+                # 输入 (filename=="" 且 size==0) 视为缺失 -> 不进 list
+                # (与 validate_file_collect 的 occ 收集一致).
+                if not (parts.filenames[pi] == "" and parts.raw_lens[pi] == 0):
+                    occ.append(pi)
             pi += 1
         params["file_" + k + "_count"] = String(len(occ))
         var arr = List[String]()

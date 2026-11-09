@@ -828,6 +828,15 @@ def register_routes(mut router: Router) raises:
     fali_h.set_data("_form_aliases", "labels=tags")
     router.add_route("/form-alias", "POST", fali_h)
 
+    # 0.149.0 (upstream breaking, PR #16529): form 空标量视为缺失 —
+    # req:int 无默认 -> 空串 422 missing; opt:int=7 -> 空串用默认 7;
+    # flag:bool 无默认 -> 空串 422 missing; name:str 无默认 -> 空串 422
+    # missing (str 标量同样适用); 列表内空串保留.
+    var fe_h = Handler(KIND_ECHO(), "form_empty")
+    fe_h.set_data("message", "form empty demo")
+    fe_h.set_data("_form_types", "req:int;opt:int=7;flag:bool;name:str")
+    router.add_route("/form-empty", "POST", fe_h)
+
     # F5 SSE 一次性推送 demo (Goal-0002 §1.1). 事件用 | 分隔 (避免与 data 内 , 冲突).
     var sse_h = Handler(KIND_SSE(), "sse_demo")
     sse_h.set_data("_stream_events", "hello\nworld|second event|multi\nline\nevent")

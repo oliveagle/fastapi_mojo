@@ -185,7 +185,10 @@ def validate_form_collect(type_spec: Dict[String, String],
             var lst = multi[lookup].copy()
             if len(lst) > 0:
                 raw = lst[len(lst) - 1]
-                has_value = True
+                # 0.149.0 (upstream breaking, PR #16529): 浏览器空 input 提交
+                # "" = form 空标量视为缺失 -> 默认值 / 422 missing (列表内空串保留).
+                if raw != "":
+                    has_value = True
         if not has_value and ts.has_default():
             raw = ts.default_value
             has_value = True
@@ -256,6 +259,10 @@ def apply_form_extras(mut params: Dict[String, String],
             if has_wire:
                 var lst = multi[lookup].copy()
                 sv = lst[len(lst) - 1]
+                # 0.149.0 (upstream breaking, PR #16529): 空标量 -> 缺失 ->
+                # 用声明默认 (若声明); 无默认 -> 空 (成功路径不会到 422).
+                if sv == "" and has_eq(spec):
+                    sv = default_part(spec)
             elif has_eq(spec):
                 sv = default_part(spec)
             if canon != "":
