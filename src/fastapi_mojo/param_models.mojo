@@ -52,12 +52,18 @@ from json import json_escape
 
 
 struct ParamModelGroup:
-    """一个参数模型组 (上游: BaseModel 作 Query()/Header()/Cookie() 参数)."""
+    """一个参数模型组 (上游: BaseModel 作 Query()/Header()/Cookie()/Form() 参数)."""
     var name: String
     var extra: String          # "ignore" | "allow" | "forbid"
     var optional: Bool
     var field_order: List[String]
     var field_specs: Dict[String, String]
+    # 决策-107 (上游 0.161.0 / 0.161.1): form 面**模型 union** 分支绑定.
+    # 多个组 `union=<名>` 绑成同一 union; 首个分支的 discriminator /
+    # union_optional 决定整个 union 的策略. query/header/cookie 面不消费.
+    var union_name: String
+    var union_discriminator: String
+    var union_optional: Bool
 
     def __init__(out self):
         self.name = ""
@@ -65,6 +71,9 @@ struct ParamModelGroup:
         self.optional = False
         self.field_order = List[String]()
         self.field_specs = Dict[String, String]()
+        self.union_name = ""
+        self.union_discriminator = ""
+        self.union_optional = False
 
     def copy(self) -> ParamModelGroup:
         var g = ParamModelGroup()
@@ -73,6 +82,9 @@ struct ParamModelGroup:
         g.optional = self.optional
         g.field_order = self.field_order.copy()
         g.field_specs = self.field_specs.copy()
+        g.union_name = self.union_name
+        g.union_discriminator = self.union_discriminator
+        g.union_optional = self.union_optional
         return g^
 
 
@@ -146,6 +158,12 @@ def _apply_attrs(mut g: ParamModelGroup, attrs: String):
             var v = String(attr[byte=6:attr.byte_length()])
             if v == "allow" or v == "forbid" or v == "ignore":
                 g.extra = v
+        elif attr == "union_optional":
+            g.union_optional = True
+        elif attr.startswith("union="):
+            g.union_name = String(attr[byte=6:attr.byte_length()])
+        elif attr.startswith("discriminator="):
+            g.union_discriminator = String(attr[byte=14:attr.byte_length()])
 
 
 def parse_param_models(spec: String, opts: String) raises -> List[ParamModelGroup]:

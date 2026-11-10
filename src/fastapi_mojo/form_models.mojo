@@ -29,13 +29,13 @@
 #           嵌套模型 / union 分支见 ADR-0071 §5.
 
 from handler import Handler
-from param_models import (ParamModelGroup, parse_param_models, extra_forbidden_json,
-                          model_group_key, model_extra_key)
+from param_models import (ParamModelGroup, parse_param_models, model_extra_key,
+                          extra_forbidden_json)
 from form_params import validate_form_collect
-from alias_choices import candidates_for, pick_in_multi
-from params_query_extra import (is_list_spec, has_eq, default_part, list_default_csv,
-                                join_values, split_csv)
-from params_typed import parse_type_spec, parse_base, parse_typed_value
+from form_model_core import (form_group_active, form_extra_keys, group_inject,
+                             group_inject_as, form_extra_input_json,
+                             union_names, plan_form_unions)
+from params_query_extra import join_values
 from json import json_escape
 
 
@@ -49,139 +49,6 @@ def get_form_models(handler: Handler) raises -> List[ParamModelGroup]:
     if "_form_model_opts" in handler.data:
         opts = handler.data["_form_model_opts"]
     return parse_param_models(handler.data["_form_models"], opts)
-
-
-# ---------- 组判定 (form 面请求键空间) ----------
-
-def _form_processed_keys(g: ParamModelGroup,
-                         aliases: Dict[String, String]) raises -> List[String]:
-    """该组的**已处理键** = 组内每字段的**全部候选别名** (上游 field_aliases).
-
-    form 面 field_aliases 收集候选（无论有值与否），故空标量既不成为字段值
-    也不成为 extra（上游 _extract_form_items 的第一轮只在有值时 yield）。
-    """
-    var out = List[String]()
-    for f in g.field_order:
-        for c in candidates_for(aliases, f):
-            out.append(c)
-    return out^
-
-
-def _form_extra_keys(g: ParamModelGroup,
-                     submitted: List[String],
-                     aliases: Dict[String, String]) raises -> List[String]:
-    """该组**未处理**的提交键 (保持提交序; extra=forbid 的拒绝对象)."""
-    var proc = _form_processed_keys(g, aliases)
-    var out = List[String]()
-    for k in submitted:
-        var hit = False
-        for p in proc:
-            if p == k:
-                hit = True
-                break
-        if not hit:
-            out.append(k)
-    return out^
-
-
-def _form_field_present(g: ParamModelGroup,
-                        aliases: Dict[String, String],
-                        multi: Dict[String, List[String]]) raises -> Bool:
-    """组内是否**有任一字段的任一候选**出现在 form body 里 (含空值 —
-    上游 _is_form_model_supplied 用原始 body 键判定)."""
-    for f in g.field_order:
-        for c in candidates_for(aliases, f):
-            if c in multi:
-                return True
-    return False
-
-
-def form_group_active(g: ParamModelGroup,
-                      aliases: Dict[String, String],
-                      multi: Dict[String, List[String]],
-                      submitted: List[String]) raises -> Bool:
-    """该组本轮是否**存在** (上游: 模型被校验 vs 替换成 Undefined).
-
-    非可选组恒校验 (空 body -> 逐字段 missing); 可选组 = 任一字段出现 或
-    (extra=allow/forbid 且有未处理键)."""
-    if not g.optional:
-        return True
-    if _form_field_present(g, aliases, multi):
-        return True
-    if g.extra == "allow" or g.extra == "forbid":
-        if len(_form_extra_keys(g, submitted, aliases)) > 0:
-            return True
-    return False
-
-
-# ---------- 值归一化 (成功路径注入) ----------
-
-def _canon_form_value(type_name: String, v: String) raises -> String:
-    if type_name == "int" or type_name == "float" or type_name == "bool":
-        var pr = parse_typed_value(type_name, v)
-        if pr[0]:
-            return pr[1]
-    return v
-
-
-def _canon_form_csv(type_name: String, csv: String) raises -> String:
-    if csv == "":
-        return csv
-    var out = List[String]()
-    for part in split_csv(csv):
-        out.append(_canon_form_value(type_name, part))
-    return join_values(out^)
-
-
-def _group_inject(mut inject: Dict[String, String],
-                  g: ParamModelGroup,
-                  aliases: Dict[String, String],
-                  multi: Dict[String, List[String]]) raises:
-    """组字段 -> inject["<组>_<字段>"] (list -> 全部 occurrence CSV; 标量
-    -> last-wins; 缺失 -> 声明默认; int/float/bool 规范化)."""
-    for f in g.field_order:
-        var spec = g.field_specs[f]
-        var ts = parse_type_spec(spec)
-        var pb = parse_base(ts.base_type)
-        var cands = candidates_for(aliases, f)
-        var hit = pick_in_multi(cands, multi, not is_list_spec(spec))
-        if is_list_spec(spec):
-            var lv = String("")
-            if hit != "":
-                lv = join_values(multi[hit].copy())
-            elif has_eq(spec):
-                lv = list_default_csv(spec)
-            if pb.ok:
-                lv = _canon_form_csv(pb.type_name, lv)
-            inject[model_group_key(g.name, f)] = lv
-        else:
-            var sv = String("")
-            if hit != "":
-                var lst = multi[hit].copy()
-                if len(lst) > 0:
-                    sv = lst[len(lst) - 1]
-                if sv == "" and has_eq(spec):
-                    sv = default_part(spec)
-            elif has_eq(spec):
-                sv = default_part(spec)
-            if pb.ok:
-                sv = _canon_form_value(pb.type_name, sv)
-            inject[model_group_key(g.name, f)] = sv
-
-
-def _form_extra_input_json(multi: Dict[String, List[String]],
-                           key: String) raises -> String:
-    """extra_forbidden 的 input: 单值 -> 字符串, 多值 -> 数组 (上游 FormData
-    getlist 语义)."""
-    if key not in multi:
-        return "null"
-    var lst = multi[key].copy()
-    if len(lst) == 1:
-        return "\"" + json_escape(lst[0]) + "\""
-    var parts = List[String]()
-    for i in range(len(lst)):
-        parts.append("\"" + json_escape(lst[i]) + "\"")
-    return "[" + ",".join(parts) + "]"
 
 
 # ---------- 校验 + 注入 ----------
@@ -204,6 +71,8 @@ def validate_form_model_groups(groups: List[ParamModelGroup],
         submitted.append(k)
     for gi in range(len(groups)):
         var g = groups[gi].copy()
+        if g.union_name != "":
+            continue   # 决策-107: union 分支由 plan_form_unions 统一处理
         if not form_group_active(g, aliases, multi, submitted):
             continue
         var spec = Dict[String, String]()
@@ -214,12 +83,17 @@ def validate_form_model_groups(groups: List[ParamModelGroup],
             for e in res[1]:
                 errs.append(e)
         else:
-            _group_inject(inject, g, aliases, multi)
+            group_inject(inject, g, aliases, multi)
         if g.extra == "forbid":
-            var ex = _form_extra_keys(g, submitted, aliases)
+            var ex = form_extra_keys(g, submitted, aliases)
             for k in ex:
                 errs.append(extra_forbidden_json(
-                    "\"body\"", k, _form_extra_input_json(multi, k)))
+                    "\"body\"", k, form_extra_input_json(multi, k)))
+    # 决策-107 (上游 0.161.0/0.161.1): form 面模型 union.
+    var up = plan_form_unions(groups, aliases, multi)
+    if not up[0]:
+        for ue in up[1]:
+            errs.append(ue)
     return (len(errs) == 0, errs^, inject^)
 
 
@@ -237,15 +111,32 @@ def apply_form_model_extras(mut params: Dict[String, String],
     var inject = Dict[String, String]()
     for gi in range(len(groups)):
         var g = groups[gi].copy()
+        if g.union_name != "":
+            continue   # 决策-107: union 分支单独注入 (`<union>_<字段>`)
         if not form_group_active(g, aliases, multi, submitted):
             continue
-        _group_inject(inject, g, aliases, multi)
+        group_inject(inject, g, aliases, multi)
         if g.extra == "allow":
-            var ex = _form_extra_keys(g, submitted, aliases)
+            var ex = form_extra_keys(g, submitted, aliases)
             for k in ex:
                 var v = String("")
                 if k in multi:
                     v = join_values(multi[k].copy())
                 inject[model_extra_key(g.name, k)] = v
+    # 决策-107: union 选中分支 -> form_<union>_<字段> (+ allow 额外键).
+    var up = plan_form_unions(groups, aliases, multi)
+    var ulist = union_names(groups)
+    for ui in range(len(up[2])):
+        var chosen = up[2][ui]
+        var uname = ulist[ui]
+        var g2 = groups[chosen].copy()
+        group_inject_as(inject, uname, g2, aliases, multi)
+        if g2.extra == "allow":
+            var ex2 = form_extra_keys(g2, submitted, aliases)
+            for k2 in ex2:
+                var v2 = String("")
+                if k2 in multi:
+                    v2 = join_values(multi[k2].copy())
+                inject[uname + "_x_" + k2] = v2
     for key in inject:
         params["form_" + key] = inject[key]

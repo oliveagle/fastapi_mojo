@@ -4468,6 +4468,94 @@ if "$FMTOOL" jsoncheck "$TMP/oapi_pmf.json" >/dev/null 2>&1; then
     pass "PMF-14 openapi.json valid JSON (fmtool jsoncheck)"
 else fail "PMF-14 openapi jsoncheck" "$(head -c 200 "$TMP/oapi_pmf.json")"; fi
 
+# ============================================================================
+# PFU: 决策-107 (上游 FastAPI 0.161.0 / 0.161.1) — form 模型 union
+#   组合 union (分支按声明序) / discriminator 分支选择 / 可选 union /
+#   分支 extra=forbid / 422 loc 含 tag / OpenAPI anyOf + discriminator.
+# ============================================================================
+
+# PFU-1: 无 discriminator union — 分支 A 全字段 -> 选中 A 并注入.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'name=John&email=j@x' "$BASE/pm/form-union")
+if [[ "$B" == *'"form_contact_name": "John"'* && "$B" == *'"form_contact_email": "j@x"'* ]]; then
+    pass "PFU-1 form union branch A selected"
+else fail "PFU-1 form union branch A" "got: ${B:0:260}"; fi
+
+# PFU-2: 无 discriminator union — 分支 B 全字段 -> 选中 B 并注入.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'company_name=Acme&industry=Tech' "$BASE/pm/form-union")
+if [[ "$B" == *'"form_contact_company_name": "Acme"'* && "$B" == *'"form_contact_industry": "Tech"'* && "$B" != *'"form_contact_name"'* ]]; then
+    pass "PFU-2 form union branch B selected"
+else fail "PFU-2 form union branch B" "got: ${B:0:260}"; fi
+
+# PFU-3: 两分支各缺一个必填 -> 422 (无分支通过).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'name=John&company_name=Acme' "$BASE/pm/form-union")
+if [[ "$B" == *'"type":"missing"'* && "$B" == *'"loc":["body"'* ]]; then
+    pass "PFU-3 form union no branch matches -> 422"
+else fail "PFU-3 form union no branch" "got: ${B:0:260}"; fi
+
+# PFU-4: discriminated union — kind=cat 选中 cat 分支.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'kind=cat&meow=hi' "$BASE/pm/form-union-disc")
+if [[ "$B" == *'"form_pet_kind": "cat"'* && "$B" == *'"form_pet_meow": "hi"'* ]]; then
+    pass "PFU-4 discriminated union selects branch by tag"
+else fail "PFU-4 discriminated union" "got: ${B:0:260}"; fi
+
+# PFU-5: discriminated union — kind=dog 选中另一分支.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'kind=dog&bark=woof' "$BASE/pm/form-union-disc")
+if [[ "$B" == *'"form_pet_bark": "woof"'* && "$B" != *'"form_pet_meow"'* ]]; then
+    pass "PFU-5 discriminated union other branch"
+else fail "PFU-5 discriminated union branch B" "got: ${B:0:260}"; fi
+
+# PFU-6: 可选 union — 空 body -> 不校验/不注入 (200).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data '' "$BASE/pm/form-union-disc")
+if [[ "$B" != *'"form_pet_kind"'* && "$B" != *'"type":"missing"'* ]]; then
+    pass "PFU-6 optional union absent -> no injection"
+else fail "PFU-6 optional union absent" "got: ${B:0:260}"; fi
+
+# PFU-7: discriminator 缺 tag -> union_tag_not_found (loc ["body"]).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'meow=hi' "$BASE/pm/form-union-disc")
+if [[ "$B" == *'"type":"union_tag_not_found"'* && "$B" == *'"loc":["body"]'* ]]; then
+    pass "PFU-7 discriminator missing -> union_tag_not_found"
+else fail "PFU-7 union_tag_not_found" "got: ${B:0:260}"; fi
+
+# PFU-8: discriminator 非法值 -> union_tag_invalid (loc ["body"]).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'kind=bird' "$BASE/pm/form-union-disc")
+if [[ "$B" == *'"type":"union_tag_invalid"'* && "$B" == *'"loc":["body"]'* ]]; then
+    pass "PFU-8 discriminator invalid -> union_tag_invalid"
+else fail "PFU-8 union_tag_invalid" "got: ${B:0:260}"; fi
+
+# PFU-9: 选中分支字段错误 loc = ["body", <tag>, 字段] (上游 tag 定位).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'kind=cat' "$BASE/pm/form-union-disc")
+if [[ "$B" == *'"loc":["body","cat","meow"]'* && "$B" == *'"type":"missing"'* ]]; then
+    pass "PFU-9 branch error loc carries discriminator tag"
+else fail "PFU-9 branch error loc" "got: ${B:0:260}"; fi
+
+# PFU-10: union 分支 extra=forbid — 选中分支外键 422 (loc 含 tag).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'kind=p&a=x&other=y' "$BASE/pm/form-union-forbid")
+if [[ "$B" == *'"type":"extra_forbidden"'* && "$B" == *'"loc":["body","p","other"]'* ]]; then
+    pass "PFU-10 union branch forbid rejects extra key (tag loc)"
+else fail "PFU-10 union forbid" "got: ${B:0:260}"; fi
+
+# PFU-11: union 分支 extra=forbid — 只有分支字段 -> 200 + 注入.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'kind=p&a=x' "$BASE/pm/form-union-forbid")
+if [[ "$B" == *'"form_sp_kind": "p"'* && "$B" == *'"form_sp_a": "x"'* ]]; then
+    pass "PFU-11 union forbid accepts branch fields"
+else fail "PFU-11 union forbid ok path" "got: ${B:0:260}"; fi
+
+# PFU-12: OpenAPI — union 分支 anyOf (含 required) + discriminator propertyName;
+# 非可选 union requestBody.required=true / 可选 union 无 required 键.
+curl -sS --max-time 10 "$BASE/openapi.json" -o "$TMP/oapi_pfu.json"
+OAPI_PFU=$(cat "$TMP/oapi_pfu.json")
+if [[ "$OAPI_PFU" == *'"anyOf":[{"type":"object","title":"contact_person","properties":{"name":'* \
+   && "$OAPI_PFU" == *'"discriminator":{"propertyName":"kind"}'* \
+   && "$OAPI_PFU" == *'"requestBody":{"required":true,"content":{"application/x-www-form-urlencoded":{"schema":{"$ref":"#/components/schemas/Body_pm_form_union_post"}}}}'* \
+   && "$OAPI_PFU" == *'"requestBody":{"content":{"application/x-www-form-urlencoded":{"schema":{"$ref":"#/components/schemas/Body_pm_form_union_disc_post"}}}}'* ]]; then
+    pass "PFU-12 openapi union anyOf + discriminator + requestBody required"
+else fail "PFU-12 openapi union schema" "anyOf/discriminator/required mismatch"; fi
+
+# PFU-13: 全文档仍为合法 JSON (union anyOf 不破坏 JSON 硬门禁).
+if "$FMTOOL" jsoncheck "$TMP/oapi_pfu.json" >/dev/null 2>&1; then
+    pass "PFU-13 openapi.json valid JSON (fmtool jsoncheck)"
+else fail "PFU-13 openapi jsoncheck" "$(head -c 200 "$TMP/oapi_pfu.json")"; fi
+
 # --- summary ---------------------------------------------------------------------
 
 

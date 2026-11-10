@@ -10,13 +10,13 @@
 
 | 主题 | 行数 | ✅ | 🔶 | ❌ | ➖ |
 |------|------|----|----|----|----|
-| A. Form/参数模型语义 | 14 | 9 | 1 | 2 | 2 |
+| A. Form/参数模型语义 | 14 | 11 | 2 | 0 | 1 |
 | B. AliasChoices/参数元数据 | 11 | 6 | 3 | 1 | 1 |
 | C. 序列化/body/文件 | 4 | 1 | 1 | 1 | 1 |
 | D. WebSocket 安全依赖 | 1 | 0 | 0 | 1 | 0 |
 | E. OpenTelemetry | 5 | 0 | 1 | 0 | 4 |
 | F. 框架杂项 | 6 | 1 | 0 | 1 | 4 |
-| **合计** | **41** | **17** | **6** | **6** | **12** |
+| **合计** | **41** | **19** | **7** | **4** | **11** |
 
 > 注：0.142.0 有 2 条 Refactors（docs 前端），0.143.4 为可选依赖升级（httpx2），
 > 0.147.0 被 0.162.0 反转，不计入差距。功能改动合计 45 条；下表按行计 41 项
@@ -27,10 +27,10 @@
 | 版本 | 改动 | fastapi_mojo 状态 | 说明 |
 |------|------|--------------------|------|
 | 0.162.0 | 省略 boolean form 字段 → 声明默认值 / missing 错误（反转 0.147.0 的 False 推断） | ✅ | form_params 现状：bool 无默认缺失 → 422 "Field required"；有默认 → 默认值。与终态语义一致 |
-| 0.161.0 | 组合 form 模型 union | ❌ | fastapi_mojo 无模型 union 概念（声明式 _form_types 单表） |
-| 0.161.1 | standalone nullable form unions OpenAPI schema 修复 | ❌ | 同上（union 缺席） |
+| 0.161.0 | 组合 form 模型 union（PR #16596） | ✅ | 决策-107 / ADR-0072：`_form_model_opts` 新增 `union=<名>`（多组绑成同一 union，声明序 = 分支序）+ `discriminator=<字段>`（判别选分支）+ `union_optional`（缺席不校验/不注入）；分支各用**自身字段集**重抽 form 值；缺 tag → `union_tag_not_found`（loc `["body"]`）/ 非法 tag → `union_tag_invalid`；分支字段错误 loc `["body", <tag>, 字段]`；注入键 `form_<union>_<字段>`；OpenAPI `anyOf` + `discriminator.propertyName`。e2e PFU-1..11 |
+| 0.161.1 | standalone nullable form unions OpenAPI schema 修复（PR #16598） | 🔶 | 决策-107 / ADR-0072：standalone union 的 OpenAPI 走 `anyOf` + `discriminator`，可选 union 的 `requestBody` 不带 `required`（e2e PFU-12）；**未复刻上游 nullable sentinel 形状**（`allOf` + `not{anyOf required}` / `maxProperties:0`），分支 schema 为 inline 无 `$ref`（ADR-0072 §5-2/3） |
 | 0.160.0 | 每个参数模型的 extra 配置应用到兄弟字段（breaking） | ✅ | 决策-105 / ADR-0070：`_param_model_opts` / `_header_model_opts` / `_cookie_model_opts` 的 `extra=ignore\|allow\|forbid`；未处理键 = 该 location 里不属于该模型的提交键（**含兄弟模型字段**）；forbid 逐键 422 `extra_forbidden`（msg "Extra inputs are not permitted"），allow 收入组（`<face>_<组>_x_<键>`）。e2e PM-2/6/7/12/13/17 |
-| 0.159.1 | 可选 form 模型 union | ➖ | union 缺席；可选模型 = "=" 已支持（单字段级） |
+| 0.159.1 | 可选 form 模型 union（PR #16586） | ✅ | 决策-107 / ADR-0072：`union_optional` —— union 任一分支均未提交时整组缺席（不校验 / 不注入 / 不报 missing）；非可选 union 空 body → 422 missing（loc `["body"]`）。e2e PFU-6 |
 | 0.159.0 | 可选 query/header/cookie 参数模型 | ✅ | 决策-105 / ADR-0070：组属性 `optional` —— 组字段一个都不出现且无 allow/forbid 收集值 → 整组缺席（不报 missing、不注入默认）；任一字段出现 → 正常校验。非可选组**恒校验**（上游 `annotation is model` 分支）。e2e PM-3/4/5 |
 | 0.158.2 | 可选 form 模型（PR #16582） | ✅ | 决策-106 / ADR-0071：`_form_model_opts` 组属性 `optional` —— 组字段全缺席且无 extra 收集值 → 整组不校验/不注入/不报 missing；任一字段在场即正常校验；非可选组恒校验。e2e PMF-3/4/5 |
 | 0.158.1 | OpenAPI 保留 form media types 修复（PR #16579） | ✅ | 决策-106 / ADR-0071：form 模型路由 `requestBody.content` 保留 `application/x-www-form-urlencoded`（路由级 media type 由是否含 file 声明决定 multipart / urlencoded）；无 per-field `Form(media_type=...)`（家法无字段级 media type，ADR-0071 §5-4）。e2e PMF-13 |
@@ -101,10 +101,10 @@
 4. ~~**0.152.0** header model 校验错误报告 header 名（header_params）~~ ✅ 已完成（决策-103，e2e HD-1~5；header 422 loc 统一用 HTTP header 名）
 5. ~~**0.156.3~7** AliasChoices 多候选别名（query/header/path/form/file/body 六面）~~ ✅ 已完成（决策-104 + ADR-0069，e2e AL-* 26 项）
 6. **0.151.0** JSON null vs omitted body（json_canon）
-7. **0.158.1** OpenAPI form media types 保留
+7. ~~**0.158.1** OpenAPI form media types 保留~~ ✅ 已完成（决策-106 / ADR-0071，e2e PMF-13）
 8. **0.144.0** WS security dependencies
 9. **0.156.8** 上传文件位置保留（Rust bridge）
-10. 模型组合/可选/union 系列（0.157~0.161，需新增声明语法）
+10. ~~模型组合/可选/union 系列（0.157~0.161）~~ ✅ 已完成（决策-105 query/header/cookie 组、决策-106 form 组、决策-107 form union；e2e PM-*/PMF-*/PFU-*）
 
 ---
-*更新：2026-11-10（0.149.0/0.150.0/0.143.5/0.152.0/0.156.3~7 闭环；合计 41 行 ✅=11 / 🔶=8 / ❌=10 / ➖=12，计数与各节表格对齐）。数据源：fastapi/fastapi GitHub releases（0.141.1→0.162.2，44 releases）。*
+*更新：2026-11-10（0.159.1/0.161.0 闭环、0.161.1 部分闭环 —— 决策-107 / ADR-0072 form 模型 union；合计 41 行 ✅=19 / 🔶=7 / ❌=4 / ➖=11，计数与各节表格对齐）。数据源：fastapi/fastapi GitHub releases（0.141.1→0.162.2，44 releases）。*

@@ -69,14 +69,89 @@ def form_model_groups(handler: Handler) raises -> List[ParamModelGroup]:
 
 
 def form_model_specs(handler: Handler) raises -> Dict[String, String]:
-    """决策-106: 组字段 -> 类型规格 (OpenAPI / required 判定用)."""
+    """决策-106: 组字段 -> 类型规格 (OpenAPI / required 判定用).
+
+    决策-107: union 分支字段不摊平 (由 `form_union_schemas` 生成 anyOf)."""
     var out = Dict[String, String]()
     var groups = form_model_groups(handler)
     for gi in range(len(groups)):
         var g = groups[gi].copy()
+        if g.union_name != "":
+            continue
         for f in g.field_order:
             out[f] = g.field_specs[f]
     return out^
+
+
+def form_union_groups(handler: Handler) raises -> List[ParamModelGroup]:
+    """决策-107: `_form_models` 里绑定到 union 的分支组 (声明序)."""
+    var out = List[ParamModelGroup]()
+    var groups = form_model_groups(handler)
+    for gi in range(len(groups)):
+        var g = groups[gi].copy()
+        if g.union_name != "":
+            out.append(g.copy())
+    return out^
+
+
+def _form_branch_schema(g: ParamModelGroup) raises -> String:
+    """union 单个分支的 inline object schema (properties + required)."""
+    var out = "{\"type\":\"object\",\"title\":\"" + json_escape(g.name) + "\",\"properties\":{"
+    var req = List[String]()
+    var first = True
+    for f in g.field_order:
+        if not first:
+            out += ","
+        first = False
+        out += "\"" + json_escape(f) + "\":" + _openapi_form_field_schema(
+            f, g.field_specs[f], "")
+        if not has_eq(g.field_specs[f]):
+            req.append(f)
+    out += "}"
+    if len(req) > 0:
+        var rp = List[String]()
+        for r in req:
+            rp.append("\"" + json_escape(r) + "\"")
+        out += ",\"required\":[" + ",".join(rp) + "]"
+    out += "}"
+    return out^
+
+
+def form_union_schemas(handler: Handler) raises -> String:
+    """决策-107: union -> anyOf schema 列表 (JSON 数组不含外层方括号).
+
+    每个 union 一个 `{"anyOf":[分支...][,"discriminator":{"propertyName":..}]}`.
+    偏差 (ADR-0072 §5): 分支 inline (家法无命名模型), 无 nullable sentinel
+    (上游 0.161.1 的 allOf/not/maxProperties 形状)."""
+    var ug = form_union_groups(handler)
+    var names = List[String]()
+    for gi in range(len(ug)):
+        var un = ug[gi].copy().union_name
+        var seen = False
+        for u in names:
+            if u == un:
+                seen = True
+                break
+        if not seen:
+            names.append(un)
+    var out = List[String]()
+    for ni in range(len(names)):
+        var un = names[ni]
+        var branches = List[String]()
+        var disc = String("")
+        for gi in range(len(ug)):
+            var g = ug[gi].copy()
+            if g.union_name != un:
+                continue
+            branches.append(_form_branch_schema(g))
+            if disc == "" and g.union_discriminator != "":
+                disc = g.union_discriminator
+        var o = "{\"anyOf\":[" + ",".join(branches) + "],\"title\":\"" + json_escape(un) + "\""
+        if disc != "":
+            o += ",\"discriminator\":{\"propertyName\":\"" + json_escape(disc) + "\"}"
+        o += "}"
+        out.append(o)
+    return ",".join(out)
 
 
 def form_has_declaration(handler: Handler) raises -> Bool:
@@ -134,6 +209,8 @@ def form_field_names_ordered(handler: Handler) raises -> List[String]:
     var groups = form_model_groups(handler)
     for gi in range(len(groups)):
         var g = groups[gi].copy()
+        if g.union_name != "":
+            continue   # 决策-107: union 分支走 anyOf
         for f in g.field_order:
             var seen2 = False
             for x2 in out:
@@ -454,6 +531,7 @@ def form_openapi_schema(handler: Handler, method: String) raises -> String:
     # validation_alias.choices[0]; multipart 面同款见 openapi_multipart).
     var fal = get_form_aliases(handler)
     var descs = get_param_descs(handler)
+    var uschemas = form_union_schemas(handler)
     var out = "{\"type\":\"object\",\"title\":\"" + json_escape(name) + "\",\"properties\":{"
     var names = form_field_names_ordered(handler)
     var mspecs = form_model_specs(handler)
@@ -480,6 +558,13 @@ def form_openapi_schema(handler: Handler, method: String) raises -> String:
         else:
             out = out + "\"" + json_escape(prop) + "\":{" + "\"type\":\"string\",\"title\":\"" + json_escape(_cap_name(prop)) + "\"}"
     out = out + "}}"
+    if uschemas != "":
+        # 决策-107 (上游 0.161.0/0.161.1): union 分支 -> anyOf; 与个体字段
+        # 并存时用 allOf 组合 (上游同构, 但分支 inline 无 $ref).
+        if len(names) == 0:
+            return "{\"title\":\"" + json_escape(name) + "\",\"allOf\":[" + uschemas + "]}"
+        return ("{\"title\":\"" + json_escape(name) + "\",\"allOf\":["
+                + uschemas + "," + out + "]}")
     return out^
 
 
@@ -493,13 +578,22 @@ def form_request_body_required(handler: Handler) raises -> Bool:
     # 决策-106: 组字段无默认且组非 optional -> requestBody.required = true
     # (上游 0.158.1: 组合/可选 form 模型同样参与 required 判定).
     var groups = form_model_groups(handler)
+    var union_opt = Dict[String, Bool]()
     for gi in range(len(groups)):
         var g = groups[gi].copy()
+        if g.union_name != "":
+            # 决策-107: union 的 requestBody.required 由 union_optional 决定.
+            if g.union_name not in union_opt:
+                union_opt[g.union_name] = g.union_optional
+            continue
         if g.optional:
             continue
         for f in g.field_order:
             if not has_eq(g.field_specs[f]):
                 return True
+    for un in union_opt:
+        if not union_opt[un]:
+            return True
     return False
 
 

@@ -927,6 +927,33 @@ def register_routes(mut router: Router) raises:
     pmf_fb_h.set_data("_form_models", "strict=alpha:str")
     pmf_fb_h.set_data("_form_model_opts", "strict=extra=forbid")
     router.add_route("/pm/form-forbid", "POST", pmf_fb_h)
+    #   /pm/form-union: form 模型 union (0.161.0) — 无 discriminator, 取首个校验
+    #   通过的分支 (家法确定性近似; 上游默认 smart union).
+    var pmf_un_h = Handler(KIND_ECHO(), "pm_form_union")
+    pmf_un_h.set_data("message", "form union demo")
+    pmf_un_h.set_data("_form_models",
+                      "contact_person=name:str|email:str;contact_company=company_name:str|industry:str")
+    pmf_un_h.set_data("_form_model_opts",
+                      "contact_person=union=contact;contact_company=union=contact")
+    router.add_route("/pm/form-union", "POST", pmf_un_h)
+    #   /pm/form-union-disc: discriminated optional union (0.161.0/0.161.1) —
+    #   `kind` 字面量选分支; 缺 tag -> union_tag_not_found / 非法 -> union_tag_invalid.
+    var pmf_und_h = Handler(KIND_ECHO(), "pm_form_union_disc")
+    pmf_und_h.set_data("message", "form discriminated union demo")
+    pmf_und_h.set_data("_form_models",
+                       "pet_cat=kind:str[cat]|meow:str;pet_dog=kind:str[dog]|bark:str")
+    pmf_und_h.set_data("_form_model_opts",
+                       "pet_cat=union=pet,discriminator=kind,union_optional;pet_dog=union=pet")
+    router.add_route("/pm/form-union-disc", "POST", pmf_und_h)
+    #   /pm/form-union-forbid: union 分支 extra=forbid — 选中分支外键 422
+    #   (loc ["body", <tag>, 键]).
+    var pmf_uf_h = Handler(KIND_ECHO(), "pm_form_union_forbid")
+    pmf_uf_h.set_data("message", "form union forbid demo")
+    pmf_uf_h.set_data("_form_models",
+                      "strict_p=kind:str[p]|a:str;strict_q=kind:str[q]|b:str")
+    pmf_uf_h.set_data("_form_model_opts",
+                      "strict_p=union=sp,discriminator=kind,extra=forbid;strict_q=union=sp")
+    router.add_route("/pm/form-union-forbid", "POST", pmf_uf_h)
     # 决策-45 (ADR-0020): Form 多值/alias/desc demo. _form_types 声明
     # 类型 (list 多值 / 标量默认 / float / bool); _param_descs ->
     # OpenAPI description. 必填 list 缺失 -> 422; count=0 标量默认.
