@@ -42,6 +42,9 @@
 #   - UploadFile 对象 API: _file_types file/bytes + 422 (U2 value_error / U3 string_type /
 #     U4 last-wins / U5 全缺失) + _file_ops (head/range/sha256/save) + multipart OpenAPI
 #     (决策-46, MP8..MP23b; size = 实际字节 U1; MP1..MP7 决策-32 存量)
+#   - form 参数模型组 (上游 0.158.0 / 0.158.1 / 0.158.2): 组合 form 模型 /
+#     可选 form 模型 / form extra allow|forbid / 空标量缺失 / OpenAPI 摊平 +
+#     requestBody required + media type 保留 (决策-106, PMF-1..PMF-14)
 #   - header 校验 422 的 loc 用 HTTP header 名 (上游 0.152.0 / PR #16538):
 #     默认 `_`->`-` (x_token -> x-token); 显式别名原样; convert_underscores=False
 #     逃生门保留字面下划线 (决策-103, HD-1..HD-5)
@@ -4371,6 +4374,99 @@ curl -s --max-time 10 "$BASE/openapi.json" -o "$TMP/oapi_pm.json"
 if "$FMTOOL" jsoncheck "$TMP/oapi_pm.json" >/dev/null 2>&1; then
     pass "PM-19 openapi.json valid JSON (fmtool jsoncheck)"
 else fail "PM-19 openapi jsoncheck" "$(head -c 200 "$TMP/oapi_pm.json")"; fi
+
+# ============================================================================
+# PMF: 决策-106 (上游 FastAPI 0.158.0 / 0.158.1 / 0.158.2) — form 参数模型组
+#   组合 form 模型 (同 body 多组各自校验/注入) / 可选 form 模型 (全缺席 ->
+#   不注入不报 missing) / form extra 策略 (ignore|allow|forbid; 未处理键 =
+#   body 里不属于该模型任何字段/别名的键).
+# ============================================================================
+FORM_CT='Content-Type: application/x-www-form-urlencoded'
+
+# PMF-1: 组合 form 模型 — 两组各自注入 (page 用组内声明默认 2).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'term=hello&limit=2' "$BASE/pm/form-allow")
+if [[ "$B" == *'"form_filters_term": "hello"'* && "$B" == *'"form_filters_page": "2"'* && "$B" == *'"form_page2_limit": "2"'* ]]; then
+    pass "PMF-1 composed form models: both groups injected independently"
+else fail "PMF-1 composed form models" "got: ${B:0:260}"; fi
+
+# PMF-2: form extra=allow — 兄弟组字段与未声明键都收入组 (form_<组>_x_<键>).
+if [[ "$B" == *'"form_filters_x_limit": "2"'* && "$B" == *'"form_page2_x_term": "hello"'* ]]; then
+    pass "PMF-2 form extra=allow collects sibling model keys"
+else fail "PMF-2 form extra=allow" "got: ${B:0:260}"; fi
+
+# PMF-3: 可选 form 模型 (0.158.2) — 组字段全缺席 -> 整组不注入.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data '' "$BASE/pm/form-optional")
+if [[ "$B" != *'"form_window_start"'* && "$B" != *'"form_label_text"'* ]]; then
+    pass "PMF-3 optional form model absent -> no injection"
+else fail "PMF-3 optional form model absent" "got: ${B:0:260}"; fi
+
+# PMF-4: 可选 form 模型 — 组内有字段在场 -> 正常校验, 缺兄弟必填 -> 422.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'start=1' "$BASE/pm/form-optional")
+if [[ "$B" == *'"loc":["body","end"]'* && "$B" == *'"type":"missing"'* ]]; then
+    pass "PMF-4 optional form model present -> missing sibling 422"
+else fail "PMF-4 optional form model partial" "got: ${B:0:260}"; fi
+
+# PMF-5: 可选 form 模型 — 另一组字段在场 -> 该组注入, 缺席组仍不注入.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'text=yo' "$BASE/pm/form-optional")
+if [[ "$B" == *'"form_label_text": "yo"'* && "$B" != *'"form_window_start"'* ]]; then
+    pass "PMF-5 optional form group isolated injection"
+else fail "PMF-5 optional form isolated" "got: ${B:0:260}"; fi
+
+# PMF-6: form extra=forbid — body 里模型外的键逐键 422 extra_forbidden.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'alpha=a&beta=b' "$BASE/pm/form-forbid")
+if [[ "$B" == *'"loc":["body","beta"]'* && "$B" == *'"type":"extra_forbidden"'* && "$B" == *'Extra inputs are not permitted'* ]]; then
+    pass "PMF-6 form extra=forbid rejects unknown body key (extra_forbidden)"
+else fail "PMF-6 form extra=forbid" "got: ${B:0:260}"; fi
+
+# PMF-7: form extra=forbid — 只有模型字段 -> 200 + 组注入.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'alpha=a' "$BASE/pm/form-forbid")
+if [[ "$B" == *'"form_strict_alpha": "a"'* ]]; then
+    pass "PMF-7 form extra=forbid accepts model fields"
+else fail "PMF-7 form extra=forbid ok path" "got: ${B:0:260}"; fi
+
+# PMF-8: 组字段类型解析失败 -> 422 loc ["body",字段] (与个体 form 字段同形).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'term=hello&page=abc&limit=2' "$BASE/pm/form-allow")
+if [[ "$B" == *'"loc":["body","page"]'* && "$B" == *'"type":"int_parsing"'* ]]; then
+    pass "PMF-8 form model field type error loc parity"
+else fail "PMF-8 form model field type error" "got: ${B:0:260}"; fi
+
+# PMF-9: 空标量 = 缺失 (上游 0.149.0 parity) — 必填组字段空串 -> 422 missing.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'term=&limit=2' "$BASE/pm/form-allow")
+if [[ "$B" == *'"loc":["body","term"]'* && "$B" == *'"type":"missing"'* ]]; then
+    pass "PMF-9 empty scalar is missing for required group field"
+else fail "PMF-9 empty scalar missing" "got: ${B:0:260}"; fi
+
+# PMF-10: 空标量 = 缺失 — 有默认的组字段空串 -> 落到声明默认.
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'term=a&page=&limit=2' "$BASE/pm/form-allow")
+if [[ "$B" == *'"form_filters_page": "2"'* ]]; then
+    pass "PMF-10 empty scalar falls back to group default"
+else fail "PMF-10 empty scalar default" "got: ${B:0:260}"; fi
+
+# PMF-11: extra 多值 -> CSV (上游 FormData getlist 的扁平化; 标量字段 last-wins).
+B=$(curl -sS --max-time 10 -X POST -H "$FORM_CT" --data 'term=a&term=b&limit=2&extra1=x&extra1=y' "$BASE/pm/form-allow")
+if [[ "$B" == *'"form_filters_term": "b"'* && "$B" == *'"form_filters_x_extra1": "x,y"'* ]]; then
+    pass "PMF-11 form scalar last-wins + extra multi-value CSV"
+else fail "PMF-11 form extra multi-value" "got: ${B:0:260}"; fi
+
+# PMF-12: OpenAPI — 组字段摊平进 components/schemas 属性表, requestBody
+# media type 保留 application/x-www-form-urlencoded, required 反映组必填性.
+curl -sS --max-time 10 "$BASE/openapi.json" -o "$TMP/oapi_pmf.json"
+OAPI_PMF=$(cat "$TMP/oapi_pmf.json")
+if [[ "$OAPI_PMF" == *'"Body_pm_form_allow_post":{"type":"object","title":"Body_pm_form_allow_post","properties":{"term":{"type":"string","title":"Term"},"page":{"type":"integer","title":"Page","default":2},"limit":{"type":"integer","title":"Limit","default":10}}}'* ]]; then
+    pass "PMF-12 openapi flattens form model fields (properties + defaults)"
+else fail "PMF-12 openapi form model schema" "missing Body_pm_form_allow_post properties"; fi
+
+# PMF-13: OpenAPI requestBody — 非可选组有无默认字段 -> required:true;
+# 全 optional 组路由 -> 无 required 键 (0.158.1 media type 保留).
+if [[ "$OAPI_PMF" == *'"requestBody":{"required":true,"content":{"application/x-www-form-urlencoded":{"schema":{"$ref":"#/components/schemas/Body_pm_form_allow_post"}}}}'* \
+   && "$OAPI_PMF" == *'"requestBody":{"content":{"application/x-www-form-urlencoded":{"schema":{"$ref":"#/components/schemas/Body_pm_form_optional_post"}}}}'* ]]; then
+    pass "PMF-13 openapi requestBody required reflects group optionality"
+else fail "PMF-13 openapi form requestBody" "required/optional media type mismatch"; fi
+
+# PMF-14: 全文档仍为合法 JSON (新增 form 模型 schema 不破坏 JSON 硬门禁).
+if "$FMTOOL" jsoncheck "$TMP/oapi_pmf.json" >/dev/null 2>&1; then
+    pass "PMF-14 openapi.json valid JSON (fmtool jsoncheck)"
+else fail "PMF-14 openapi jsoncheck" "$(head -c 200 "$TMP/oapi_pmf.json")"; fi
 
 # --- summary ---------------------------------------------------------------------
 

@@ -36,6 +36,8 @@ from params_query_extra import (parse_table, split_csv, join_values,
                                 is_list_spec, has_eq, default_part,
                                 list_default_csv, get_param_descs)
 from alias_choices import (candidates_for, pick_in_multi, first_candidate)
+# 决策-106 (上游 0.158.0/0.158.1/0.158.2): form 面参数模型组声明
+from param_models import (ParamModelGroup, parse_param_models)
 from json import json_escape
 from scalar_types import is_scalar_type, scalar_canonical, scalar_openapi_schema, parse_scalar, scalar_error_object
 
@@ -56,11 +58,34 @@ def get_form_aliases(handler: Handler) raises -> Dict[String, String]:
     return Dict[String, String]()
 
 
+def form_model_groups(handler: Handler) raises -> List[ParamModelGroup]:
+    """决策-106: `_form_models` + `_form_model_opts` 解析 (组列表)."""
+    if "_form_models" not in handler.data:
+        return List[ParamModelGroup]()
+    var opts = String("")
+    if "_form_model_opts" in handler.data:
+        opts = handler.data["_form_model_opts"]
+    return parse_param_models(handler.data["_form_models"], opts)
+
+
+def form_model_specs(handler: Handler) raises -> Dict[String, String]:
+    """决策-106: 组字段 -> 类型规格 (OpenAPI / required 判定用)."""
+    var out = Dict[String, String]()
+    var groups = form_model_groups(handler)
+    for gi in range(len(groups)):
+        var g = groups[gi].copy()
+        for f in g.field_order:
+            out[f] = g.field_specs[f]
+    return out^
+
+
 def form_has_declaration(handler: Handler) raises -> Bool:
-    """_form_fields 非空或 _form_types 非空 = 该路由声明 form body."""
+    """_form_fields / _form_types / _form_models 任一非空 = 该路由声明 form body."""
     if "_form_fields" in handler.data and handler.data["_form_fields"] != "":
         return True
     if "_form_types" in handler.data and handler.data["_form_types"] != "":
+        return True
+    if "_form_models" in handler.data and handler.data["_form_models"] != "":
         return True
     return False
 
@@ -104,6 +129,18 @@ def form_field_names_ordered(handler: Handler) raises -> List[String]:
                     seen = True
                     break
             if not seen:
+                out.append(f)
+    # 决策-106: 参数模型组字段 (声明序) 同样摊平进 form schema 属性表.
+    var groups = form_model_groups(handler)
+    for gi in range(len(groups)):
+        var g = groups[gi].copy()
+        for f in g.field_order:
+            var seen2 = False
+            for x2 in out:
+                if x2 == f:
+                    seen2 = True
+                    break
+            if not seen2:
                 out.append(f)
     return out^
 
@@ -419,6 +456,7 @@ def form_openapi_schema(handler: Handler, method: String) raises -> String:
     var descs = get_param_descs(handler)
     var out = "{\"type\":\"object\",\"title\":\"" + json_escape(name) + "\",\"properties\":{"
     var names = form_field_names_ordered(handler)
+    var mspecs = form_model_specs(handler)
     var first = True
     for i in range(len(names)):
         var n = names[i]
@@ -434,6 +472,11 @@ def form_openapi_schema(handler: Handler, method: String) raises -> String:
             if n in descs:
                 desc = descs[n]
             out = out + "\"" + json_escape(prop) + "\":" + _openapi_form_field_schema(prop, spec, desc)
+        elif n in mspecs:
+            var mdesc = ""
+            if n in descs:
+                mdesc = descs[n]
+            out = out + "\"" + json_escape(prop) + "\":" + _openapi_form_field_schema(prop, mspecs[n], mdesc)
         else:
             out = out + "\"" + json_escape(prop) + "\":{" + "\"type\":\"string\",\"title\":\"" + json_escape(_cap_name(prop)) + "\"}"
     out = out + "}}"
@@ -447,6 +490,16 @@ def form_request_body_required(handler: Handler) raises -> Bool:
     for k in t:
         if not has_eq(t[k]):
             return True
+    # 决策-106: 组字段无默认且组非 optional -> requestBody.required = true
+    # (上游 0.158.1: 组合/可选 form 模型同样参与 required 判定).
+    var groups = form_model_groups(handler)
+    for gi in range(len(groups)):
+        var g = groups[gi].copy()
+        if g.optional:
+            continue
+        for f in g.field_order:
+            if not has_eq(g.field_specs[f]):
+                return True
     return False
 
 

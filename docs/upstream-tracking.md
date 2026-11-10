@@ -10,13 +10,13 @@
 
 | 主题 | 行数 | ✅ | 🔶 | ❌ | ➖ |
 |------|------|----|----|----|----|
-| A. Form/参数模型语义 | 14 | 6 | 2 | 4 | 2 |
+| A. Form/参数模型语义 | 14 | 9 | 1 | 2 | 2 |
 | B. AliasChoices/参数元数据 | 11 | 6 | 3 | 1 | 1 |
 | C. 序列化/body/文件 | 4 | 1 | 1 | 1 | 1 |
 | D. WebSocket 安全依赖 | 1 | 0 | 0 | 1 | 0 |
 | E. OpenTelemetry | 5 | 0 | 1 | 0 | 4 |
 | F. 框架杂项 | 6 | 1 | 0 | 1 | 4 |
-| **合计** | **41** | **14** | **7** | **8** | **12** |
+| **合计** | **41** | **17** | **6** | **6** | **12** |
 
 > 注：0.142.0 有 2 条 Refactors（docs 前端），0.143.4 为可选依赖升级（httpx2），
 > 0.147.0 被 0.162.0 反转，不计入差距。功能改动合计 45 条；下表按行计 41 项
@@ -32,9 +32,9 @@
 | 0.160.0 | 每个参数模型的 extra 配置应用到兄弟字段（breaking） | ✅ | 决策-105 / ADR-0070：`_param_model_opts` / `_header_model_opts` / `_cookie_model_opts` 的 `extra=ignore\|allow\|forbid`；未处理键 = 该 location 里不属于该模型的提交键（**含兄弟模型字段**）；forbid 逐键 422 `extra_forbidden`（msg "Extra inputs are not permitted"），allow 收入组（`<face>_<组>_x_<键>`）。e2e PM-2/6/7/12/13/17 |
 | 0.159.1 | 可选 form 模型 union | ➖ | union 缺席；可选模型 = "=" 已支持（单字段级） |
 | 0.159.0 | 可选 query/header/cookie 参数模型 | ✅ | 决策-105 / ADR-0070：组属性 `optional` —— 组字段一个都不出现且无 allow/forbid 收集值 → 整组缺席（不报 missing、不注入默认）；任一字段出现 → 正常校验。非可选组**恒校验**（上游 `annotation is model` 分支）。e2e PM-3/4/5 |
-| 0.158.2 | 可选 form 模型 | 🔶 | 同上 |
-| 0.158.1 | OpenAPI 保留 form media types 修复 | ❌ | multipart OpenAPI 已有（决策-46）；urlencoded media type 保留需核对 |
-| 0.158.0 | 组合 form 模型 | ❌ | 模型组合概念缺席 |
+| 0.158.2 | 可选 form 模型（PR #16582） | ✅ | 决策-106 / ADR-0071：`_form_model_opts` 组属性 `optional` —— 组字段全缺席且无 extra 收集值 → 整组不校验/不注入/不报 missing；任一字段在场即正常校验；非可选组恒校验。e2e PMF-3/4/5 |
+| 0.158.1 | OpenAPI 保留 form media types 修复（PR #16579） | ✅ | 决策-106 / ADR-0071：form 模型路由 `requestBody.content` 保留 `application/x-www-form-urlencoded`（路由级 media type 由是否含 file 声明决定 multipart / urlencoded）；无 per-field `Form(media_type=...)`（家法无字段级 media type，ADR-0071 §5-4）。e2e PMF-13 |
+| 0.158.0 | 组合 form 模型（PR #16577） | ✅ | 决策-106 / ADR-0071：`_form_models` / `_form_model_opts` 声明 form 面多组（`;` 分组、`|` 分字段、规格同 `_form_types`）；各组独立校验并注入 `form_<组>_<字段>`；extra=allow 额外键 `form_<组>_x_<键>`；forbid 逐键 422 `extra_forbidden`。form 面 processed = 每字段**全部候选别名**（空标量直接丢弃，不进 extra）。e2e PMF-1/2/6/7/8/9/10/11/12/14 |
 | 0.157.0 | 组合 query/header/cookie 参数模型 | ✅ | 决策-105 / ADR-0070：`_param_models` / `_header_models` / `_cookie_models`（`;` 分隔组、`|` 分隔字段、规格语法同 `_param_types`）；同 location 多组各自校验、各自注入（`query_<组>_<字段>` 等）；组字段摊平进 OpenAPI parameters（required = 无默认且组非可选）。e2e PM-1/8/9/10/11/14/15/16/18/19 |
 | 0.149.0 | form 模型空标量值视为缺失（breaking） | ✅ | form_params.validate_form_collect/apply_form_extras：空串视为缺失 → 有默认用默认 / 无默认 422 missing（列表内空串保留）。e2e FM-21~25 |
 | 0.150.0 | 未选择浏览器文件输入视为缺失（breaking） | ✅ | file_params：filename=="" 且 size==0 的 part 视为缺失 — validate_file_collect 不进 occurrence、apply_file_extras 不注入 file_/form_ 键、list count/list_json 过滤该 part。e2e MP-24/25 |

@@ -56,6 +56,9 @@ from custom_serializers import register_serializer_routes
 from field_validators import register_field_validator_routes  # Decision-38/57/58/61
 from security import AuthResult, check_auth, _get_header
 from form_params import (validate_form_collect, apply_form_extras, get_form_types, get_form_aliases, lower_ascii, missing_err_json)
+# 决策-106 (上游 0.158.0/0.158.1/0.158.2): form 面参数模型组
+from form_models import (get_form_models, validate_form_model_groups,
+                         apply_form_model_extras)
 from file_form_check import validate_file_vs_form, file_part_fields
 from security_jwt import handle_oauth2_token, check_oauth2  # 决策-44: /token + _auth=oauth2
 from lifespan import run_lifespan_startup, run_lifespan_shutdown
@@ -897,6 +900,33 @@ def register_routes(mut router: Router) raises:
     pm_ck_h.set_data("_cookie_models", "sess=session:str|theme:str=light")
     pm_ck_h.set_data("_cookie_model_opts", "sess=extra=forbid")
     router.add_route("/pm/cookie", "GET", pm_ck_h)
+    # 决策-106 (上游 FastAPI 0.158.0 / 0.158.1 / 0.158.2): form 面参数模型组 —
+    # `_form_models` 声明 form body 里的"模型组" (每组 = 上游一个 BaseModel
+    # 作 Form()), `_form_model_opts` 声明 extra 策略 / 可选性; 注入键
+    # form_<组>_<字段>, extra=allow 的额外键 form_<组>_x_<键>.
+    #   /pm/form-allow: 组合 form 模型 (0.158.0) — 两组各自独立校验 +
+    #   extra=allow (兄弟组字段与未声明键都进 extra 域).
+    var pmf_allow_h = Handler(KIND_ECHO(), "pm_form_allow")
+    pmf_allow_h.set_data("message", "form model allow demo")
+    pmf_allow_h.set_data("_form_models",
+                         "filters=term:str|page:int=2;page2=limit:int=10")
+    pmf_allow_h.set_data("_form_model_opts",
+                         "filters=extra=allow;page2=extra=allow")
+    router.add_route("/pm/form-allow", "POST", pmf_allow_h)
+    #   /pm/form-optional: 可选 form 模型 (0.158.2) — 组字段全缺席 -> 整组不
+    #   注入、不报 missing; 任一字段在场 -> 正常校验 (缺必填 -> 422).
+    var pmf_opt_h = Handler(KIND_ECHO(), "pm_form_optional")
+    pmf_opt_h.set_data("message", "form model optional demo")
+    pmf_opt_h.set_data("_form_models", "window=start:str|end:str;label=text:str=hi")
+    pmf_opt_h.set_data("_form_model_opts", "window=optional;label=optional")
+    router.add_route("/pm/form-optional", "POST", pmf_opt_h)
+    #   /pm/form-forbid: form extra=forbid (0.160.0 语义落到 form 面) —
+    #   body 里不属于该模型任何字段/别名的键逐键 422 (type extra_forbidden).
+    var pmf_fb_h = Handler(KIND_ECHO(), "pm_form_forbid")
+    pmf_fb_h.set_data("message", "form model forbid demo")
+    pmf_fb_h.set_data("_form_models", "strict=alpha:str")
+    pmf_fb_h.set_data("_form_model_opts", "strict=extra=forbid")
+    router.add_route("/pm/form-forbid", "POST", pmf_fb_h)
     # 决策-45 (ADR-0020): Form 多值/alias/desc demo. _form_types 声明
     # 类型 (list 多值 / 标量默认 / float / bool); _param_descs ->
     # OpenAPI description. 必填 list 缺失 -> 422; count=0 标量默认.
@@ -2060,6 +2090,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                         var ftypes = get_form_types(route_result.handler)
                         var fal = get_form_aliases(route_result.handler)
                         var ferr = validate_form_collect(ftypes, fal, fmulti)
+                        # 决策-106: form 参数模型组 (组合/可选/extra) 校验.
+                        var fmodels = get_form_models(route_result.handler)
+                        var fmerr = validate_form_model_groups(fmodels, fal, fmulti)
                         var ft_file = get_file_types(route_result.handler)
                         var fal_file = get_file_aliases(route_result.handler)
                         # 非 multipart 且非 form CT -> mp_parts 空 = 上游「字段全缺失」(U5).
@@ -2108,6 +2141,9 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                         break
                                 if not drop:
                                     all_errs.append(fe)
+                        if not fmerr[0]:
+                            for fme in fmerr[1]:
+                                all_errs.append(fme)
                         if not ffe[0]:
                             for fe2 in ffe[1]:
                                 all_errs.append(fe2)
@@ -2183,6 +2219,8 @@ def serve_forever(router: Router, mw_chain: MiddlewareChain, mw_spec: MWSpec) ra
                                 if "_form_fields" in route_result.handler.data:
                                     ff_csv = route_result.handler.data["_form_fields"]
                                 apply_form_extras(req_params, ftypes, fal, fmulti, ff_csv)
+                                # 决策-106: form 组字段 + extra=allow 额外键注入.
+                                apply_form_model_extras(req_params, fmodels, fal, fmulti)
                                 # 决策-46: multipart 成功路径注入 —
                                 # file part -> file_ key (size = 实际字节 U1;
                                 # alias 字段按声明名 key); text part -> form_
